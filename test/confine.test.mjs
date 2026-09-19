@@ -437,6 +437,39 @@ test('a mount point a command wrote into is kept and marks the conversation untr
   fs.rmSync(path.join(home, 'config.json'));
 });
 
+test('a protected directory reclaimed before the command starts still protects it', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  // The line is built while `.agents` exists, so a single `--ro-bind-try` would
+  // be all there is — and it silently skips a missing path. Another step
+  // reclaiming the mount point before bwrap starts would then let the command
+  // write the real directory.
+  const target = path.join(dirs.workspace, '.agents');
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.mkdirSync(target);
+  const ctx = ctxFor({ CommandLine: 'true' }, { probe: () => real });
+  const line = confinedCommandLine(ctx, 'mkdir -p .agents 2>/dev/null; touch .agents/planted && echo WROTE || echo refused');
+  fs.rmSync(target, { recursive: true, force: true });
+  const res = runLine(line, dirs.env);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /refused/);
+  assert.equal(fs.existsSync(path.join(target, 'planted')), false, 'nothing reached the host');
+  fs.rmSync(target, { recursive: true, force: true });
+});
+
+test('a protected directory that exists stays readable inside the sandbox', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  // The fix must not turn an existing `.git` into an empty mount: the real
+  // directory is what the command reads.
+  const target = path.join(dirs.workspace, '.agents');
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.mkdirSync(target, { recursive: true });
+  fs.writeFileSync(path.join(target, 'rules.md'), 'agent rules\n');
+  const ctx = ctxFor({ CommandLine: 'true' }, { probe: () => real });
+  const res = runLine(confinedCommandLine(ctx, 'cat .agents/rules.md 2>&1; touch .agents/x 2>&1 | head -1'), dirs.env);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /agent rules/, 'the real directory is bound, not shadowed');
+  assert.match(res.stdout, /Read-only file system/, 'and it is still read-only');
+  fs.rmSync(target, { recursive: true, force: true });
+});
+
 test('the mount points for missing protected directories exist only while the command runs', async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });

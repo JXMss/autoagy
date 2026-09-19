@@ -117,7 +117,12 @@ export const flockPath = () => trustedBinary(FLOCK_CANDIDATES)?.file ?? null;
  * @returns {string|null}
  */
 export function workspaceLockFile(ctx) {
-  const roots = (ctx.workspaceRoots.length > 0 ? ctx.workspaceRoots : ctx.writableRoots).map(resolveReal).sort();
+  // The workspace roots, and only those: the writable-root fallback would pull
+  // in this conversation's artifact and temp directories, so two conversations
+  // in the same workspace would compute different names and never share the
+  // lock — the property the whole scheme rests on. With no workspace to name,
+  // say so and let the caller fall back rather than invent an identity.
+  const roots = (ctx.workspaceRoots.length > 0 ? ctx.workspaceRoots : [ctx.host?.cwd]).filter(Boolean).map(resolveReal).sort();
   if (roots.length === 0) return null;
   const file = path.join(ctx.autoagyHome, 'state', `ws-${crypto.createHash('sha1').update(roots.join('\n')).digest('hex').slice(0, 16)}.lock`);
   try {
@@ -306,6 +311,11 @@ export function readOnlyPaths(ctx) {
  * again afterwards. Codex stages the same placeholder for the same reason.
  * @returns {string[]} the mount points that were created
  */
+/** The protected workspace directories this command could create, given its writable roots. */
+export function writableControlPaths(ctx) {
+  return ctx.workspaceControlPaths.filter((p) => ctx.writableRoots.some((root) => isWithin(p, root)));
+}
+
 function missingControlPaths(ctx) {
   const out = [];
   for (const p of ctx.workspaceControlPaths) {
@@ -370,9 +380,21 @@ export function confinedCommandLine(ctx, commandLine, { placeholders } = {}) {
   const args = [...BASE_ARGS];
   // Later mounts win, so the read-only paths go on top of the writable roots.
   for (const root of ctx.writableRoots) args.push('--bind-try', root, root);
+  // Protected workspace directories are mounted twice, in this order. The empty
+  // read-only mount comes first; the bind of the real directory comes after and
+  // therefore wins when the directory is there. That gives the conditional the
+  // protection needs: `.git` stays readable inside the sandbox, while a
+  // directory that vanished between this line being built and bwrap starting —
+  // another step reclaiming a mount point, say — still ends up mounted instead
+  // of falling through to the writable workspace bind underneath. A single
+  // `--ro-bind-try` would silently skip a missing path, and a single `--tmpfs`
+  // would hide the real directory. Measured on bwrap 0.9.0: the source of the
+  // later bind resolves against the original root, not the fresh tmpfs.
+  for (const p of writableControlPaths(ctx)) args.push('--perms', '555', '--tmpfs', p, '--remount-ro', p);
   for (const p of readOnlyPaths(ctx)) args.push('--ro-bind-try', p, p);
+  // The mount points also have to exist on the host, so bwrap has somewhere to
+  // mount and so they can be recorded and cleaned up afterwards.
   const made = controlPlaceholders(ctx);
-  for (const p of made) args.push('--perms', '555', '--tmpfs', p, '--remount-ro', p);
   if (placeholders) placeholders.push(...made);
   // Credential stores in the home directory are hidden behind an empty
   // directory or /dev/null. Mount on real paths: the destination must not be a symlink.

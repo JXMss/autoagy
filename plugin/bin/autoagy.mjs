@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR, detectSandbox } from '../lib/context.mjs';
 import { findExecutable } from '../lib/paths.mjs';
-import { detectOwnSandbox, readSandboxCheck, removeControlPlaceholders } from '../lib/confine.mjs';
+import { detectOwnSandbox, readSandboxCheck, removeControlPlaceholders, lockQuiescent } from '../lib/confine.mjs';
 import { classify, failOpenOutput } from '../lib/policy.mjs';
 import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
@@ -194,7 +194,7 @@ const flagDescription = (state) => {
   return parts.join('; ');
 };
 
-function trust(prefix, all) {
+function trust(prefix, all, force) {
   const { autoagyHome: home } = managementContext();
   const flagged = (state) => isUntrusted(state) || state.backgroundSuspected === true;
   const states = listStates(home).filter(({ state }) => flagged(state));
@@ -228,6 +228,15 @@ function trust(prefix, all) {
   const shared = [...chosenPaths].filter((p) => others.has(p));
 
   for (const { state } of chosen) {
+    // "Nothing is running" is this command's whole premise, and it is now a
+    // question the lock can answer — so ask it rather than take the word for it.
+    const held = state.pendingLock ? lockQuiescent(null, { lockFile: state.pendingLock }) : null;
+    if (held === false && !force) {
+      console.log(`Kept: ${state.conversationId}`);
+      console.log(`  ! a sandboxed command is still running against ${state.pendingLock};`);
+      console.log('    releasing the mount points now would take them out from under it. Re-run with --force if you know better.');
+      continue;
+    }
     console.log(`Trusted again: ${state.conversationId}`);
     console.log(`  was flagged for ${flagDescription(state)}`);
     // The mount points are released here rather than at the conversation's next
@@ -243,9 +252,9 @@ function trust(prefix, all) {
     const { removed, dirty } = removeControlPlaceholders(paths);
     if (removed.length) console.log(`  released ${removed.length} read-only mount point(s)`);
     for (const p of dirty) console.log(`  ! kept ${p}: it has contents, so something wrote into it`);
-    for (const p of paths.filter((x) => others.has(x))) {
-      console.log(`  ! kept ${p}: conversation ${others.get(p)} also has a mount point there`);
-    }
+  }
+  for (const p of shared) {
+    console.log(`  ! kept ${p}: conversation ${others.get(p)} also has a mount point there`);
   }
   if (shared.length > 0) {
     console.log('Some mount points are shared with another conversation, which may still have a command running against');
@@ -491,7 +500,8 @@ Usage:
   autoagy log [-n 20]                recent decisions
   autoagy denials                    recent auto-review denials
   autoagy approve <id>               approve one retry of a denied action
-  autoagy trust [<conversation>] [--all]   trust a conversation's paths again
+  autoagy trust [<conversation>] [--all] [--force]
+                                     trust a conversation's paths again
   autoagy mode <auto|ask|off>        switch mode
   autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only] [--show-prompt]
   autoagy setup [--dry-run] [--no-settings]
@@ -513,7 +523,7 @@ async function main() {
     case 'approve':
       return approve(flags._[0]);
     case 'trust':
-      return trust(flags._[0], Boolean(flags.all));
+      return trust(flags._[0], Boolean(flags.all), Boolean(flags.force));
     case 'mode':
       return setMode(flags._[0]);
     case 'review':

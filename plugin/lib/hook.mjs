@@ -12,7 +12,7 @@ import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext, HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
-import { confinedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent } from './confine.mjs';
+import { confinedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
 import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted } from './state.mjs';
@@ -110,7 +110,15 @@ export function withOwnSandbox(output, ctx) {
       // fail outright, which would break a command that was already approved.
       // Whatever is left over is swept when the turn ends.
       s.pendingConfined[ctx.stepIdx] = commandHash(commandLine);
-      if (placeholders.length) s.pendingPlaceholders[ctx.stepIdx] = placeholders;
+      if (placeholders.length) {
+        s.pendingPlaceholders[ctx.stepIdx] = placeholders;
+        // Recorded rather than recomputed: if the workspace roots this hook
+        // sees differ between building the command and reclaiming it, the
+        // reclaim would probe a different lock file, find it free, and take a
+        // mount point out from under a command — the one direction that must
+        // not be wrong.
+        s.pendingLock = workspaceLockFile(ctx);
+      }
       const steps = Object.keys(s.pendingConfined);
       for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_CONFINED))) delete s.pendingConfined[step];
     });
@@ -192,13 +200,23 @@ function checkConfinedRun(ctx, state = {}) {
   const home = ctx.autoagyHome;
   // Only ask the lock when there is something to reclaim: it costs a process.
   const reclaiming = (state.pendingPlaceholders?.[ctx.stepIdx]?.length ?? 0) > 0;
-  const keepPlaceholders = reclaiming && !reclaimAllowed(state, lockQuiescent(ctx));
+  const quiet = reclaiming ? lockQuiescent(ctx, { lockFile: state.pendingLock ?? null }) : null;
+  const keepPlaceholders = reclaiming && !reclaimAllowed(state, quiet);
   const recorded = updateState(home, ctx.conversationId, (s) => {
     const entry = s.pendingConfined[ctx.stepIdx] ? { hash: s.pendingConfined[ctx.stepIdx], placeholders: s.pendingPlaceholders[ctx.stepIdx] ?? [] } : null;
     delete s.pendingConfined[ctx.stepIdx];
     if (!keepPlaceholders) delete s.pendingPlaceholders[ctx.stepIdx];
     return entry;
   });
+  if (reclaiming && !keepPlaceholders) {
+    // The mount points are gone, so the weaker signal that produced them is
+    // stale — leaving it set would have status report a conversation as
+    // holding mount points it no longer has.
+    updateState(home, ctx.conversationId, (s) => {
+      s.backgroundSuspected = false;
+      s.pendingLock = null;
+    });
+  }
   if (!keepPlaceholders && recorded) removePlaceholders(home, ctx.conversationId, recorded.placeholders, { attribute: true });
   if (!recorded) return {};
   let problem = null;
@@ -491,12 +509,17 @@ function sweepPlaceholders(home, conversationId, state, ctx) {
   // See reclaimAllowed: only positive evidence that nothing is running. The
   // lock is released by the command itself when bwrap exits — including a
   // backgrounded one — so this is the first moment it is safe.
-  if (!reclaimAllowed(state, ctx ? lockQuiescent(ctx) : null)) return;
+  if (!reclaimAllowed(state, ctx ? lockQuiescent(ctx, { lockFile: state.pendingLock ?? null }) : null)) return;
   const pending = Object.values(state.pendingPlaceholders ?? {});
   if (pending.length === 0) return;
   const paths = pending.flatMap((list) => list ?? []);
   updateState(home, conversationId, (s) => {
     s.pendingPlaceholders = {};
+    s.pendingLock = null;
+    // The mount points are gone, so the fallback signal that produced them is
+    // stale; leaving it set would keep status reporting a conversation as
+    // holding mount points it no longer has.
+    s.backgroundSuspected = false;
   });
   removePlaceholders(home, conversationId, paths);
 }

@@ -69,7 +69,7 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 | `autoagy log [-n 20]` | 最近的决策（被审核的操作、结论、风险、耗时） |
 | `autoagy denials` | 最近被拒绝的操作及理由 |
 | `autoagy approve <id>` | 对某次拒绝放行**一次重试**（审核模型会看到你的批准；critical 风险仍会拒绝） |
-| `autoagy trust [<会话>] [--all]` | 解除会话的标记（见下文「会话信任」）并释放为它保留的只读挂载点。不带参数时只列出被标记的会话；确认磁盘现状、并且确认没有后台命令还在跑之后再执行 |
+| `autoagy trust [<会话>] [--all] [--force]` | 解除会话的标记（见下文「会话信任」）并释放为它保留的只读挂载点。不带参数时只列出被标记的会话。执行前它自己会先查一次工作区锁：还有命令在跑就拒绝，`--force` 才强行释放 |
 | `autoagy mode auto\|ask\|off` | `auto`=审核模型裁决；`ask`=有风险的操作弹窗问你（相当于 Codex “Ask for approval”）；`off`=不审核；上述授权覆盖的操作（绕过沙箱的命令、MCP、浏览器操作）改为弹窗问你，其余交给 Antigravity 自己的权限流程。`off` 下弹窗在 `--dangerously-skip-permissions` 里会被自动同意，所以那个模式下改为直接拒绝；不可信会话的编辑和读取也照常弹窗 |
 | `autoagy review --tool run_command --args '{"CommandLine":"...","BypassSandbox":true}'` | 不启动 agent，直接测试某个操作会被怎么判 |
 | `autoagy setup` / `autoagy teardown` | 单独执行/撤销设置改动 |
@@ -88,13 +88,15 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 - 无网络；`socket`/`socketpair` 只允许 `AF_UNIX`，建立和使用的调用（`connect`、`bind`、`listen`、`sendto`……）一律以 `EPERM` 失败，另外禁掉 `ptrace`、`process_vm_*`、`io_uring_*`（`--unshare-net` 只挡 IP 网络，挡不住文件系统上的 Unix socket）；
 - 环境变量从白名单重建（`--clearenv` + `--setenv`）：`PATH`、`HOME`、`USER`、`LOGNAME`、`SHELL`、`TERM`、`TMPDIR`、`TZ`、`PWD`、`LANG` 和 `LC_*`，值原样传递。hook 继承的是 agy 的环境，里面通常有你 export 的 API key；不清理的话，沙箱里一条 `printenv` 就能读到它，而且这条命令是免审的。需要额外变量时用 `ownSandboxEnvPassThrough`（见下表）。
 
-  注意两点。一是这些变量（包括 `PATH` 和 `HOME`）的值会逐字写进改写后的命令行（`--setenv NAME VALUE`），而改写后的参数是 agent 能看到的内容，所以**白名单和 `ownSandboxEnvPassThrough` 里都不要放密钥**。二是 autoagy **不会**过滤 `PATH`：沙箱内工作区是可写且可执行的，命令本来就能按路径运行工作区里的任何文件，过滤 `PATH` 买不到任何隔离，只会让 `.venv/bin`、`node_modules/.bin` 里的工具找不到或用错解释器。真正危险的是**沙箱外**的命令通过工作区里的 `PATH` 目录解析到被改过的可执行文件，那条路目前**没有处理**（见「已知限制」）。
+  注意两点。一是这些变量（包括 `PATH` 和 `HOME`）的值会逐字写进改写后的命令行（`--setenv NAME VALUE`），而改写后的参数是 agent 能看到的内容，所以**白名单和 `ownSandboxEnvPassThrough` 里都不要放密钥**。二是 autoagy **不会**过滤 `PATH`：沙箱内工作区是可写且可执行的，命令本来就能按路径运行工作区里的任何文件，过滤 `PATH` 买不到任何隔离，只会让 `.venv/bin`、`node_modules/.bin` 里的工具找不到或用错解释器。真正危险的是**沙箱外**的命令通过工作区里的 `PATH` 目录解析到被改过的可执行文件——那条路会送审（见「已知限制」里的 `command-from-writable-root`）。
 
 工作区里还不存在的受保护目录（比如不是 git 仓库时的 `.git`）：`--ro-bind` 对不存在的路径会直接跳过，而工作区是可写的，沙箱里的命令本来可以把它建出来，等它被别的工具在沙箱外加载。所以这类路径会被就地挂一个只读空 tmpfs。副作用：命令执行的那一瞬间，工作区里会短暂出现一个空的 `.agents` 之类的目录（Codex 用同样的做法）。
 
+每个受保护目录会被**挂两次**：先一个空的只读挂载，再一个指向真实目录的只读绑定（后挂的赢）。目录存在时按真实内容只读绑定，所以沙箱里 `.git` 照样能读；目录不存在（或在这条命令启动前被回收掉了）时那个绑定被跳过，空挂载留下。这一点是必须的——只挂一个绑定时，目录一旦在「构造命令行」和「bwrap 启动」之间消失，绑定会静默跳过，命令就会写进真实的受保护目录（实测过）。
+
 挂载点什么时候能回收，取决于**还有没有命令在跑**。autoagy 从不自己启动 bwrap（执行改写后命令行的是 agy），拿不到进程号，所以它让每条被改写的命令行自己持有证据：命令行最前面加一层 `flock -s <锁文件> <bwrap> …`，共享锁从 bwrap 启动一直持有到它退出，后台命令也一样。要回收挂载点时，autoagy 去抢排他锁——抢得到说明没有命令在跑，抢不到就保留。锁文件放在 `~/.gemini/autoagy/state/` 下（沙箱内是只读挂载，命令删不掉也重建不了，这是这个办法成立的前提）。
 
-在拿不到可信 `flock` 的主机上退回一个弱信号（`IsDaemon: true`、`Blocking: false`、正的 `WaitMsBeforeAsync`，或出现过终端类工具）：一旦出现，本会话的挂载点就保留到 `autoagy trust` 为止。开新会话**不会**释放旧的——挂载点按会话记录，而删掉另一个会话的挂载点正是上面那条要避免的事。保留的代价只是工作区里多出一个空的 `.agents` 之类的目录；保护本身不丢（目录存在就会被只读绑定），`autoagy status` 会列出这些会话。
+在拿不到可信 `flock` 的主机上退回一个弱信号（`IsDaemon: true`、`Blocking: false`、正的 `WaitMsBeforeAsync`，或出现过终端类工具）：一旦出现，本会话的挂载点就保留到 `autoagy trust` 为止。开新会话**不会**释放旧的——挂载点按会话记录，而删掉另一个会话的挂载点正是上面那条要避免的事。保留的代价只是工作区里多出一个空的 `.agents` 之类的目录；保护本身不丢，`autoagy status` 会列出这些会话。
 
 保留是刻意的，因为**提前回收会真的拆掉保护**：bwrap 把只读 tmpfs 挂在子进程自己的 mount namespace 里、挂在一个目录项上，而 `rmdir` 会把宿主上那个目录项摘掉——子进程里这条路径随之不再解析，而工作区根仍是可写的 bind，于是**还在运行的命令会重建这个目录，直接写到宿主上**。实测：不回收时 `mkdir .agents/hooks/pre-commit` 得到 `Read-only file system`；在命令还在跑时回收，同一条命令就在宿主上把文件建出来了。这正是占位机制要拦的那件事。
 

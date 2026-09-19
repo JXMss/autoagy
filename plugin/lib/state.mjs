@@ -31,6 +31,9 @@ function freshState(conversationId) {
     pendingConfined: {},
     // stepIdx -> mount points created for protected directories that were missing, removed after the command.
     pendingPlaceholders: {},
+    // The lock file those mount points were protected under, recorded when the
+    // command was built so a later reclamation probes the same one.
+    pendingLock: null,
     // stepIdx -> [{ abs, real }] a file edit targets, resolved when it was approved.
     pendingEdits: {},
     // Set when supervision saw the environment do something it did not approve:
