@@ -92,10 +92,9 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 
 工作区里还不存在的受保护目录（比如不是 git 仓库时的 `.git`）：`--ro-bind` 对不存在的路径会直接跳过，而工作区是可写的，沙箱里的命令本来可以把它建出来，等它被别的工具在沙箱外加载。所以这类路径会被就地挂一个只读空 tmpfs。副作用：命令执行的那一瞬间，工作区里会短暂出现一个空的 `.agents` 之类的目录（Codex 用同样的做法）。
 
-挂载点什么时候能回收，取决于**还有没有命令在跑**，而这一点 autoagy 目前判断不了：它从不自己启动 bwrap（执行改写后命令行的是 agy），拿不到进程号，也没有别的存活信号。所以：
+挂载点什么时候能回收，取决于**还有没有命令在跑**。autoagy 从不自己启动 bwrap（执行改写后命令行的是 agy），拿不到进程号，所以它让每条被改写的命令行自己持有证据：命令行最前面加一层 `flock -s <锁文件> <bwrap> …`，共享锁从 bwrap 启动一直持有到它退出，后台命令也一样。要回收挂载点时，autoagy 去抢排他锁——抢得到说明没有命令在跑，抢不到就保留。锁文件放在 `~/.gemini/autoagy/state/` 下（沙箱内是只读挂载，命令删不掉也重建不了，这是这个办法成立的前提）。
 
-- 命令是同步的（工具调用返回时它已经结束）：PostToolUse 就把挂载点删掉；
-- **agy 可能让命令后台继续跑并提前返回**（`run_command` 带 `IsDaemon: true`、`Blocking: false` 或正的 `WaitMsBeforeAsync`，或 agent 用过 `command_status`/`send_command_input`/`read_terminal`）：这个信号一旦出现，本会话的挂载点就一直保留，不再自动回收。释放它用 `autoagy trust`（那一刻就是你确认没有命令在跑）。开新会话**不会**释放旧的——占位是按会话记录的，而删掉另一个会话的挂载点正是上面那条要避免的事。留下的代价只是工作区里多出一个空的 `.agents` 之类的目录；保护本身不丢（目录存在就会被只读绑定），`autoagy status` 会列出这些会话。
+在拿不到可信 `flock` 的主机上退回一个弱信号（`IsDaemon: true`、`Blocking: false`、正的 `WaitMsBeforeAsync`，或出现过终端类工具）：一旦出现，本会话的挂载点就保留到 `autoagy trust` 为止。开新会话**不会**释放旧的——挂载点按会话记录，而删掉另一个会话的挂载点正是上面那条要避免的事。保留的代价只是工作区里多出一个空的 `.agents` 之类的目录；保护本身不丢（目录存在就会被只读绑定），`autoagy status` 会列出这些会话。
 
 保留是刻意的，因为**提前回收会真的拆掉保护**：bwrap 把只读 tmpfs 挂在子进程自己的 mount namespace 里、挂在一个目录项上，而 `rmdir` 会把宿主上那个目录项摘掉——子进程里这条路径随之不再解析，而工作区根仍是可写的 bind，于是**还在运行的命令会重建这个目录，直接写到宿主上**。实测：不回收时 `mkdir .agents/hooks/pre-commit` 得到 `Read-only file system`；在命令还在跑时回收，同一条命令就在宿主上把文件建出来了。这正是占位机制要拦的那件事。
 
@@ -204,7 +203,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 
 - **没有启用 autoagy 自己的沙箱时**（macOS、Windows、没装 bubblewrap、IDE 没设 `ownSandbox: "on"`），沙箱内的命令仍然能写 `.git`（植入 git hook）和对话日志（伪造审核模型看到的用户消息）。autoagy 能做的只有把命令里字面出现 `.system_generated`、autoagy 自身路径或凭据位置的命令送审——这是原始命令行上的子串匹配，变量拼接或 base64 之类可以绕过，而且事后没有任何完整性校验能发现日志被改过。**这不是「和 Linux 上差不多」，而是明显更弱**，也不能靠配置补上。审核模型现在会收到一行明确的提示，知道在此配置下不能把 transcript 里的用户发言当作已确立的授权。
 - **Windows 上从设置文件推断沙箱状态已被停用**：Windows 读不到 agy 进程的参数，`--dangerously-skip-permissions` 无法识别，而 `autoagy setup` 写进设置文件的那两个值正是检查所依据的。所以那里不再声称「沙箱有效」，而是按无沙箱处理——后果是不带沙箱的普通命令（`npm test`、`ls`、`curl`）从免审变成送审。同样因为读不到启动参数，Windows 上**弹窗一律改为拒绝**：那个标志无法排除，弹窗可能被静默自动同意，宁可不问。
-- **沙箱外的命令仍会通过工作区的 `PATH` 目录解析可执行文件。** autoagy 自己的沙箱不跑的时候（macOS、Windows、没装 bwrap），命令用的是继承来的 `PATH`，很多开发环境会包含 `.venv/bin`、`node_modules/.bin` 这类目录——都在可写根内，改动免审。于是一条被当作「常规操作」批准的已知只读命令（`cat`、`git status`……）可能实际执行的是 agent 刚写进去的同名文件。这条链**目前没有处理**：已知只读的判断只看 basename，不看它解析到哪里（`command-safety.mjs` 的 `isSafeArgv`），所以它根本进不了送审。修法要在「无沙箱」这条路径上要求已知只读命令解析到可写根之外，或改为送审。
+- **沙箱外的已知只读命令要看它解析到哪里。** autoagy 自己的沙箱不跑的时候（macOS、Windows、没装 bwrap），命令用的是继承来的 `PATH`，很多开发环境会包含 `.venv/bin`、`node_modules/.bin` 这类目录——都在可写根内，改动免审。已知只读的白名单只比较 basename，所以 `ls` 会被当作安全的，哪怕实际执行的是 agent 刚写进 `node_modules/.bin` 的那个 `ls`。现在这条链会被送审：无沙箱时，如果命令解析到的文件落在可写根内，就不放行（`command-from-writable-root`）。代价是这类环境里从 `.venv/bin` 调工具会多一次审核——这是刻意的，因为那正是「先写后执行」成立的地方。autoagy 自己的沙箱内不问这个问题：沙箱已经限定了任何二进制能碰到什么。
 - Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问（这是为保住沙箱网络隔离做的取舍）。
 - hook 负载里没有可信的用户消息（`lastUserInput` 等字段存在但未填），autoagy 只能从 transcript 里识别用户说的话，而 transcript 的完整性依赖上面的沙箱。
 - 审核模型没有工具（Codex 的 guardian 可以做只读检查）；autoagy 用确定性的目标检查部分弥补。

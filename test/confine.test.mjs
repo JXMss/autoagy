@@ -2,8 +2,8 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { detectOwnSandbox, confinedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv } from '../plugin/lib/confine.mjs';
+import { spawnSync, spawn } from 'node:child_process';
+import { detectOwnSandbox, confinedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath } from '../plugin/lib/confine.mjs';
 import { seccompProgram, seccompSupported } from '../plugin/lib/seccomp.mjs';
 import { HookContext, PROTECTED_WORKSPACE_DIRS } from '../plugin/lib/context.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
@@ -78,7 +78,12 @@ test('the confined command mounts read-only paths over writable roots and keeps 
   assert.equal(parsed.error, null);
   const argv = parsed.commands[0].argv;
   assert.equal(argv[0], 'exec');
-  assert.equal(argv[1], '/usr/bin/bwrap');
+  // The command holds a shared lock on the workspace while bwrap runs, so a
+  // reclamation knows whether anything is still alive. See lockQuiescent.
+  assert.equal(argv[1], '/usr/bin/flock');
+  assert.equal(argv[2], '-s');
+  assert.match(argv[3], /\/state\/ws-[0-9a-f]{16}\.lock$/);
+  assert.equal(argv[4], '/usr/bin/bwrap');
   assert.ok(argv.includes('--unshare-net'));
   assert.deepEqual(argv.slice(-2), ['-c', original], 'the original command is passed through byte for byte');
   const mountIndex = (flag, p) => argv.findIndex((a, i) => a === flag && argv[i + 1] === p && argv[i + 2] === p);
@@ -109,7 +114,7 @@ test('allowed sandboxed commands are rewritten into the own sandbox; escalations
   const sandboxed = await run({ CommandLine: 'npm test' });
   assert.equal(sandboxed.decision, 'allow');
   assert.equal(sandboxed.overwrite.BypassSandbox, true);
-  assert.match(sandboxed.overwrite.CommandLine, /^exec '\/usr\/bin\/bwrap' /);
+  assert.match(sandboxed.overwrite.CommandLine, /^exec '\/usr\/bin\/flock' -s '\S+ws-[0-9a-f]{16}\.lock' '\/usr\/bin\/bwrap' /);
   // Reviewed inside the sandbox (forced rm), approved, and still confined.
   const reviewed = await run({ CommandLine: 'rm -rf build' });
   assert.equal(reviewed.decision, 'allow');
@@ -320,71 +325,91 @@ test('a sandboxed command does not inherit the hook environment', { skip: real.o
   assert.equal(fs.existsSync(out), true);
 });
 
-test('a backgrounded command keeps its mount point, and the sweep leaves it alone', async () => {
+/**
+ * Starts a process that holds the workspace's shared lock, as a live command
+ * would. Detached, so it can be killed as a group: `flock -c` runs the command
+ * as a child that inherits the locked descriptor, and killing only `flock`
+ * would leave the lock held by the grandchild.
+ */
+function holdLock(lock) {
+  return spawn(flockPath(), ['-s', lock, '-c', 'sleep 30'], { stdio: 'ignore', detached: true });
+}
+
+/** Waits until the workspace lock reports the given state, or gives up. */
+async function untilQuiescent(probe, want, ms = 3000) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    if (probe() === want) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+test('mount points are reclaimed only once no sandboxed command is running', { skip: flockPath() ? false : 'no trusted flock on this host' }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
-  // Its own conversation: backgroundSuspected is per-conversation state and
-  // would otherwise leak into the test above.
+  // Its own conversation: the state below is per-conversation and must not leak.
   const bg = { conversationId: '99999999-0000-4000-8000-ba6c6700d001', stepIdx: 40 };
   const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
   const target = path.join(dirs.workspace, '.agents');
   fs.rmSync(target, { recursive: true, force: true });
+  const probe = () => lockQuiescent(ctxFor({ CommandLine: 'ls' }));
+  const lock = workspaceLockFile(ctxFor({ CommandLine: 'ls' }));
 
-  const started = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'npm run dev', WaitMsBeforeAsync: 5000 }, bg), opts);
-  // Still auto-allowed, and correctly so: the very rewrite that approves it
-  // creates the mount point for the missing directory, so the directory is
-  // never actually unprotected and there is nothing for a reviewer to weigh.
+  // IsDaemon is how agy marks a command expected to run indefinitely, and its
+  // own tool description says not to combine it with WaitMsBeforeAsync — so a
+  // dev server is exactly the case a wait-value check would miss.
+  const started = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'npm run dev', IsDaemon: true }, bg), opts);
   assert.equal(started.decision, 'allow');
   assert.equal(fs.existsSync(target), true, 'created for the command');
 
-  // A later step must not reclaim it: agy can leave the command running, so the
-  // step it was recorded under is no evidence that it has finished.
-  await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'ls' }, { ...bg, stepIdx: 41 }), opts);
-  assert.equal(fs.existsSync(target), true, 'survives a later step');
-
-  // Nor is the tool call returning.
-  assert.deepEqual(handlePostToolUse(payloadFor(dirs, 'run_command', started.overwrite, bg), opts), {});
-  assert.equal(fs.existsSync(target), true, 'survives PostToolUse');
-
-  // Nor is reaching a point where the agent loop pauses: PostInvocation fires
-  // after model invocations, not at the end of a turn, and a dev server keeps
-  // running across both. Removing the mount point now would make the path stop
-  // resolving inside the sandbox, and the running command would recreate the
-  // directory through the writable workspace bind — on the host.
+  const holder = holdLock(lock);
+  try {
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(probe(), false, 'the lock sees a command running');
+    // Neither the tool call returning nor reaching PostInvocation is evidence
+    // that it finished — the lock is, and it is still held.
+    assert.deepEqual(handlePostToolUse(payloadFor(dirs, 'run_command', started.overwrite, bg), opts), {});
+    assert.equal(fs.existsSync(target), true, 'kept while a command runs');
+    handlePostInvocation({ conversationId: bg.conversationId }, opts);
+    assert.equal(fs.existsSync(target), true, 'still kept at PostInvocation');
+  } finally {
+    try {
+      process.kill(-holder.pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+  assert.equal(await untilQuiescent(probe, true), true, 'the lock is free again');
   handlePostInvocation({ conversationId: bg.conversationId }, opts);
-  assert.equal(fs.existsSync(target), true, 'kept while a command may still be running');
-
-  // Releasing it is the user's call, once they know nothing is running.
-  updateState(home, bg.conversationId, (s) => {
-    s.backgroundSuspected = false;
-  });
-  handlePostInvocation({ conversationId: bg.conversationId }, opts);
-  assert.equal(fs.existsSync(target), false, 'swept once the flag is released');
+  assert.equal(fs.existsSync(target), false, 'reclaimed once nothing is running');
   fs.rmSync(path.join(home, 'config.json'));
 });
 
-test('a daemon command counts as possibly-still-running even without WaitMsBeforeAsync', async () => {
-  // agy's run_command schema marks a long-running command with IsDaemon, and its
-  // tool description says not to combine that with WaitMsBeforeAsync — so a dev
-  // server arrives with the wait value absent. Watching only that value would
-  // reclaim the mount point out from under it.
+test('a daemon command is noted as possibly still running even without WaitMsBeforeAsync', async () => {
+  // The lock is the precise signal; this flag is what remains on a host with no
+  // trusted flock, so it still has to notice the documented daemon case.
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
   const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
-  for (const [n, args] of [[1, { CommandLine: 'npm run dev', IsDaemon: true }], [2, { CommandLine: 'npm test', Blocking: false }]]) {
+  const cases = [
+    [1, { CommandLine: 'npm run dev', IsDaemon: true }],
+    [2, { CommandLine: 'npm test', Blocking: false }],
+    [3, { CommandLine: 'npm test', WaitMsBeforeAsync: 5000 }],
+  ];
+  for (const [n, args] of cases) {
     const conversationId = `99999999-0000-4000-8000-daem0n00000${n}`;
-    const target = path.join(dirs.workspace, '.agents');
-    fs.rmSync(target, { recursive: true, force: true });
     const out = await handlePreToolUse(payloadFor(dirs, 'run_command', args, { conversationId, stepIdx: 60 + n }), opts);
     assert.equal(out.decision, 'allow', args.CommandLine);
-    assert.equal(fs.existsSync(target), true, 'created for the command');
-    handlePostInvocation({ conversationId }, opts);
-    assert.equal(fs.existsSync(target), true, `${args.CommandLine} keeps its mount point`);
-    assert.equal(readState(home, conversationId).backgroundSuspected, true);
-    fs.rmSync(target, { recursive: true, force: true });
+    assert.equal(readState(home, conversationId).backgroundSuspected, true, `${args.CommandLine} ${JSON.stringify(args)}`);
   }
+  // WaitMsBeforeAsync: 0 is not a signal — agy's own examples send it for a
+  // plain terminating run.
+  const plain = '99999999-0000-4000-8000-daem0n000009';
+  await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'npm test', WaitMsBeforeAsync: 0 }, { conversationId: plain, stepIdx: 70 }), opts);
+  assert.equal(readState(home, plain).backgroundSuspected, false);
   fs.rmSync(path.join(home, 'config.json'));
 });
 

@@ -24,6 +24,7 @@ import { seccompProgramFile, seccompSupported } from './seccomp.mjs';
 // be a script the agent planted in a directory it can write.
 const BWRAP_CANDIDATES = ['/usr/bin/bwrap', '/usr/local/bin/bwrap', '/bin/bwrap'];
 const SHELL_CANDIDATES = ['/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh'];
+const FLOCK_CANDIDATES = ['/usr/bin/flock', '/bin/flock', '/usr/local/bin/flock'];
 const PROBE_TTL_MS = 24 * 3600 * 1000;
 
 // No network, a private /proc, /dev and IPC namespace, and nothing outlives the
@@ -96,6 +97,55 @@ function trustedBinary(candidates) {
 }
 
 const shellPath = () => trustedBinary(SHELL_CANDIDATES)?.file ?? '/bin/sh';
+
+/** `flock`, when a root-owned one exists — autoagy never looks it up in PATH. */
+export const flockPath = () => trustedBinary(FLOCK_CANDIDATES)?.file ?? null;
+
+/**
+ * The lock file that records whether any of a workspace's sandboxed commands is
+ * still running.
+ *
+ * autoagy never starts bwrap, so it holds no pid and cannot ask the kernel which
+ * commands are alive. What it can do is have every rewritten command line hold a
+ * shared lock for as long as bwrap runs, and take the exclusive lock itself when
+ * it wants to know that nothing is running. The lock lives under autoagy's own
+ * home, which the sandbox mounts read-only: a lock file inside a writable root
+ * could be unlinked and recreated by the command, and the probe would then
+ * report "idle" while a command was still running — the one direction that must
+ * not be wrong.
+ *
+ * @returns {string|null}
+ */
+export function workspaceLockFile(ctx) {
+  const roots = (ctx.workspaceRoots.length > 0 ? ctx.workspaceRoots : ctx.writableRoots).map(resolveReal).sort();
+  if (roots.length === 0) return null;
+  const file = path.join(ctx.autoagyHome, 'state', `ws-${crypto.createHash('sha1').update(roots.join('\n')).digest('hex').slice(0, 16)}.lock`);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // flock needs the file to exist; opening it read-only in the sandbox is
+    // enough for both the shared and the exclusive lock.
+    fs.closeSync(fs.openSync(file, 'a'));
+  } catch {
+    return null;
+  }
+  return file;
+}
+
+/**
+ * Whether no sandboxed command is currently running, from the lock that every
+ * rewritten command line holds while bwrap runs.
+ *
+ * @returns {boolean|null} true when nothing holds it, false when something does,
+ *   null when this host cannot tell (no trusted `flock`, or no lock file) —
+ *   callers must then fall back to guessing rather than assume it is idle.
+ */
+export function lockQuiescent(ctx, { flock = flockPath(), lockFile = null } = {}) {
+  const file = lockFile ?? workspaceLockFile(ctx);
+  if (!flock || !file) return null;
+  const res = spawnSync(flock, ['-n', '-x', file, '-c', 'true'], { encoding: 'utf8', timeout: 5000 });
+  if (res.error || res.status === null) return null;
+  return res.status === 0;
+}
 
 /**
  * Whether bubblewrap can create autoagy's sandbox here (it cannot where
@@ -349,5 +399,12 @@ export function confinedCommandLine(ctx, commandLine, { placeholders } = {}) {
   // The filter is handed to bwrap as an inherited descriptor, opened by the
   // shell that execs it; autoagy's own directory is read-only in the sandbox, so
   // the file it points at cannot be swapped while the command runs.
-  return `exec ${call.map(quote).join(' ')} ${SECCOMP_FD}<${quote(filter)}`;
+  const line = `exec ${call.map(quote).join(' ')} ${SECCOMP_FD}<${quote(filter)}`;
+  // Hold a shared lock for as long as bwrap runs, so `lockQuiescent` can tell
+  // whether any command is still alive. `flock` execs bwrap as its child and
+  // waits, and passes the inherited seccomp descriptor through untouched.
+  const flock = flockPath();
+  const lockFile = flock ? workspaceLockFile(ctx) : null;
+  if (!flock || !lockFile) return line;
+  return `exec ${quote(flock)} -s ${quote(lockFile)} ${line.slice('exec '.length)}`;
 }

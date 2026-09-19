@@ -196,6 +196,43 @@ test('a missing protected directory does not by itself send a sandboxed command 
   }
 });
 
+test('without a sandbox, a known-safe command that resolves into a writable root is reviewed', () => {
+  const bin = path.join(dirs.workspace, 'node_modules', '.bin');
+  fs.rmSync(bin, { recursive: true, force: true });
+  fs.mkdirSync(bin, { recursive: true });
+  const shadow = (name) => {
+    const file = path.join(bin, name);
+    fs.writeFileSync(file, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(file, 0o755);
+    return file;
+  };
+  // `sandbox: "off"` models the hosts where nothing confines the command — the
+  // macOS/Windows/no-bwrap case, and `--dangerously-skip-permissions`.
+  const bare = { config: configWith({ sandbox: 'off' }), env: { ...dirs.env, PATH: `${bin}${path.delimiter}${dirs.env.PATH}` } };
+  try {
+    // Known-safe, and it resolves to the real system binary.
+    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls -la' }, bare)).category, 'known-safe-command');
+    // The same name, now shadowed by a file the agent can write.
+    shadow('ls');
+    const verdict = classify(contextFor(dirs, 'run_command', { CommandLine: 'ls -la' }, bare));
+    assert.equal(verdict.category, 'command-from-writable-root');
+    assert.match(verdict.reason, /node_modules\/\.bin\/ls/);
+    // A path form counts too: the allowlist compares the basename, so `./ls`
+    // and `/abs/path/ls` are both judged as "ls" and then resolved here.
+    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: './node_modules/.bin/ls' }, bare)).category, 'command-from-writable-root');
+    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: `${bin}/ls` }, bare)).category, 'command-from-writable-root');
+    // A name that is not on the allowlist never reaches this check: it was
+    // already reviewed for not being known-safe.
+    shadow('mytool');
+    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: './node_modules/.bin/mytool' }, bare)).category, 'unsandboxed-command');
+    // Inside autoagy's sandbox this is not asked: the sandbox bounds whatever runs.
+    const boxed = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe, env: bare.env };
+    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls -la' }, boxed)).verdict, 'allow');
+  } finally {
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test('relocating HOME or starting another agy needs review', () => {
   const home = 'HOME=/tmp/elsewhere ls';
   const agy = './agy -c';

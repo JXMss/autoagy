@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, executableName } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
-import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, expandHome } from './paths.mjs';
+import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, expandHome, findExecutable } from './paths.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
   'view_file',
@@ -449,6 +449,35 @@ function mentionsSelf(ctx, commandLine) {
   return [...needles].some((n) => n.length > 3 && commandLine.includes(n));
 }
 
+/**
+ * The path a known-safe command would actually run, when it lands inside a
+ * writable root.
+ *
+ * Only asked where no sandbox confines the command. There a workspace `PATH`
+ * entry, or a `./script` argument, decides which file runs — while the
+ * known-safe allowlist judges the *name* alone. `cat` is safe as `/usr/bin/cat`;
+ * it is not safe as a script the agent just wrote into `node_modules/.bin`, and
+ * that chain reaches the reviewer by no other route, because a known-safe
+ * command is allowed without one. Inside autoagy's own sandbox it does not
+ * matter: the sandbox bounds whatever the binary can reach.
+ *
+ * @returns {string|null} the path that would run, when it is agent-writable
+ */
+function executableFromWritableRoot(ctx, analysis) {
+  if (ctx.writableRoots.length === 0) return null;
+  const writable = (p) => ctx.writableRoots.some((root) => isWithin(p, root) || isWithin(resolveReal(p), root));
+  for (const segment of analysis.segments ?? []) {
+    const argv0 = segment.argv?.[0];
+    if (!argv0) continue;
+    // A name containing a separator is a path and resolves where it says;
+    // otherwise it is looked up in PATH, in order, and the first match is what
+    // a shell would run.
+    const resolved = /[\\/]/.test(argv0) ? toAbsolute(argv0, ctx.baseDir, ctx.home) : findExecutable(argv0, ctx.env.PATH, []);
+    if (resolved && writable(resolved)) return resolved;
+  }
+  return null;
+}
+
 function classifyCommand(ctx, state = {}) {
   const commandLine = ctx.args.CommandLine;
   if (typeof commandLine !== 'string' || commandLine.trim() === '') {
@@ -493,7 +522,14 @@ function classifyCommand(ctx, state = {}) {
     return review('starts-antigravity', `Starts another Antigravity instance (\`${started.argv.join(' ')}\`). Whether autoagy reviews that session depends on configuration and environment this call can choose.`);
   }
   if (!ctx.sandbox.active) {
-    if (isKnownSafeCommandLine(analysis)) return allow('known-safe-command');
+    if (isKnownSafeCommandLine(analysis)) {
+      const shadowed = executableFromWritableRoot(ctx, analysis);
+      if (!shadowed) return allow('known-safe-command');
+      return review(
+        'command-from-writable-root',
+        `This is one of the known read-only commands, but the file that would run is ${shadowed}, inside a directory the agent can write, and nothing here confines it.`,
+      );
+    }
     return review('unsandboxed-command', `Commands are not confined by the terminal sandbox here (${ctx.sandbox.detail}).`);
   }
   if (analysis.error) {

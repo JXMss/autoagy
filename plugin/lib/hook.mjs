@@ -12,7 +12,7 @@ import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext, HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
-import { confinedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders } from './confine.mjs';
+import { confinedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
 import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted } from './state.mjs';
@@ -173,13 +173,26 @@ export function handlePostToolUse(payload, options = {}) {
  * it; see detectOwnSandbox. The mount points of protected directories that did
  * not exist are taken away again here, once the command has run.
  */
+/**
+ * Whether the mount points can be reclaimed now.
+ *
+ * Reclaiming one while a command is still running does not fail the command, it
+ * takes its protection away: the mount lives in that process's mount namespace,
+ * and removing the directory makes the path stop resolving there, so the command
+ * recreates it through the writable workspace bind — on the host. So reclamation
+ * happens only on positive evidence that nothing is running: the workspace lock,
+ * which every rewritten command line holds for as long as bwrap lives. Where the
+ * lock is unavailable, fall back to the weaker signal that one may be around.
+ */
+function reclaimAllowed(state, quiet) {
+  return quiet === null ? !state.backgroundSuspected : quiet;
+}
+
 function checkConfinedRun(ctx, state = {}) {
   const home = ctx.autoagyHome;
-  // When agy may have left the command running, this tool call returning says
-  // nothing about the mount points: the process that owns them is still alive,
-  // and removing one under it would fail the command. They are swept at the end
-  // of the turn instead.
-  const keepPlaceholders = Boolean(state.backgroundSuspected);
+  // Only ask the lock when there is something to reclaim: it costs a process.
+  const reclaiming = (state.pendingPlaceholders?.[ctx.stepIdx]?.length ?? 0) > 0;
+  const keepPlaceholders = reclaiming && !reclaimAllowed(state, lockQuiescent(ctx));
   const recorded = updateState(home, ctx.conversationId, (s) => {
     const entry = s.pendingConfined[ctx.stepIdx] ? { hash: s.pendingConfined[ctx.stepIdx], placeholders: s.pendingPlaceholders[ctx.stepIdx] ?? [] } : null;
     delete s.pendingConfined[ctx.stepIdx];
@@ -474,17 +487,11 @@ export async function handlePreToolUse(payload, options = {}) {
  * Removes any mount point still recorded for this conversation. Called when the
  * turn ends, which is the first moment nothing can still be running against it.
  */
-function sweepPlaceholders(home, conversationId, state) {
-  // While a command may still be running, reclaiming is not safe: the mount
-  // point exists only in that process's mount namespace, and removing the
-  // directory underneath it makes the path stop resolving there, so the command
-  // can create the directory again — through the writable workspace bind, onto
-  // the host. That is the exact thing the mount point is there to prevent.
-  //
-  // Nothing here can yet tell whether a command is still running (autoagy never
-  // starts bwrap, so it holds no pid), so the conservative answer is to keep
-  // them. `autoagy trust` releases them once the user says nothing is running.
-  if (state.backgroundSuspected) return;
+function sweepPlaceholders(home, conversationId, state, ctx) {
+  // See reclaimAllowed: only positive evidence that nothing is running. The
+  // lock is released by the command itself when bwrap exits — including a
+  // backgrounded one — so this is the first moment it is safe.
+  if (!reclaimAllowed(state, ctx ? lockQuiescent(ctx) : null)) return;
   const pending = Object.values(state.pendingPlaceholders ?? {});
   if (pending.length === 0) return;
   const paths = pending.flatMap((list) => list ?? []);
@@ -502,10 +509,10 @@ export function handlePostInvocation(payload, options = {}) {
   const conversationId = payload?.conversationId || env.ANTIGRAVITY_CONVERSATION_ID;
   if (!conversationId) return {};
   const state = readState(home, conversationId);
-  // The turn is over, so nothing can still be holding a mount point: sweep the
-  // ones PostToolUse did not see (a backgrounded command, or a mode switch).
+  // Sweep the mount points PostToolUse did not see (a backgrounded command, or
+  // a mode switch), but only once the workspace lock says nothing is running.
   // Read-only first, so an idle conversation does not get a state file written.
-  sweepPlaceholders(home, conversationId, state);
+  sweepPlaceholders(home, conversationId, state, new HookContext(payload, { config, env, home: options.home, host: options.host }));
   if (config.mode === 'off') return {};
   if (!state.interrupt?.pending) return {};
   updateState(home, conversationId, (s) => {
