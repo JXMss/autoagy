@@ -146,6 +146,8 @@ test('known-safe read-only command lines', () => {
     'jq . data.json',
     "jq -r '.vendor' data.json",
     "jq -r '.environment' data.json",
+    'Get-ChildItem C:\\Users',
+    'Get-Content README.md',
   ]) {
     assert.equal(isKnownSafeCommandLine(cmd), true, cmd);
   }
@@ -201,6 +203,15 @@ test('commands that are not known-safe', () => {
     'jq -n env',
     "jq -n 'env|keys'",
     "jq -r 'env.SECRET' data.json",
+    // `$ENV` is the same environment spelled in capitals — and single quotes
+    // make it a literal, so the variable rule above does not see it.
+    "jq -rn '$ENV'",
+    "jq -n '$ENV.SECRET'",
+    // PowerShell names the environment as a provider, with no variable at all.
+    'Get-ChildItem Env:',
+    'Get-ChildItem -Path Env:',
+    'Get-ChildItem env*',
+    'Get-Content Env:PATH',
   ]) {
     assert.equal(isKnownSafeCommandLine(cmd), false, cmd);
   }

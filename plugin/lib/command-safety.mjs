@@ -426,7 +426,7 @@ const SIMPLE_SAFE = new Set([
   'realpath', 'readlink', 'file', 'du', 'df', 'printf', 'test', '[', '[[', 'diff', 'cmp', 'comm', 'md5sum',
   'sha1sum', 'sha256sum', 'sha512sum', 'shasum', 'cksum', 'nproc', 'uptime', 'free', 'type',
   'numfmt', 'tac', 'column', 'fold', 'fmt', 'expand', 'unexpand', 'od', 'hexdump', 'strings', 'arch',
-  'groups', 'tty', 'locale', 'getconf', 'lscpu', 'sleep', 'where', 'Get-ChildItem', 'Get-Content', 'Get-Location',
+  'groups', 'tty', 'locale', 'getconf', 'lscpu', 'sleep', 'where',
 ]);
 
 const VERSION_PROBE_TOOLS = new Set([
@@ -506,9 +506,17 @@ export function isSafeArgv(argv) {
       // than looking for the letter.
       return !args.some((a) => /^[A-Za-z]*[eE][A-Za-z]*$/.test(a) || a === '-E' || /(?:^|,)(?:env|environ)(?:,|$)/.test(a));
     case 'jq':
-      // The `env` builtin is the whole environment; `$ENV` is the same thing
-      // and already fails above, as a variable.
-      return !args.some((a) => /(^|[^A-Za-z0-9_])env([^A-Za-z0-9_]|$)/.test(a));
+      // The `env` builtin is the whole environment; `$ENV` is the same thing.
+      // Case-insensitive because `$ENV` is spelled that way, and matching the
+      // word rather than the letter keeps `.environment` and `.vendor` working.
+      return !args.some((a) => /(^|[^A-Za-z0-9_])env([^A-Za-z0-9_]|$)/i.test(a));
+    case 'Get-ChildItem':
+    case 'Get-Content':
+    case 'Get-Location':
+      // PowerShell's `Env:` provider is the environment, and naming it needs no
+      // variable at all: `Get-ChildItem Env:` lists every one of them. The
+      // wildcard form (`env*`) resolves to the same provider.
+      return !args.some((a) => /^env(:|\*|$)/i.test(a));
     case 'uniq':
       return args.filter((a) => !a.startsWith('-')).length <= 1;
     case 'sort':
