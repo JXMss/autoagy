@@ -138,6 +138,14 @@ test('known-safe read-only command lines', () => {
     "bash -lc 'ls && git status'",
     'cd src && ls',
     'env -i ls',
+    // `ps` and `jq` stay read-only, but only in the argument shapes that cannot
+    // print the environment.
+    'ps -ef',
+    'ps aux',
+    'ps -eo pid,cmd',
+    'jq . data.json',
+    "jq -r '.vendor' data.json",
+    "jq -r '.environment' data.json",
   ]) {
     assert.equal(isKnownSafeCommandLine(cmd), true, cmd);
   }
@@ -182,6 +190,17 @@ test('commands that are not known-safe', () => {
     'echo $GEMINI_API_KEY',
     'echo "$HOME"',
     'cat $FILE',
+    // The same environment, printed by a read-only tool whose argument asks for
+    // it. `ps -ef` above is "every process", which is why these are word
+    // matches rather than a search for the letter `e`.
+    'ps auxe',
+    'ps eww',
+    'ps -E',
+    'ps -o env',
+    'ps -eo pid,environ',
+    'jq -n env',
+    "jq -n 'env|keys'",
+    "jq -r 'env.SECRET' data.json",
   ]) {
     assert.equal(isKnownSafeCommandLine(cmd), false, cmd);
   }

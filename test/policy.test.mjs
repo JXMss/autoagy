@@ -33,6 +33,26 @@ test('reads are allowed, credential reads are reviewed', () => {
   assert.equal(verdict('view_file', { AbsolutePath: path.join(dirs.workspace, 'proc', 'environ') }).verdict, 'allow');
   // ... and the same path named by a command, wherever no own sandbox hides it.
   assert.equal(verdict('run_command', { CommandLine: 'cat /proc/self/environ' }, { config: configWith({ ownSandbox: 'off' }) }).category, 'credential-read');
+  // A directory there reaches the same secrets without naming one. A search has
+  // the reach of a directory walk, so the directory is enough for it — and for
+  // a command, where nothing in the line says which files it will open.
+  assert.equal(verdict('grep_search', { SearchPath: '/proc', Query: 'x' }).category, 'credential-read');
+  assert.equal(verdict('grep_search', { SearchPath: '/proc/self', Query: 'x' }).category, 'credential-read');
+  assert.equal(verdict('grep_search', { SearchPath: '/proc/self/task', Query: 'x' }).category, 'credential-read');
+  const noSandbox = configWith({ ownSandbox: 'off' });
+  assert.equal(verdict('run_command', { CommandLine: 'grep -r AKIA /proc' }, { config: noSandbox }).category, 'credential-read');
+  assert.equal(verdict('run_command', { CommandLine: 'grep -rh . /proc/self/' }, { config: noSandbox }).category, 'credential-read');
+  // Single files elsewhere under /proc are not secrets, and /proc itself must
+  // not turn into "everything outside the workspace".
+  assert.equal(verdict('view_file', { AbsolutePath: '/proc/self/status' }).verdict, 'allow');
+  assert.equal(verdict('run_command', { CommandLine: 'cat /proc/cpuinfo' }, { config: noSandbox }).verdict, 'allow');
+  assert.equal(verdict('run_command', { CommandLine: 'ls /etc' }, { config: noSandbox }).verdict, 'allow');
+  // Inside autoagy's own sandbox there is nothing to review: /proc is a private
+  // PID namespace with a cleared environment.
+  const own = configWith({ ownSandbox: 'on' });
+  assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'grep -r AKIA /proc' }, { config: own, bwrapProbe: okProbe })).category, 'sandboxed-command');
+  // The file tools never run in that sandbox, so a search there is still real.
+  assert.equal(verdict('grep_search', { SearchPath: '/proc', Query: 'x' }, { config: own, bwrapProbe: okProbe }).category, 'credential-read');
 });
 
 test('agent coordination tools are allowed', () => {

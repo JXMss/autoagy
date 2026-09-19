@@ -328,6 +328,14 @@ function classifyRead(ctx, state = {}) {
       // A search reads every file below its directory.
       const inside = ctx.toolName === 'grep_search' ? ctx.credentialLocations.find((loc) => isWithin(loc, p)) : null;
       if (inside) return review('credential-read', `Searches ${p}, which contains ${inside}, a location that commonly holds credentials or secrets.`);
+      // The same reach, through the one directory that holds a secret per
+      // process. `list_dir` never gets here (it returns names, not contents),
+      // and a single read of a file there is still judged by
+      // `isProcessInfoPath`, so `/proc/self/environ` is caught and
+      // `/proc/self/status` is not.
+      if (ctx.toolName === 'grep_search' && isProcessTreePath(p) && walkReachesProcessInfo(p)) {
+        return review('credential-read', `Searches ${p}, inside /proc, where a walk reaches every process's environment and command line.`);
+      }
     }
   }
   return allow('read');
@@ -355,6 +363,44 @@ function isProcessInfoPath(abs) {
   return last === 'environ' || last === 'cmdline';
 }
 
+/**
+ * True for `/proc` and anything under it — the tree holding every process's
+ * environment and command line.
+ *
+ * Separate from `isProcessInfoPath` because the two answer different questions.
+ * Reading `/proc/self/status` is one harmless file; *searching* `/proc` reads
+ * every file below it, environ files included, because a search has the reach
+ * of a directory walk. A command naming the directory gets that reach without
+ * naming anything that looks like a secret, and nothing in a command line says
+ * which files a command will open — so a path here is judged as reaching the
+ * tree, not the file.
+ */
+function isProcessTreePath(abs) {
+  const parts = String(abs).split(/[\\/]/);
+  return parts[0] === '' && parts[1] === 'proc';
+}
+
+/**
+ * Whether a *walk* of this path would read a process's environment or command
+ * line: the tree's root, any directory inside it, and anything that cannot be
+ * looked at from here.
+ *
+ * The distinction is what keeps the check usable. `/proc/cpuinfo` and
+ * `/proc/self/status` are ordinary files and stay allowed, while `/proc` and
+ * `/proc/self` are directories whose contents include an environ file for every
+ * process visible to the reader — and a command line naming one says nothing
+ * about which files the command will open, so the directory is what is judged.
+ */
+function walkReachesProcessInfo(abs) {
+  if (isProcessInfoPath(abs)) return true;
+  try {
+    return fs.statSync(abs).isDirectory();
+  } catch {
+    // Gone, or not visible from here: no way to tell, so treat it as a walk.
+    return true;
+  }
+}
+
 export function isCredentialPath(ctx, abs) {
   const { credentialPaths, credentialPathExceptions } = ctx.config;
   if (matchesAnyGlob(abs, credentialPathExceptions, ctx.home)) return false;
@@ -371,9 +417,12 @@ export function isCredentialPath(ctx, abs) {
  * Location, not pattern: the `id_ed25519` pattern matches the key in `~/.ssh`
  * (masked) and a copy someone made inside the workspace (not masked), and only
  * the mount list says which one a given path is.
+ *
+ * The file tools never reach this — they run outside every sandbox, which is why
+ * `/proc` is only a shortcut for commands (see `credentialArgument`).
  */
 function hiddenByOwnSandbox(ctx, abs) {
-  if (isProcessInfoPath(abs)) return true;
+  if (isProcessTreePath(abs)) return true;
   return ctx.credentialLocations.some((loc) => isWithin(abs, loc));
 }
 
@@ -400,7 +449,10 @@ function credentialArgument(ctx, analysis, cwd, { hiddenBySandbox = false } = {}
     if (wildcard >= 0) value = value.slice(0, wildcard).replace(/[^\\/]*$/, '') || '.';
     const abs = toAbsolute(value, base, ctx.home);
     if (!abs) continue;
-    if (!isCredentialPath(ctx, abs)) continue;
+    // A credential store by name, or a path under /proc a walk would take into
+    // one. `/proc/cpuinfo` is neither and stays allowed.
+    const credential = isCredentialPath(ctx, abs);
+    if (!credential && !(isProcessTreePath(abs) && walkReachesProcessInfo(abs))) continue;
     if (hiddenBySandbox && hiddenByOwnSandbox(ctx, abs)) continue;
     return abs;
   }

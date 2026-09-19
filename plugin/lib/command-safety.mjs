@@ -424,8 +424,8 @@ const SIMPLE_SAFE = new Set([
   'cat', 'cd', 'cut', 'echo', 'expr', 'false', 'grep', 'egrep', 'fgrep', 'head', 'id', 'ls', 'nl', 'paste',
   'pwd', 'rev', 'seq', 'stat', 'tail', 'tr', 'true', 'uname', 'wc', 'which', 'whoami', 'basename', 'dirname',
   'realpath', 'readlink', 'file', 'du', 'df', 'printf', 'test', '[', '[[', 'diff', 'cmp', 'comm', 'md5sum',
-  'sha1sum', 'sha256sum', 'sha512sum', 'shasum', 'cksum', 'nproc', 'uptime', 'free', 'ps', 'type',
-  'numfmt', 'tac', 'column', 'fold', 'fmt', 'expand', 'unexpand', 'od', 'hexdump', 'strings', 'jq', 'arch',
+  'sha1sum', 'sha256sum', 'sha512sum', 'shasum', 'cksum', 'nproc', 'uptime', 'free', 'type',
+  'numfmt', 'tac', 'column', 'fold', 'fmt', 'expand', 'unexpand', 'od', 'hexdump', 'strings', 'arch',
   'groups', 'tty', 'locale', 'getconf', 'lscpu', 'sleep', 'where', 'Get-ChildItem', 'Get-Content', 'Get-Location',
 ]);
 
@@ -493,6 +493,22 @@ export function isSafeArgv(argv) {
   }
   if (SIMPLE_SAFE.has(name)) return true;
   switch (name) {
+    // `ps` and `jq` are read-only and stay on the list, but each can print the
+    // environment as a side effect of an argument — and this list is what runs
+    // unreviewed where autoagy's own sandbox is not in force, with the hook's
+    // inherited environment in reach. The constraints are about the argument
+    // shape, not the tool.
+    case 'ps':
+      // A bare `e` (GNU: `ps auxe`, `ps eww`) or BSD `-E` shows every process's
+      // environment; an `env` keyword in an output list does the same. `-e` on
+      // its own means "every process" and is common, so `ps -ef` and
+      // `ps -eo pid,cmd` must keep working — hence matching whole words rather
+      // than looking for the letter.
+      return !args.some((a) => /^[A-Za-z]*[eE][A-Za-z]*$/.test(a) || a === '-E' || /(?:^|,)(?:env|environ)(?:,|$)/.test(a));
+    case 'jq':
+      // The `env` builtin is the whole environment; `$ENV` is the same thing
+      // and already fails above, as a variable.
+      return !args.some((a) => /(^|[^A-Za-z0-9_])env([^A-Za-z0-9_]|$)/.test(a));
     case 'uniq':
       return args.filter((a) => !a.startsWith('-')).length <= 1;
     case 'sort':
