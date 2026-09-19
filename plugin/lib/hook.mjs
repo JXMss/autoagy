@@ -283,15 +283,26 @@ const TERMINAL_TOOLS = new Set(['send_command_input', 'read_terminal', 'command_
 
 /**
  * Whether this call may leave a command running in a terminal autoagy cannot
- * observe. Two signals: a run_command that asked agy not to wait, and any use of
- * the tools that feed or inspect a terminal (which means a persistent one
- * exists). agy starts the process, so autoagy holds no pid and cannot check
- * liveness directly — this is the best evidence available.
+ * observe. agy starts the process, so autoagy holds no pid and cannot check
+ * liveness directly — these are the signals agy's own run_command schema offers:
+ *
+ * - `IsDaemon: true` marks a command expected to run indefinitely. agy's tool
+ *   description says NOT to combine it with `WaitMsBeforeAsync`, so a dev server
+ *   arrives with that value absent or zero — watching only the wait value would
+ *   miss exactly the case that matters.
+ * - `Blocking: false` means the tool call returns without waiting.
+ * - a positive `WaitMsBeforeAsync` is a bounded async window. Zero is not a
+ *   signal: agy's own examples send `WaitMsBeforeAsync: 0` with a plain test run.
+ * - any use of the tools that feed or inspect a terminal means a persistent one
+ *   exists.
  */
 function toolMayLeaveTerminalRunning(ctx) {
   if (TERMINAL_TOOLS.has(ctx.toolName)) return true;
   if (ctx.toolName !== 'run_command') return false;
-  const wait = ctx.args.WaitMsBeforeAsync;
+  const args = ctx.args ?? {};
+  if (args.IsDaemon === true || args.IsDaemon === 'true') return true;
+  if (args.Blocking === false || args.Blocking === 'false') return true;
+  const wait = args.WaitMsBeforeAsync;
   if (wait === undefined || wait === null) return false;
   const ms = Number(wait);
   return Number.isFinite(ms) && ms > 0;

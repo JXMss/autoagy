@@ -95,7 +95,7 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 挂载点什么时候能回收，取决于**还有没有命令在跑**，而这一点 autoagy 目前判断不了：它从不自己启动 bwrap（执行改写后命令行的是 agy），拿不到进程号，也没有别的存活信号。所以：
 
 - 命令是同步的（工具调用返回时它已经结束）：PostToolUse 就把挂载点删掉；
-- **agy 可能让命令后台继续跑并提前返回**（`run_command` 带 `WaitMsBeforeAsync`，或 agent 用过 `command_status`/`send_command_input`/`read_terminal`）：这个信号一旦出现，本会话的挂载点就一直保留，不再回收，直到你用 `autoagy trust` 释放（或开新会话）。
+- **agy 可能让命令后台继续跑并提前返回**（`run_command` 带 `IsDaemon: true`、`Blocking: false` 或正的 `WaitMsBeforeAsync`，或 agent 用过 `command_status`/`send_command_input`/`read_terminal`）：这个信号一旦出现，本会话的挂载点就一直保留，不再自动回收。释放它用 `autoagy trust`（那一刻就是你确认没有命令在跑）。开新会话**不会**释放旧的——占位是按会话记录的，而删掉另一个会话的挂载点正是上面那条要避免的事。留下的代价只是工作区里多出一个空的 `.agents` 之类的目录；保护本身不丢（目录存在就会被只读绑定），`autoagy status` 会列出这些会话。
 
 保留是刻意的，因为**提前回收会真的拆掉保护**：bwrap 把只读 tmpfs 挂在子进程自己的 mount namespace 里、挂在一个目录项上，而 `rmdir` 会把宿主上那个目录项摘掉——子进程里这条路径随之不再解析，而工作区根仍是可写的 bind，于是**还在运行的命令会重建这个目录，直接写到宿主上**。实测：不回收时 `mkdir .agents/hooks/pre-commit` 得到 `Read-only file system`；在命令还在跑时回收，同一条命令就在宿主上把文件建出来了。这正是占位机制要拦的那件事。
 

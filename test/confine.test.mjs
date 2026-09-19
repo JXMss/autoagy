@@ -364,6 +364,30 @@ test('a backgrounded command keeps its mount point, and the sweep leaves it alon
   fs.rmSync(path.join(home, 'config.json'));
 });
 
+test('a daemon command counts as possibly-still-running even without WaitMsBeforeAsync', async () => {
+  // agy's run_command schema marks a long-running command with IsDaemon, and its
+  // tool description says not to combine that with WaitMsBeforeAsync — so a dev
+  // server arrives with the wait value absent. Watching only that value would
+  // reclaim the mount point out from under it.
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  for (const [n, args] of [[1, { CommandLine: 'npm run dev', IsDaemon: true }], [2, { CommandLine: 'npm test', Blocking: false }]]) {
+    const conversationId = `99999999-0000-4000-8000-daem0n00000${n}`;
+    const target = path.join(dirs.workspace, '.agents');
+    fs.rmSync(target, { recursive: true, force: true });
+    const out = await handlePreToolUse(payloadFor(dirs, 'run_command', args, { conversationId, stepIdx: 60 + n }), opts);
+    assert.equal(out.decision, 'allow', args.CommandLine);
+    assert.equal(fs.existsSync(target), true, 'created for the command');
+    handlePostInvocation({ conversationId }, opts);
+    assert.equal(fs.existsSync(target), true, `${args.CommandLine} keeps its mount point`);
+    assert.equal(readState(home, conversationId).backgroundSuspected, true);
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+  fs.rmSync(path.join(home, 'config.json'));
+});
+
 test('a mount point a command wrote into is kept and marks the conversation untrusted', async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });

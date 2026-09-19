@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR, detectSandbox } from '../lib/context.mjs';
 import { findExecutable } from '../lib/paths.mjs';
-import { detectOwnSandbox, readSandboxCheck } from '../lib/confine.mjs';
+import { detectOwnSandbox, readSandboxCheck, removeControlPlaceholders } from '../lib/confine.mjs';
 import { classify, failOpenOutput } from '../lib/policy.mjs';
 import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
@@ -213,17 +213,45 @@ function trust(prefix, all) {
     for (const { state } of states) console.log(`  ${state.conversationId}  ${flagDescription(state)}`);
     return;
   }
+  // Mount points are workspace-level artifacts but the record of them is
+  // per-conversation, so another conversation may be holding a command that
+  // needs the very directory this one is about to release. Removing it would
+  // pull the mount out from under that command, so refuse rather than guess.
+  const others = new Map();
+  for (const { state } of listStates(home)) {
+    if (chosen.some((c) => c.state.conversationId === state.conversationId)) continue;
+    for (const p of Object.values(state.pendingPlaceholders ?? {}).flatMap((list) => list ?? [])) {
+      if (!others.has(p)) others.set(p, state.conversationId);
+    }
+  }
+  const chosenPaths = new Set(chosen.flatMap(({ state }) => Object.values(state.pendingPlaceholders ?? {}).flatMap((list) => list ?? [])));
+  const shared = [...chosenPaths].filter((p) => others.has(p));
+
   for (const { state } of chosen) {
     console.log(`Trusted again: ${state.conversationId}`);
     console.log(`  was flagged for ${flagDescription(state)}`);
+    // The mount points are released here rather than at the conversation's next
+    // turn: this command IS the assertion that nothing is still running, and a
+    // conversation that never gets another turn would otherwise leave empty
+    // `.agents`-style directories in the workspace with nothing recording them.
+    const paths = Object.values(state.pendingPlaceholders ?? {}).flatMap((list) => list ?? []).filter((p) => !others.has(p));
     updateState(home, state.conversationId, (s) => {
       s.untrusted = null;
       s.backgroundSuspected = false;
+      s.pendingPlaceholders = {};
     });
+    const { removed, dirty } = removeControlPlaceholders(paths);
+    if (removed.length) console.log(`  released ${removed.length} read-only mount point(s)`);
+    for (const p of dirty) console.log(`  ! kept ${p}: it has contents, so something wrote into it`);
+    for (const p of paths.filter((x) => others.has(x))) {
+      console.log(`  ! kept ${p}: conversation ${others.get(p)} also has a mount point there`);
+    }
   }
-  console.log('Only do this once you have checked what changed on disk AND know that no backgrounded command is still running:');
-  console.log('  - the next edit or read is judged on its own again;');
-  console.log('  - the read-only mount points retained for that conversation are released at the end of its next turn.');
+  if (shared.length > 0) {
+    console.log('Some mount points are shared with another conversation, which may still have a command running against');
+    console.log('them, so they were kept. Release that conversation too once you know it is idle.');
+  }
+  console.log('Only do this once you have checked what changed on disk AND know that no backgrounded command is still running.');
 }
 
 function readJsonQuiet(file) {
@@ -235,8 +263,10 @@ function readJsonQuiet(file) {
 }
 
 function status() {
-  const { env, home, autoagyHome, pins } = managementContext();
-  const { config, warnings, path: cfgPath, exists } = loadConfig({ env, home });
+  // `userHome` (not `home`) so a later call cannot silently take the user's
+  // home directory where the configuration directory is meant.
+  const { env, home: userHome, autoagyHome, pins } = managementContext();
+  const { config, warnings, path: cfgPath, exists } = loadConfig({ env, home: userHome });
   const lines = [];
   lines.push(`autoagy — Codex-style auto mode for Antigravity`);
   lines.push(`  plugin dir      ${PLUGIN_DIR}`);
@@ -274,7 +304,7 @@ function status() {
   }
   const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath()), autoagyHome: autoagyHome });
   lines.push(`  own sandbox     ${own.active ? 'active' : own.required ? 'REQUIRED BUT UNAVAILABLE (commands are reviewed)' : 'inactive'} — ${own.detail}`);
-  const check = readSandboxCheck(home);
+  const check = readSandboxCheck(autoagyHome);
   if (check?.status === 'broken') {
     lines.push(`  ! self-check    FAILED ${fmtTime(check.time)}: ${check.detail}. The own sandbox is off for that agy build; it is checked again after agy updates.`);
   } else if (check?.status === 'verified') {
@@ -306,7 +336,7 @@ function status() {
     lines.push(`  terminal sandbox        ${sandbox.active ? 'in force' : 'not in force'} (${sandbox.source}) — ${sandbox.detail}`);
     if (!sandbox.active && config.sandbox !== 'on' && !own.active) lines.push('  ! every command that is not known read-only will be reviewed');
   }
-  const record = readSetupRecord(home);
+  const record = readSetupRecord(autoagyHome);
   lines.push(`  setup record            ${record ? `${fmtTime(record.time)} (grants added: ${record.addedGrants?.join(', ') || 'none'})` : 'none'}`);
 
   const hooks = readJsonQuiet(path.join(PLUGIN_DIR, 'hooks.json'));
@@ -314,10 +344,19 @@ function status() {
   lines.push('');
   lines.push(`Hook command: ${command ?? '(hooks.json not found)'}`);
 
-  const recent = readDecisions(home, 500).filter((r) => r.review);
+  const recent = readDecisions(autoagyHome, 500).filter((r) => r.review);
   const counts = {};
   for (const r of recent) counts[r.review.status] = (counts[r.review.status] ?? 0) + 1;
-  lines.push(`Recent reviews: ${recent.length ? Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ') : 'none'}  (log: ${decisionLogPath(home)})`);
+  lines.push(`Recent reviews: ${recent.length ? Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ') : 'none'}  (log: ${decisionLogPath(autoagyHome)})`);
+  // A flagged conversation keeps its sandbox protection turned up and, while a
+  // command may still be running, retains its read-only mount points. Nothing
+  // clears that by itself, so it has to be visible somewhere.
+  const flagged = listStates(autoagyHome).filter(({ state }) => isUntrusted(state) || state.backgroundSuspected === true);
+  if (flagged.length > 0) {
+    lines.push('');
+    lines.push(`Flagged conversations (\`autoagy trust <id>\` to release):`);
+    for (const { state } of flagged) lines.push(`  ${state.conversationId}  ${flagDescription(state)}`);
+  }
   console.log(lines.join('\n'));
 }
 

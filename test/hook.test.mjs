@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSandboxDirs, payloadFor } from './helpers.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
-import { readState } from '../plugin/lib/state.mjs';
+import { readState, updateState } from '../plugin/lib/state.mjs';
 import { handlePreToolUse, failClosedOutput } from '../plugin/lib/hook.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from '../plugin/lib/context.mjs';
 
@@ -332,6 +332,36 @@ test('autoagy trust clears the untrusted flag', () => {
   } finally {
     fs.rmSync(src, { force: true });
   }
+});
+
+test('autoagy trust releases the retained read-only mount points', () => {
+  const run = (...args) => {
+    const res = spawnSync(process.execPath, [BIN, ...args], { env: dirs.env, encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    return res.stdout;
+  };
+  const empty = path.join(dirs.workspace, '.agents');
+  const occupied = path.join(dirs.workspace, '.claude');
+  for (const p of [empty, occupied]) fs.rmSync(p, { recursive: true, force: true });
+  fs.mkdirSync(empty, { recursive: true });
+  fs.mkdirSync(occupied, { recursive: true });
+  fs.writeFileSync(path.join(occupied, 'rules.md'), 'written by something\n');
+  updateState(dirs.env.AUTOAGY_HOME, dirs.conversationId, (s) => {
+    s.backgroundSuspected = true;
+    s.pendingPlaceholders = { 7: [empty, occupied] };
+  });
+
+  const out = run('trust', '--all');
+  // Released here rather than at some future turn: this command is the
+  // assertion that nothing is still running, and a conversation that never gets
+  // another turn would otherwise leave these behind with nothing recording them.
+  assert.match(out, /released 1 read-only mount point/);
+  assert.equal(fs.existsSync(empty), false);
+  // A directory with contents is kept and reported: it is evidence.
+  assert.equal(fs.existsSync(path.join(occupied, 'rules.md')), true);
+  assert.match(out, /! kept .*\.claude/);
+  assert.deepEqual(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).pendingPlaceholders, {});
+  fs.rmSync(occupied, { recursive: true, force: true });
 });
 
 test('mode off still asks about an untrusted conversation\'s edits', () => {
