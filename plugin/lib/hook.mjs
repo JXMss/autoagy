@@ -164,7 +164,11 @@ function withScrubbedEnv(output, ctx) {
  * claiming the environment is scrubbed for this agy build — not to mark the
  * conversation, which is about the filesystem — and to say so once.
  */
-function checkScrubbedEnv(ctx) {
+function checkScrubbedEnv(ctx, state) {
+  // Nothing was rewritten for this step, so there is nothing to compare: no
+  // lock is taken. Every run_command would otherwise pay one, and the path
+  // below is not free — the lock is shared with every other hook.
+  if (!state.pendingEnvScrub?.[ctx.stepIdx]) return;
   const recorded = updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
     const hash = s.pendingEnvScrub?.[ctx.stepIdx] ?? null;
     if (s.pendingEnvScrub) delete s.pendingEnvScrub[ctx.stepIdx];
@@ -220,10 +224,12 @@ export function handlePostToolUse(payload, options = {}) {
   // left behind and verify what actually ran, and a conversation whose mode was
   // switched mid-flight would otherwise strand them.
   if (ctx.toolName === 'run_command') {
-    // The env-scrub check first: it is a state read and a write, and it belongs
-    // to a conversation whose own-sandbox state may well be empty.
-    checkScrubbedEnv(ctx);
-    return checkConfinedRun(ctx, readState(ctx.autoagyHome, ctx.conversationId));
+    // One state read shared by both checks; each writes only when it has
+    // something to record, so an ordinary command takes the lock once, in
+    // checkConfinedRun, as it did before the env scrub existed.
+    const state = readState(ctx.autoagyHome, ctx.conversationId);
+    checkScrubbedEnv(ctx, state);
+    return checkConfinedRun(ctx, state);
   }
   if (FILE_EDIT_TOOLS.has(ctx.toolName)) return checkEditTargets(ctx);
   return {};

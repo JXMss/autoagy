@@ -495,10 +495,14 @@ test('the env scrub runs the command under env -i with the sandbox allowlist', (
   const line = scrubbedCommandLine(ctx, 'echo hi && ls -l > out.txt');
   assert.match(line, /^'\/usr\/bin\/env' -i /, 'env -i comes first');
   assert.match(line, /'PATH=\/usr\/bin:\/bin'/);
-  assert.match(line, /'HOME=\/home\/someone'/);
   assert.match(line, /'LANG=en_US\.UTF-8'/);
   assert.ok(!line.includes('GEMINI_API_KEY'), 'the hook\'s own secrets are not put in the command line');
   assert.ok(!line.includes('AUTOAGY_HOME'), 'nor is anything else the allowlist does not name');
+  // The policy's home wins over the inherited one, so a `~` in the command is
+  // the same `~` the credential list and the protected paths were built from —
+  // the reason `autoagy setup` pins that home into hooks.json.
+  assert.ok(!line.includes('/home/someone'), 'the inherited HOME is not passed through');
+  assert.ok(line.includes(`'HOME=${dirs.home}'`), 'the pinned home is');
   assert.match(line, / -c 'echo hi && ls -l > out\.txt'$/, 'the shell keeps pipes and redirections working');
 });
 

@@ -336,7 +336,12 @@ export function scrubbedCommandLine(ctx, commandLine) {
   const env = envBinaryPath();
   if (!env) return null;
   const parts = [quote(env), '-i'];
-  for (const [name, value] of sandboxEnv(ctx.env, { passThrough: ctx.config.ownSandboxEnvPassThrough })) {
+  // HOME comes from the policy's home, not the inherited one, for the same
+  // reason the sandbox does it: the command's `~` has to be the `~` the
+  // credential list and the protected paths were built from, even when the
+  // environment says otherwise. `autoagy setup` pins that home into hooks.json.
+  const source = { ...ctx.env, HOME: ctx.home ?? ctx.env.HOME };
+  for (const [name, value] of sandboxEnv(source, { passThrough: ctx.config.ownSandboxEnvPassThrough })) {
     parts.push(quote(`${name}=${value}`));
   }
   return `${parts.join(' ')} ${quote(shellPath())} -c ${quote(commandLine)}`;
