@@ -138,21 +138,41 @@ export function ensureConfigFile({ home = os.homedir(), env = process.env, dryRu
   return { file, created: true };
 }
 
+const quoteArg = (s) => (/[\s"'\\]/.test(s) ? JSON.stringify(s) : s);
+
 /**
- * Replaces the bare `node` in hooks.json commands with an absolute interpreter
- * path, so hooks work even when Antigravity is started without the user's PATH.
+ * Pins the hook commands in hooks.json to absolute paths.
+ *
+ * `node` is replaced by the interpreter that ran setup, so hooks work even when
+ * Antigravity is started without the user's PATH.
+ *
+ * `--autoagy-home` and `--home` are appended so the hook's configuration
+ * directory and `~` are the ones setup wrote, rather than whatever the
+ * environment says when a tool call runs. Both are otherwise taken from the
+ * environment (`AUTOAGY_HOME`, then `HOME`), and a command the agent runs can
+ * set either for an agy it starts — which would move the policy, the credential
+ * list and the paths the agent may not edit. hooks.json lives inside the plugin
+ * directory, which is in the policy's `selfPaths`, so an agent cannot rewrite
+ * the pin itself.
  */
-export function pinNodeInHooks(pluginDir, nodePath = process.execPath, { dryRun = false } = {}) {
+export function pinHookCommands(pluginDir, { nodePath = process.execPath, configHome = null, home = null, dryRun = false } = {}) {
   const file = path.join(pluginDir, 'hooks.json');
   const hooks = readJsonFile(file);
   let changed = 0;
-  const quoted = /[\s"'\\]/.test(nodePath) ? JSON.stringify(nodePath) : nodePath;
   const visit = (value) => {
     if (Array.isArray(value)) return value.forEach(visit);
     if (value && typeof value === 'object') {
-      if (typeof value.command === 'string' && /^node\s/.test(value.command)) {
-        value.command = value.command.replace(/^node(?=\s)/, quoted);
-        changed++;
+      if (typeof value.command === 'string') {
+        let command = value.command;
+        if (/^node\s/.test(command)) command = command.replace(/^node(?=\s)/, quoteArg(nodePath));
+        for (const [flag, target] of [['--autoagy-home', configHome], ['--home', home]]) {
+          if (!target || command.includes(`${flag} `)) continue;
+          command = `${command} ${flag} ${quoteArg(target)}`;
+        }
+        if (command !== value.command) {
+          value.command = command;
+          changed++;
+        }
       }
       Object.values(value).forEach(visit);
     }

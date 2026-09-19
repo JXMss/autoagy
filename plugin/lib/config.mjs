@@ -55,10 +55,20 @@ export const DEFAULT_CONFIG = Object.freeze({
   onDenied: 'deny',
   onTimeout: 'deny',
   onError: 'deny',
-  // Domains that web fetches / browser navigation may reach without review.
+  // Domains a web fetch may reach without review.
   trustedDomains: ['localhost', '127.0.0.1', '[::1]'],
+  // Domains browser navigation may reach without review. Empty by default: a
+  // navigation runs the page's scripts in a networked, unsandboxed browser, and
+  // a local dev server usually serves files the agent may have edited without
+  // review, so the fetch allowlist above is not evidence that it is safe to load.
+  browserTrustedDomains: [],
   // Extra directories the agent may edit without review.
   writableRoots: [],
+  // Extra environment variables a sandboxed command receives, beyond the
+  // built-in allowlist (names, or `PREFIX_*` patterns). The sandbox drops the
+  // rest, so anything listed here is readable by commands that run without
+  // review — treat it as weakening the sandbox.
+  ownSandboxEnvPassThrough: [],
   // Extra paths whose modification always needs review.
   protectedPaths: [],
   // Reads of these paths need review (credential probing). `~` is expanded.
@@ -208,6 +218,10 @@ function validate(config, warnings) {
     if (!ok) warnings.push(`rules[${i}] is invalid (needs pattern: string[] and decision: allow|prompt|forbidden); ignored`);
     return ok;
   });
+  if (!Array.isArray(config.ownSandboxEnvPassThrough) || config.ownSandboxEnvPassThrough.some((n) => typeof n !== 'string')) {
+    warnings.push('ownSandboxEnvPassThrough must be an array of variable names; ignoring it');
+    config.ownSandboxEnvPassThrough = DEFAULT_CONFIG.ownSandboxEnvPassThrough;
+  }
   const cb = config.circuitBreaker;
   for (const key of ['maxConsecutiveDenials', 'maxRecentDenials', 'window']) {
     if (!(Number.isInteger(cb[key]) && cb[key] >= 1)) cb[key] = DEFAULT_CONFIG.circuitBreaker[key];
@@ -232,6 +246,15 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
   } catch (err) {
     if (err.code !== 'ENOENT') warnings.push(`could not read ${file}: ${err.message}`);
   }
+  // The mock backend answers every review the same way, so it must not be
+  // reachable by editing config.json alone. It is selected only by that file
+  // (the config directory is inside selfPaths, where writes are refused), so
+  // requiring an explicit opt-in here means a stray "mock" fails closed into a
+  // reviewer that errors rather than one that approves everything.
+  if (config.reviewer.backend === 'mock' && env.AUTOAGY_UNSAFE_MOCK_REVIEWER !== '1') {
+    warnings.push('reviewer.backend "mock" is only for tests; using the default reviewer instead');
+    config.reviewer.backend = DEFAULT_CONFIG.reviewer.backend;
+  }
   // No environment variable may weaken the policy: the hook inherits agy's
   // environment, which an escalated command can set for an agy it starts.
   validate(config, warnings);
@@ -243,7 +266,7 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
 
 /** The default config file written by `autoagy setup`. */
 export function defaultConfigFileText() {
-  const { mode, sandbox, ownSandbox, onDenied, onTimeout, onError, trustedDomains, writableRoots, rules, mcp, browser } = DEFAULT_CONFIG;
+  const { mode, sandbox, ownSandbox, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser } = DEFAULT_CONFIG;
   const { mock, ...reviewer } = DEFAULT_CONFIG.reviewer;
-  return `${JSON.stringify({ mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, writableRoots, rules, mcp, browser }, null, 2)}\n`;
+  return `${JSON.stringify({ mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser }, null, 2)}\n`;
 }

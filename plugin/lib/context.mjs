@@ -138,12 +138,15 @@ function readJson(file) {
   }
 }
 
+/** Platforms where a hook can read the host process's arguments at all. */
+export const HOST_INSPECTABLE_PLATFORMS = ['linux', 'darwin'];
+
 /**
  * Decides whether sandboxed run_command calls are confined by a terminal sandbox:
  * autoagy's own when active, otherwise Antigravity's.
  * @returns {{ active: boolean, source: string, detail: string }}
  */
-export function detectSandbox({ config, host, appDataDir, own }) {
+export function detectSandbox({ config, host, appDataDir, own, platform = process.platform }) {
   if (own?.active) {
     return { active: true, source: 'autoagy', detail: `${own.detail}; workspace and temp dirs writable, .git and agent metadata read-only, no network` };
   }
@@ -155,11 +158,24 @@ export function detectSandbox({ config, host, appDataDir, own }) {
   }
   if (host?.flags?.sandbox) return { active: true, source: 'flag', detail: 'agy was started with --sandbox' };
   const settings = appDataDir ? readJson(path.join(appDataDir, 'settings.json')) : null;
-  if (settings) {
+  // The settings file records what the CLI was configured to do, not what it is
+  // doing. It is the only signal the IDE path can offer, so it is used — but
+  // only where the process arguments could have been read to confirm or
+  // contradict it. Where they cannot (Windows), trusting it would report a
+  // sandbox that --dangerously-skip-permissions has already defeated, since
+  // autoagy setup writes the very values the file is checked for.
+  if (settings && HOST_INSPECTABLE_PLATFORMS.includes(platform)) {
     const enabled = settings.enableTerminalSandbox === true;
     const permission = settings.toolPermission ?? 'proceed-in-sandbox';
     const detail = `enableTerminalSandbox=${settings.enableTerminalSandbox ?? '(unset)'}, toolPermission=${permission}`;
     return { active: enabled && permission === 'proceed-in-sandbox', source: 'settings', detail };
+  }
+  if (!HOST_INSPECTABLE_PLATFORMS.includes(platform)) {
+    return {
+      active: false,
+      source: 'platform',
+      detail: `autoagy cannot read the agy process arguments on ${platform}, so it cannot tell whether the terminal sandbox is really in force; only known read-only commands run unreviewed`,
+    };
   }
   return { active: false, source: 'unknown', detail: 'could not determine the terminal sandbox state; assuming commands run unsandboxed' };
 }

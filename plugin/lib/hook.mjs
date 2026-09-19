@@ -10,12 +10,12 @@
 
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext } from './context.mjs';
-import { classify, READ_ONLY_TOOLS, AGENT_TOOLS, BROWSER_ACTION_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
+import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
-import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId } from './state.mjs';
+import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted } from './state.mjs';
 import { appendDecision, writeReviewRecord } from './log.mjs';
 import { readTranscriptRows } from './transcript.mjs';
 
@@ -55,7 +55,7 @@ export function withoutUnanswerablePrompt(output, ctx) {
  * mcp(*), execute_url(*)) must not let the actions they cover run unchecked.
  * Those actions go back to the user, as they would without autoagy.
  */
-export function offModeOutput(ctx) {
+export function offModeOutput(ctx, state = {}) {
   const name = ctx.toolName;
   let what = null;
   if (name === 'run_command') {
@@ -65,6 +65,11 @@ export function offModeOutput(ctx) {
     what = 'an MCP tool call';
   } else if (BROWSER_ACTION_TOOLS.has(name)) {
     what = 'a browser action';
+  } else if (state.untrusted && (FILE_EDIT_TOOLS.has(name) || CONTENT_READ_TOOLS.has(name))) {
+    // Mode "off" normally has no opinion here, which would leave the setup
+    // grants to wave it through. In an untrusted conversation that is worse
+    // than a review, so it goes back to the user instead.
+    what = 'a file edit or read in a conversation whose paths are no longer trusted';
   }
   if (!what) return null;
   return {
@@ -87,14 +92,12 @@ export function withOwnSandbox(output, ctx) {
   // Remembered for the PostToolUse self-check and for cleaning the mount points up.
   if (ctx.stepIdx !== null) {
     updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
-      // Commands run one at a time, so a mount point recorded for another step
-      // belongs to a command that already finished: PostToolUse removes them,
-      // this catches the ones it did not see.
-      for (const [step, paths] of Object.entries(s.pendingPlaceholders)) {
-        if (Number(step) === ctx.stepIdx) continue;
-        removeControlPlaceholders(paths);
-        delete s.pendingPlaceholders[step];
-      }
+      // Mount points belonging to other steps are deliberately left alone. agy
+      // can leave a command running and return from the tool call early, so
+      // "another step" is no longer evidence that its command has finished —
+      // and `--tmpfs` on a directory that has since been removed makes bwrap
+      // fail outright, which would break a command that was already approved.
+      // Whatever is left over is swept when the turn ends.
       s.pendingConfined[ctx.stepIdx] = commandHash(commandLine);
       if (placeholders.length) s.pendingPlaceholders[ctx.stepIdx] = placeholders;
       const steps = Object.keys(s.pendingConfined);
@@ -107,6 +110,26 @@ export function withOwnSandbox(output, ctx) {
   return { ...output, overwrite: { BypassSandbox: true, CommandLine: commandLine } };
 }
 
+/**
+ * Removes mount points and treats a still-populated one as what it is: a
+ * command reached the real directory the mount was supposed to hide. bwrap
+ * mounts inside the child's own namespace, so the host directory stays empty
+ * for the whole command — entries there mean the rewrite did not cover it.
+ */
+function removePlaceholders(home, conversationId, paths) {
+  const { dirty } = removeControlPlaceholders(paths);
+  if (dirty.length === 0) return;
+  const detail = dirty.join(', ');
+  appendDecision(home, {
+    conversation: conversationId,
+    verdict: 'placeholder-dirty',
+    error: `a command wrote into ${detail}, which was supposed to be read-only in the sandbox`,
+  });
+  // The decision log is the protocol's stdout; warnings go to stderr.
+  process.stderr.write(`autoagy: a command wrote into ${detail}; that path was meant to be read-only inside the sandbox.\n`);
+  updateState(home, conversationId, (s) => markUntrusted(s, { reason: 'protected-path-written', detail }));
+}
+
 const MAX_PENDING_CONFINED = 50;
 
 /**
@@ -117,10 +140,12 @@ const MAX_PENDING_CONFINED = 50;
 export function handlePostToolUse(payload, options = {}) {
   const env = options.env ?? process.env;
   const { config } = loadConfig({ env, home: options.home });
-  if (config.mode === 'off') return {};
   const ctx = new HookContext(payload, { config, env, home: options.home, host: options.host });
   if (ctx.stepIdx === null) return {};
-  if (ctx.toolName === 'run_command') return checkConfinedRun(ctx);
+  // These checks run even in mode "off": they clean up mount points a command
+  // left behind and verify what actually ran, and a conversation whose mode was
+  // switched mid-flight would otherwise strand them.
+  if (ctx.toolName === 'run_command') return checkConfinedRun(ctx, readState(ctx.autoagyHome, ctx.conversationId));
   if (FILE_EDIT_TOOLS.has(ctx.toolName)) return checkEditTargets(ctx);
   return {};
 }
@@ -132,21 +157,32 @@ export function handlePostToolUse(payload, options = {}) {
  * it; see detectOwnSandbox. The mount points of protected directories that did
  * not exist are taken away again here, once the command has run.
  */
-function checkConfinedRun(ctx) {
+function checkConfinedRun(ctx, state = {}) {
   const home = ctx.autoagyHome;
+  // When agy may have left the command running, this tool call returning says
+  // nothing about the mount points: the process that owns them is still alive,
+  // and removing one under it would fail the command. They are swept at the end
+  // of the turn instead.
+  const keepPlaceholders = Boolean(state.backgroundSuspected);
   const recorded = updateState(home, ctx.conversationId, (s) => {
     const entry = s.pendingConfined[ctx.stepIdx] ? { hash: s.pendingConfined[ctx.stepIdx], placeholders: s.pendingPlaceholders[ctx.stepIdx] ?? [] } : null;
     delete s.pendingConfined[ctx.stepIdx];
-    delete s.pendingPlaceholders[ctx.stepIdx];
+    if (!keepPlaceholders) delete s.pendingPlaceholders[ctx.stepIdx];
     return entry;
   });
-  removeControlPlaceholders(recorded?.placeholders);
+  if (!keepPlaceholders && recorded) removePlaceholders(home, ctx.conversationId, recorded.placeholders);
   if (!recorded) return {};
   let problem = null;
   if (commandHash(ctx.args.CommandLine) !== recorded.hash) problem = 'agy ran the original command instead of the one autoagy rewrote';
   else if (ctx.args.BypassSandbox !== true) problem = "agy ran the rewritten command without BypassSandbox, inside its own sandbox";
   recordSandboxCheck(home, ctx.hostBuild, problem);
-  if (problem) appendDecision(home, { conversation: ctx.conversationId, step: ctx.stepIdx, tool: ctx.toolName, verdict: 'self-check-failed', error: problem });
+  if (problem) {
+    appendDecision(home, { conversation: ctx.conversationId, step: ctx.stepIdx, tool: ctx.toolName, verdict: 'self-check-failed', error: problem });
+    // agy ran the command where autoagy did not intend it to run — inside a
+    // sandbox that leaves .git and the conversation log writable — so what the
+    // workspace looks like now is no longer something autoagy can vouch for.
+    updateState(home, ctx.conversationId, (s) => markUntrusted(s, { reason: 'rewrite-ignored', detail: problem, step: ctx.stepIdx }));
+  }
   return {};
 }
 
@@ -159,10 +195,14 @@ function rememberEditTargets(ctx) {
     s.pendingEdits[ctx.stepIdx] = targets;
     const steps = Object.keys(s.pendingEdits);
     for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_EDITS))) delete s.pendingEdits[step];
+    // Kept for the reviewer: the transcript is budget-trimmed, so an edit made
+    // long before a command is approved can be gone from it by then.
+    s.recentEdits = [...(s.recentEdits ?? []), ...targets.map((t) => ({ path: t.abs, real: t.real, step: ctx.stepIdx, kind: ctx.toolName }))].slice(-MAX_RECENT_EDITS);
   });
 }
 
 const MAX_PENDING_EDITS = 50;
+const MAX_RECENT_EDITS = 20;
 
 /**
  * agy writes edited files itself, outside every sandbox, so autoagy can only
@@ -179,6 +219,7 @@ function checkEditTargets(ctx) {
     return targets;
   });
   if (!recorded) return {};
+  let rootId;
   const now = new Map(editTargets(ctx).map((t) => [t.abs, t.real]));
   for (const { abs, real } of recorded) {
     const after = now.get(abs);
@@ -198,20 +239,56 @@ function checkEditTargets(ctx) {
     });
     updateState(home, ctx.conversationId, (s) => {
       s.interrupt = { turnKey: countUserMessages(ctx.transcriptPath), pending: true, message };
+      // This is a fact about the filesystem, not about the agent's behaviour, so
+      // it outlives the turn: leaving the symlink in place does not undo it.
+      markUntrusted(s, { reason: 'edit-target-changed', detail: `${abs} resolved to ${after}`, step: ctx.stepIdx });
+      rootId = s.rootConversationId;
     });
+    // A subagent's conversation keeps its own state file, but it just changed
+    // the parent's workspace too, so the parent stops trusting its paths as well.
+    if (rootId && rootId !== ctx.conversationId) {
+      updateState(home, rootId, (s) => markUntrusted(s, { reason: 'edit-target-changed', detail: `${abs} changed while a subagent ran`, step: ctx.stepIdx }));
+    }
     return {};
   }
   return {};
 }
 
 /** The decision used when autoagy itself fails: never block reads, never allow the rest. */
-export function failClosedOutput(payload, error) {
-  const name = payload?.toolCall?.name;
-  if (READ_ONLY_TOOLS.has(name) || AGENT_TOOLS.has(name)) return { decision: 'allow' };
-  return {
-    decision: 'deny',
+export function failClosedOutput(payload, error, { untrusted = false } = {}) {
+  return failOpenOutput(payload, {
+    untrusted,
     reason: `autoagy internal error (${error?.message ?? error}); the action was blocked to fail closed. See ~/.gemini/autoagy/logs/decisions.jsonl.`,
-  };
+  });
+}
+
+/** The tools that inspect or feed a terminal that may already be running a command. */
+const TERMINAL_TOOLS = new Set(['send_command_input', 'read_terminal', 'command_status']);
+
+/**
+ * Whether this call may leave a command running in a terminal autoagy cannot
+ * observe. Two signals: a run_command that asked agy not to wait, and any use of
+ * the tools that feed or inspect a terminal (which means a persistent one
+ * exists). agy starts the process, so autoagy holds no pid and cannot check
+ * liveness directly — this is the best evidence available.
+ */
+function toolMayLeaveTerminalRunning(ctx) {
+  if (TERMINAL_TOOLS.has(ctx.toolName)) return true;
+  if (ctx.toolName !== 'run_command') return false;
+  const wait = ctx.args.WaitMsBeforeAsync;
+  if (wait === undefined || wait === null) return false;
+  const ms = Number(wait);
+  return Number.isFinite(ms) && ms > 0;
+}
+
+/** Records that a command may outlive its tool call; see state.backgroundSuspected. */
+function noteTerminalUse(ctx, state) {
+  if (ctx.stepIdx === null || state.backgroundSuspected) return;
+  if (!toolMayLeaveTerminalRunning(ctx)) return;
+  updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
+    s.backgroundSuspected = true;
+  });
+  state.backgroundSuspected = true;
 }
 
 /**
@@ -223,8 +300,11 @@ export async function handlePreToolUse(payload, options = {}) {
   const env = options.env ?? process.env;
   const { config, warnings } = loadConfig({ env, home: options.home });
   const ctx = new HookContext(payload, { config, env, home: options.home, host: options.host, tempRoots: options.tempRoots, bwrapProbe: options.bwrapProbe });
-  if (config.mode === 'off') return offModeOutput(ctx);
   const home = ctx.autoagyHome;
+  const state = readState(home, ctx.conversationId);
+  // Mode "off" still has to route the actions the setup grants cover back to
+  // the user, and it must not ask when the flag makes asking impossible.
+  if (config.mode === 'off') return withoutUnanswerablePrompt(offModeOutput(ctx, state), ctx);
 
   if (ctx.role === 'guardian') {
     const verdict = classify(ctx);
@@ -244,8 +324,12 @@ export async function handlePreToolUse(payload, options = {}) {
     };
   }
 
-  const state = readState(home, ctx.conversationId);
-  const classification = classify(ctx, { escalatedCommandApproved: state.escalatedCommandApproved });
+  noteTerminalUse(ctx, state);
+  const classification = classify(ctx, {
+    escalatedCommandApproved: state.escalatedCommandApproved,
+    untrusted: isUntrusted(state),
+    backgroundSuspected: state.backgroundSuspected,
+  });
   const summary = summarizeAction(ctx.toolName, ctx.args);
   const base = {
     conversation: ctx.conversationId,
@@ -299,7 +383,7 @@ export async function handlePreToolUse(payload, options = {}) {
   let prompt = null;
   try {
     evidence = gatherEvidence(ctx, { rootConversationId: state.rootConversationId });
-    prompt = buildReviewPrompt(ctx, classification, evidence, { approvals });
+    prompt = buildReviewPrompt(ctx, classification, evidence, { approvals, untrusted: state.untrusted, recentEdits: state.recentEdits });
   } catch (err) {
     result = { status: 'failed', error: `could not build the review request: ${err.message}`, attempts: 0, latencyMs: 0 };
   }
@@ -360,15 +444,37 @@ export async function handlePreToolUse(payload, options = {}) {
   return withOwnSandbox(output, ctx);
 }
 
+/**
+ * Removes any mount point still recorded for this conversation. Called when the
+ * turn ends, which is the first moment nothing can still be running against it.
+ */
+function sweepPlaceholders(home, conversationId, state) {
+  // backgroundSuspected is deliberately NOT part of this: a backgrounded
+  // command can outlive the turn, and if it did, the next command would find no
+  // mount point and no reason to be careful. Staying set costs a review only
+  // when a protected directory is missing, and that is the safe direction.
+  const pending = Object.values(state.pendingPlaceholders ?? {});
+  if (pending.length === 0) return;
+  const paths = pending.flatMap((list) => list ?? []);
+  updateState(home, conversationId, (s) => {
+    s.pendingPlaceholders = {};
+  });
+  removePlaceholders(home, conversationId, paths);
+}
+
 /** Ends the agent loop once after the circuit breaker tripped. */
 export function handlePostInvocation(payload, options = {}) {
   const env = options.env ?? process.env;
   const { config } = loadConfig({ env, home: options.home });
-  if (config.mode === 'off') return {};
   const home = resolveAutoagyHome(env, options.home);
   const conversationId = payload?.conversationId || env.ANTIGRAVITY_CONVERSATION_ID;
   if (!conversationId) return {};
   const state = readState(home, conversationId);
+  // The turn is over, so nothing can still be holding a mount point: sweep the
+  // ones PostToolUse did not see (a backgrounded command, or a mode switch).
+  // Read-only first, so an idle conversation does not get a state file written.
+  sweepPlaceholders(home, conversationId, state);
+  if (config.mode === 'off') return {};
   if (!state.interrupt?.pending) return {};
   updateState(home, conversationId, (s) => {
     if (s.interrupt) s.interrupt.pending = false;

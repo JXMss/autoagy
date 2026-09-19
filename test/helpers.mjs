@@ -28,7 +28,9 @@ export function makeSandboxDirs() {
     brain,
     conversationId,
     transcriptPath: path.join(logs, 'transcript_full.jsonl'),
-    env: { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy'), HOME: home, PATH: process.env.PATH },
+    // AUTOAGY_UNSAFE_MOCK_REVIEWER opts the mock reviewer back in; loadConfig
+    // refuses it otherwise, so the tests that drive the real binary need it.
+    env: { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy'), HOME: home, PATH: process.env.PATH, AUTOAGY_UNSAFE_MOCK_REVIEWER: '1' },
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -51,7 +53,10 @@ export function payloadFor(dirs, name, args, extra = {}) {
   };
 }
 
-export function contextFor(dirs, name, args, { config = configWith(), env = dirs.env, host, extra } = {}) {
+export function contextFor(dirs, name, args, { config = configWith(), env = dirs.env, host, extra, bwrapProbe } = {}) {
   const fakeHost = host === undefined ? { kind: 'cli', cwd: dirs.workspace, argv: ['agy'], flags: { skipPermissions: false, sandbox: false, addDirs: [] } } : host;
-  return new HookContext(payloadFor(dirs, name, args, extra), { config, env, home: dirs.home, host: fakeHost, tempRoots: [dirs.tmp] });
+  return new HookContext(payloadFor(dirs, name, args, extra), { config, env, home: dirs.home, host: fakeHost, tempRoots: [dirs.tmp], bwrapProbe });
 }
+
+/** A bubblewrap probe that reports success, so the own sandbox is "active" without running bwrap. */
+export const okProbe = () => ({ ok: true, bwrap: '/usr/bin/bwrap', detail: 'test' });

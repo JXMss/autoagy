@@ -37,6 +37,21 @@ function writeConfig(config) {
   writeConfigFile(config);
 }
 
+/**
+ * Approves an edit, swaps a path component before it runs, and lets the
+ * PostToolUse check notice. This is what flags a conversation as untrusted.
+ */
+function swapUnderApprovedEdit() {
+  const src = path.join(dirs.workspace, 'src');
+  const target = path.join(src, 'a.js');
+  fs.rmSync(src, { recursive: true, force: true });
+  assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: target, CodeContent: 'x' }, ws()), { mock: 'allow' }).decision, 'allow');
+  fs.symlinkSync(dirs.home, src);
+  runHook('post-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: target, CodeContent: 'x' }, ws()));
+  assert.equal(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).untrusted?.reason, 'edit-target-changed');
+  return src;
+}
+
 /** `mock` selects the config-file mock reviewer for this call, on top of the current config. */
 function runHook(event, payload, { mock, capture = null, env = {} } = {}) {
   if (mock !== undefined) {
@@ -213,6 +228,29 @@ test('environment variables cannot weaken the policy or pick the reviewer', () =
 test('internal errors never let a subagent start unreviewed', () => {
   assert.equal(failClosedOutput({ toolCall: { name: 'invoke_subagent' } }, new Error('x')).decision, 'deny');
   assert.equal(failClosedOutput({ toolCall: { name: 'send_message' } }, new Error('x')).decision, 'allow');
+  // The browser subagent drives a browser on its own, so it is not part of the
+  // set that stays usable when autoagy cannot classify anything.
+  assert.equal(failClosedOutput({ toolCall: { name: 'browser_subagent' } }, new Error('x')).decision, 'deny');
+});
+
+test('an untrusted conversation also loses its content reads on an internal error', () => {
+  const tool = (name) => ({ toolCall: { name } });
+  assert.equal(failClosedOutput(tool('view_file'), new Error('x')).decision, 'allow');
+  assert.equal(failClosedOutput(tool('view_file'), new Error('x'), { untrusted: true }).decision, 'deny');
+  // Listing a directory returns no file contents, so it keeps working.
+  assert.equal(failClosedOutput(tool('list_dir'), new Error('x'), { untrusted: true }).decision, 'allow');
+});
+
+test('mode off never asks the user when agy cannot show the prompt', async () => {
+  const host = { kind: 'cli', cwd: dirs.workspace, argv: ['agy'], flags: { skipPermissions: true, sandbox: false, addDirs: [] } };
+  writeConfig({ mode: 'off' });
+  const payload = payloadFor(dirs, 'run_command', { CommandLine: 'npm install', BypassSandbox: true }, ws());
+  // force_ask would be auto-approved under this flag, so it has to become a denial.
+  const out = await handlePreToolUse(payload, { env: dirs.env, home: dirs.home, host });
+  assert.equal(out.decision, 'deny');
+  assert.match(out.reason, /cannot ask the user here/);
+  const normalHost = { ...host, flags: { ...host.flags, skipPermissions: false } };
+  assert.equal((await handlePreToolUse(payload, { env: dirs.env, home: dirs.home, host: normalHost })).decision, 'force_ask');
 });
 
 test('an edit whose target is swapped after approval trips the circuit breaker', () => {
@@ -236,4 +274,50 @@ test('an edit whose target is swapped after approval trips the circuit breaker',
   assert.equal(blocked.decision, 'deny');
   assert.match(blocked.reason, /resolved to .* when the write_to_file was approved/);
   fs.rmSync(path.join(dirs.workspace, 'src'), { force: true });
+});
+
+test('a swapped edit target leaves the conversation untrusted, not just the turn', () => {
+  const src = swapUnderApprovedEdit();
+  const capture = path.join(dirs.root, 'review-prompt.txt');
+  const other = path.join(dirs.workspace, 'b.js');
+  try {
+    // A new user message ends the turn, which clears the circuit breaker — but
+    // the symlink is still on disk, so the conversation stays untrusted.
+    writeTranscript(['fix the build', 'carry on']);
+    const next = runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: other, CodeContent: 'y' }, ws()), { mock: 'allow', capture });
+    assert.equal(next.decision, 'allow', 'the mock reviewer approves it');
+    const [record] = readDecisions(dirs.env.AUTOAGY_HOME, 1);
+    assert.equal(record.category, 'untrusted-write', 'but it went through review');
+    assert.match(fs.readFileSync(capture, 'utf8'), /CONVERSATION TRUST START/, 'and the reviewer was told why');
+  } finally {
+    fs.rmSync(src, { force: true });
+  }
+});
+
+test('autoagy trust clears the untrusted flag', () => {
+  const src = swapUnderApprovedEdit();
+  try {
+    const home = dirs.env.AUTOAGY_HOME;
+    const res = spawnSync(process.execPath, [BIN, 'trust'], { env: dirs.env, encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /Trusted again/);
+    assert.equal(readState(home, dirs.conversationId).untrusted, null);
+    // Once cleared there is nothing left to clear.
+    assert.equal(spawnSync(process.execPath, [BIN, 'trust'], { env: dirs.env, encoding: 'utf8' }).stdout, 'No conversation is flagged as untrusted.\n');
+  } finally {
+    fs.rmSync(src, { force: true });
+  }
+});
+
+test('mode off still asks about an untrusted conversation\'s edits', () => {
+  const src = swapUnderApprovedEdit();
+  try {
+    writeConfig({ mode: 'off' });
+    writeTranscript(['fix the build', 'carry on']);
+    const out = runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: path.join(dirs.workspace, 'b.js'), CodeContent: 'y' }, ws()));
+    assert.equal(out.decision, 'force_ask');
+    assert.match(out.reason, /no longer trusted/);
+  } finally {
+    fs.rmSync(src, { force: true });
+  }
 });

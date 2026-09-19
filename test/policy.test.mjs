@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { classify, plannedAction } from '../plugin/lib/policy.mjs';
-import { makeSandboxDirs, contextFor, configWith } from './helpers.mjs';
+import { makeSandboxDirs, contextFor, configWith, okProbe } from './helpers.mjs';
+import { PROTECTED_WORKSPACE_DIRS } from '../plugin/lib/context.mjs';
 
 const dirs = makeSandboxDirs();
 after(() => dirs.cleanup());
@@ -122,8 +123,15 @@ test('commands touching autoagy itself never match allow rules', () => {
 test('network, browser and MCP', () => {
   assert.equal(verdict('read_url_content', { Url: 'http://localhost:3000/health' }).verdict, 'allow');
   assert.equal(verdict('read_url_content', { Url: 'https://example.com/?q=1' }).category, 'network');
+  // The fetch allowlist and the browser allowlist are separate: a domain being
+  // safe to fetch is not evidence that loading its page is safe, since the page
+  // runs its scripts in a networked browser outside every sandbox.
   const trusted = configWith({ trustedDomains: ['python.org'] });
-  assert.equal(verdict('open_browser_url', { Url: 'https://docs.python.org/3/' }, { config: trusted }).verdict, 'allow');
+  assert.equal(verdict('read_url_content', { Url: 'https://docs.python.org/3/' }, { config: trusted }).verdict, 'allow');
+  assert.equal(verdict('open_browser_url', { Url: 'https://docs.python.org/3/' }, { config: trusted }).category, 'network');
+  const browserTrusted = configWith({ browserTrustedDomains: ['python.org'] });
+  assert.equal(verdict('open_browser_url', { Url: 'https://docs.python.org/3/' }, { config: browserTrusted }).verdict, 'allow');
+  assert.equal(verdict('open_browser_url', { Url: 'http://localhost:3000/' }).category, 'network');
   assert.equal(verdict('browser_click_element', { Index: 3 }).category, 'browser-action');
   assert.equal(verdict('browser_click_element', { Index: 3 }, { config: configWith({ browser: 'allow' }) }).verdict, 'allow');
   assert.equal(verdict('capture_browser_screenshot', {}).verdict, 'allow');
@@ -139,9 +147,70 @@ test('code execution, agent definitions and unknown tools are reviewed', () => {
   assert.equal(verdict('brand_new_tool', {}).category, 'unknown-tool');
 });
 
-test('terminal input is reviewed once an escalated command was approved', () => {
-  assert.equal(classify(contextFor(dirs, 'send_command_input', { Input: 'y\n' })).verdict, 'allow');
-  assert.equal(classify(contextFor(dirs, 'send_command_input', { Input: 'y\n' }), { escalatedCommandApproved: true }).verdict, 'review');
+test('a browser subagent, image generation and deleting knowledge are reviewed', () => {
+  assert.equal(verdict('browser_subagent', { Task: 'find the price' }).category, 'browser-subagent');
+  assert.equal(verdict('browser_subagent', { Task: 'find the price' }, { config: configWith({ browser: 'allow' }) }).verdict, 'allow');
+  assert.equal(verdict('generate_image', { Prompt: 'a cat' }).category, 'image-generation');
+  assert.equal(verdict('delete_knowledge', { Id: 'x' }).category, 'destructive-knowledge');
+  // The coordination tools are still allowed outright.
+  assert.equal(verdict('manage_subagents', {}).verdict, 'allow');
+  assert.equal(verdict('send_message', { To: 'x', Message: 'hi' }).verdict, 'allow');
+});
+
+test('terminal input needs autoagy\'s own sandbox, not just a declared one', () => {
+  const own = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe };
+  assert.equal(classify(contextFor(dirs, 'send_command_input', { Input: 'y\n' }, own)).verdict, 'allow');
+  assert.equal(classify(contextFor(dirs, 'send_command_input', { Input: 'y\n' }, own), { escalatedCommandApproved: true }).verdict, 'review');
+  // Antigravity's own sandbox is not evidence: it leaves .git and the
+  // conversation log writable, so keystrokes into it stay reviewed.
+  assert.equal(classify(contextFor(dirs, 'send_command_input', { Input: 'y\n' })).verdict, 'review');
+});
+
+test('an untrusted conversation reviews every edit and content read', () => {
+  const target = path.join(dirs.workspace, 'src', 'a.js');
+  const edit = { TargetFile: target, CodeContent: 'x' };
+  const read = { AbsolutePath: target };
+  const withState = (name, args, state) => classify(contextFor(dirs, name, args), state);
+  assert.equal(withState('write_to_file', edit, {}).verdict, 'allow');
+  assert.equal(withState('view_file', read, {}).verdict, 'allow');
+  assert.equal(withState('write_to_file', edit, { untrusted: true }).category, 'untrusted-write');
+  assert.equal(withState('view_file', read, { untrusted: true }).category, 'untrusted-read');
+  // Reads that return no file contents keep working: the workspace is still the
+  // workspace, and blocking listings would wedge the session for nothing.
+  assert.equal(withState('list_dir', { DirectoryPath: dirs.workspace }, { untrusted: true }).verdict, 'allow');
+});
+
+test('a command that would run without its read-only mount point is reviewed', () => {
+  const own = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe };
+  const targets = PROTECTED_WORKSPACE_DIRS.map((d) => path.join(dirs.workspace, d));
+  for (const t of targets) fs.rmSync(t, { recursive: true, force: true });
+  try {
+    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls' }, own), {}).verdict, 'allow');
+    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls' }, own), { backgroundSuspected: true }).category, 'unprotected-control-directory');
+    // With every protected directory present there is nothing left to mount
+    // over, so a command possibly still running no longer matters.
+    for (const t of targets) fs.mkdirSync(t, { recursive: true });
+    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls' }, own), { backgroundSuspected: true }).verdict, 'allow');
+  } finally {
+    for (const t of targets) fs.rmSync(t, { recursive: true, force: true });
+  }
+});
+
+test('relocating HOME or starting another agy needs review', () => {
+  const home = 'HOME=/tmp/elsewhere ls';
+  const agy = './agy -c';
+  assert.equal(verdict('run_command', { CommandLine: home }).category, 'touches-security-controls');
+  assert.equal(verdict('run_command', { CommandLine: agy }).category, 'starts-antigravity');
+  assert.equal(verdict('run_command', { CommandLine: '/usr/local/bin/agy -c' }).category, 'starts-antigravity');
+  // Ordinary variables are not assignments of the ones that matter.
+  assert.equal(verdict('run_command', { CommandLine: 'XDG_CONFIG_HOME=/tmp/x ls' }).category, 'sandboxed-command');
+});
+
+test('an untrusted conversation refuses a command that touches the security controls', () => {
+  assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'cat ~/.gemini/autoagy/config.json' }), { untrusted: true }).verdict, 'deny');
+  // Everything else keeps its normal verdict: it is reviewed or allowed on its
+  // own merits, not refused for the state of the conversation.
+  assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls' }), { untrusted: true }).category, 'sandboxed-command');
 });
 
 test('guardian sessions are read-only', () => {

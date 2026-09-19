@@ -43,6 +43,56 @@ const BASE_ARGS = [
 // opens it with a plain shell redirection.
 export const SECCOMP_FD = 3;
 
+// The environment the sandbox starts from. Everything else the hook inherited is
+// dropped: the hook runs inside agy's environment, which holds the API keys and
+// tokens of whatever the user has exported, and a sandboxed command could read
+// them without review and carry them into the transcript. An allowlist rather
+// than a denylist, because a denylist's failure mode is a secret leaking.
+const ENV_ALLOWLIST = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TMPDIR', 'TZ', 'PWD', 'LANG'];
+const ENV_ALLOWLIST_PREFIXES = ['LC_'];
+/** Long values only inflate the tool-call payload the agent sees. */
+const ENV_VALUE_MAX = 4096;
+const PATH_FALLBACK = '/usr/local/bin:/usr/bin:/bin';
+
+/** True for the names `sandboxEnv` passes through by default. */
+export function envNameAllowed(name, passThrough = []) {
+  if (ENV_ALLOWLIST.includes(name) || ENV_ALLOWLIST_PREFIXES.some((p) => name.startsWith(p))) return true;
+  return passThrough.some((pattern) => (pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern));
+}
+
+/**
+ * A PATH with the entries an unreviewed command could have written removed. A
+ * `node_modules/.bin` or `.venv/bin` entry inside a writable root is a
+ * write-then-execute primitive: the agent edits a file, then any command
+ * resolves it through PATH.
+ */
+export function safePath(value, writableRoots = []) {
+  const kept = String(value ?? '')
+    .split(path.delimiter)
+    .filter((entry) => entry && path.isAbsolute(entry))
+    .filter((entry) => {
+      const real = resolveReal(entry);
+      return !writableRoots.some((root) => isWithin(entry, root) || isWithin(real, root));
+    });
+  return kept.length > 0 ? kept.join(path.delimiter) : PATH_FALLBACK;
+}
+
+/**
+ * The environment variables the sandboxed command starts with.
+ * @param {NodeJS.ProcessEnv} env the hook's environment (not process.env, so tests can inject)
+ * @param {{ writableRoots?: string[], passThrough?: string[] }} options
+ * @returns {[string, string][]} name/value pairs, in a stable order
+ */
+export function sandboxEnv(env = {}, { writableRoots = [], passThrough = [] } = {}) {
+  const out = [];
+  for (const name of Object.keys(env).sort()) {
+    if (!envNameAllowed(name, passThrough)) continue;
+    const value = String(env[name] ?? '');
+    out.push([name, name === 'PATH' ? safePath(value, writableRoots) : value.slice(0, ENV_VALUE_MAX)]);
+  }
+  return out;
+}
+
 function trustedBinary(candidates) {
   for (const file of candidates) {
     try {
@@ -216,13 +266,22 @@ export function readOnlyPaths(ctx) {
  * again afterwards. Codex stages the same placeholder for the same reason.
  * @returns {string[]} the mount points that were created
  */
-export function controlPlaceholders(ctx) {
-  const made = [];
+export function missingControlPaths(ctx) {
+  const out = [];
   for (const p of ctx.workspaceControlPaths) {
     // Only a directory the command could create: one inside a writable root,
     // whose parent is there already.
     if (fs.existsSync(p) || !fs.existsSync(path.dirname(p))) continue;
     if (!ctx.writableRoots.some((root) => isWithin(p, root))) continue;
+    out.push(p);
+  }
+  return out;
+}
+
+/** Creates the mount points `missingControlPaths` found, for bwrap to mount over. */
+export function controlPlaceholders(ctx) {
+  const made = [];
+  for (const p of missingControlPaths(ctx)) {
     try {
       fs.mkdirSync(p);
       made.push(p);
@@ -234,15 +293,30 @@ export function controlPlaceholders(ctx) {
   return made;
 }
 
-/** Removes the mount points `controlPlaceholders` made, if nothing is in them. */
+/**
+ * Removes the mount points `controlPlaceholders` made, if nothing is in them.
+ *
+ * A mount point that still has entries is not noise: bwrap mounts its tmpfs
+ * inside the child's own mount namespace, so the directory on the host stays
+ * empty for the whole command. Anything found in it was written through a path
+ * the mount did not cover, which is the only signal that the rewrite failed to
+ * protect the directory.
+ *
+ * @returns {{ removed: string[], dirty: string[] }}
+ */
 export function removeControlPlaceholders(paths) {
+  const removed = [];
+  const dirty = [];
   for (const p of paths ?? []) {
     try {
       fs.rmdirSync(p);
-    } catch {
-      // gone, or something the command left in it
+      removed.push(p);
+    } catch (err) {
+      // Gone already, or something the command left in it.
+      if (err?.code === 'ENOTEMPTY' || err?.code === 'EEXIST') dirty.push(p);
     }
   }
+  return { removed, dirty };
 }
 
 /**
@@ -268,6 +342,17 @@ export function confinedCommandLine(ctx, commandLine, { placeholders } = {}) {
     } catch {
       // gone since it was listed
     }
+  }
+  // --clearenv must come before every --setenv, or it clears the values back
+  // out again. The mounts above are already in place; the environment comes last
+  // so the ordering is visible in one place.
+  args.push('--clearenv');
+  // HOME comes from the policy's home, not the inherited one, so the command's
+  // `~` is the same `~` the credential list and the protected paths are built
+  // from even when the environment says otherwise.
+  const env = { ...ctx.env, HOME: ctx.home ?? ctx.env.HOME };
+  for (const [name, value] of sandboxEnv(env, { writableRoots: ctx.writableRoots, passThrough: ctx.config.ownSandboxEnvPassThrough })) {
+    args.push('--setenv', name, value);
   }
   const filter = seccompProgramFile(ctx.autoagyHome);
   const call = [ctx.ownSandbox.bwrap, ...args, '--seccomp', String(SECCOMP_FD), '--', shellPath(), '-c', commandLine];

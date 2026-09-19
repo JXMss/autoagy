@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applySetup, applyTeardown, pinNodeInHooks, planSetup, cliSettingsPath } from '../plugin/lib/setup.mjs';
+import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath } from '../plugin/lib/setup.mjs';
 import { configPath } from '../plugin/lib/config.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-setup-'));
@@ -57,15 +57,29 @@ test('only AUTOAGY_HOME relocates the config file', () => {
   assert.equal(configPath({ AUTOAGY_HOME: path.join(root, 'alt') }, home), path.join(root, 'alt', 'config.json'));
 });
 
-test('pinNodeInHooks rewrites bare node commands', () => {
+test('pinHookCommands rewrites bare node commands', () => {
   const dir = path.join(root, 'plugin');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, 'hooks.json'),
     JSON.stringify({ autoagy: { PreToolUse: [{ matcher: '*', hooks: [{ command: 'node ./bin/autoagy.mjs hook pre-tool-use' }] }], PostInvocation: [{ command: 'node ./bin/autoagy.mjs hook post-invocation' }] } }),
   );
-  assert.equal(pinNodeInHooks(dir, '/opt/node 22/bin/node').changed, 2);
+  assert.equal(pinHookCommands(dir, { nodePath: '/opt/node 22/bin/node' }).changed, 2);
   const hooks = JSON.parse(fs.readFileSync(path.join(dir, 'hooks.json'), 'utf8'));
   assert.equal(hooks.autoagy.PreToolUse[0].hooks[0].command, '"/opt/node 22/bin/node" ./bin/autoagy.mjs hook pre-tool-use');
-  assert.equal(pinNodeInHooks(dir, '/usr/bin/node').changed, 0);
+  assert.equal(pinHookCommands(dir, { nodePath: '/usr/bin/node' }).changed, 0);
+});
+
+test('pinHookCommands pins the configuration directory and home', () => {
+  const dir = path.join(root, 'plugin-pinned');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'hooks.json');
+  fs.writeFileSync(file, JSON.stringify({ autoagy: { PreToolUse: [{ hooks: [{ command: 'node ./bin/autoagy.mjs hook pre-tool-use' }] }] } }));
+  const configHome = '/home/someone with space/.gemini/autoagy';
+  assert.equal(pinHookCommands(dir, { nodePath: '/usr/bin/node', configHome, home: '/home/someone' }).changed, 1);
+  const command = JSON.parse(fs.readFileSync(file, 'utf8')).autoagy.PreToolUse[0].hooks[0].command;
+  assert.match(command, /--autoagy-home "\/home\/someone with space\/\.gemini\/autoagy"/);
+  assert.match(command, /--home \/home\/someone$/);
+  // Running setup again must not append the flags a second time.
+  assert.equal(pinHookCommands(dir, { nodePath: '/usr/bin/node', configHome, home: '/home/someone' }).changed, 0);
 });

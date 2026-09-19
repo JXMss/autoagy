@@ -13,6 +13,7 @@ import path from 'node:path';
 import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, executableName } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
 import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, expandHome } from './paths.mjs';
+import { missingControlPaths } from './confine.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
   'view_file',
@@ -48,10 +49,13 @@ export const READ_ONLY_TOOLS = new Set([
 ]);
 
 // Tools that return file contents to the model (credential reads are reviewed).
-const CONTENT_READ_TOOLS = new Set(['view_file', 'view_content_chunk', 'view_file_outline', 'view_code_item', 'read_file', 'grep_search']);
+// Also the reads an untrusted conversation loses, since a read follows symlinks.
+export const CONTENT_READ_TOOLS = new Set(['view_file', 'view_content_chunk', 'view_file_outline', 'view_code_item', 'read_file', 'grep_search']);
 
 // Coordination tools with no side effects outside the agent runtime
-// (invoke_subagent is classified on its own, see classifySubagents).
+// (invoke_subagent is classified on its own, see classifySubagents; the tools
+// that do act outside the runtime — the browser subagent, image generation,
+// knowledge deletion — are classified on their own, see classifyOutsideRuntime).
 export const AGENT_TOOLS = new Set([
   'manage_subagents',
   'manage_task',
@@ -67,10 +71,32 @@ export const AGENT_TOOLS = new Set([
   'ask_question',
   'ask_permission',
   'ask_custom_permission',
-  'generate_image',
-  'browser_subagent',
-  'delete_knowledge',
 ]);
+
+// Tools that stay allowed when autoagy itself fails or its hook times out.
+// Deliberately a separate literal set rather than a reference to AGENT_TOOLS:
+// adding a tool to the coordination list must not silently widen the path that
+// runs with no supervision at all.
+export const FAIL_OPEN_TOOLS = new Set([
+  'manage_subagents',
+  'manage_task',
+  'manage_inbox',
+  'schedule',
+  'send_message',
+  'wait',
+  'wait_5_seconds',
+  'finish',
+  'notify_user',
+  'task_boundary',
+  'suggested_responses',
+  'ask_question',
+  'ask_permission',
+  'ask_custom_permission',
+]);
+
+// Agent tools that do have effects outside the agent runtime, so they are not
+// covered by the coordination allow above.
+export const OUTSIDE_RUNTIME_TOOLS = new Set(['browser_subagent', 'generate_image', 'delete_knowledge']);
 
 export const FILE_EDIT_TOOLS = new Set([
   'write_to_file',
@@ -119,14 +145,20 @@ const deny = (category, reason) => ({ verdict: 'deny', category, reason });
 export function classify(ctx, state = {}) {
   const name = ctx.toolName;
   if (ctx.role === 'guardian') return classifyGuardianTool(ctx);
-  if (READ_ONLY_TOOLS.has(name)) return classifyRead(ctx);
+  if (READ_ONLY_TOOLS.has(name)) return classifyRead(ctx, state);
   if (name === 'invoke_subagent') return classifySubagents(ctx);
   if (AGENT_TOOLS.has(name)) return allow('agent-coordination');
-  if (FILE_EDIT_TOOLS.has(name)) return classifyFileEdit(ctx);
-  if (name === 'run_command') return classifyCommand(ctx);
+  if (OUTSIDE_RUNTIME_TOOLS.has(name)) return classifyOutsideRuntime(ctx);
+  if (FILE_EDIT_TOOLS.has(name)) return classifyFileEdit(ctx, state);
+  if (name === 'run_command') return classifyCommand(ctx, state);
   if (name === 'send_command_input') {
-    if (ctx.sandbox.active && !state.escalatedCommandApproved) return allow('terminal-input', 'input to a sandboxed terminal');
-    return review('terminal-input', 'Input to a running terminal that may not be confined by the terminal sandbox.');
+    // Only autoagy's own sandbox is evidence that the terminal the keystrokes
+    // reach is confined: config.sandbox "on" is a declaration, and Antigravity's
+    // sandbox leaves .git and the conversation log writable.
+    if (ctx.ownSandbox.active && !state.escalatedCommandApproved && !state.untrusted) {
+      return allow('terminal-input', 'input to a terminal inside autoagy\'s own sandbox');
+    }
+    return review('terminal-input', 'Input to a running terminal that is not confined by autoagy\'s own sandbox.');
   }
   if (URL_TOOLS.has(name)) return classifyUrl(ctx);
   if (BROWSER_ACTION_TOOLS.has(name)) {
@@ -142,6 +174,25 @@ export function classify(ctx, state = {}) {
     );
   }
   return review('unknown-tool', `Tool "${name || '(unnamed)'}" is not known to autoagy, so it is reviewed.`);
+}
+
+/**
+ * The decision used when autoagy cannot classify a call itself: its own internal
+ * error, or the hook watchdog firing before the decision was ready.
+ *
+ * Reads and the coordination tools stay usable — blocking them would wedge the
+ * session for no gain. Everything else is refused, and a conversation whose
+ * paths were already swapped also loses its content reads: after a swap a read
+ * follows the symlink to wherever it now points.
+ *
+ * @param {{ toolCall?: { name?: string } }} payload
+ * @param {{ untrusted?: boolean, reason: string }} options
+ */
+export function failOpenOutput(payload, { untrusted = false, reason } = {}) {
+  const name = payload?.toolCall?.name;
+  if (FAIL_OPEN_TOOLS.has(name)) return { decision: 'allow' };
+  if (READ_ONLY_TOOLS.has(name) && !(untrusted && CONTENT_READ_TOOLS.has(name))) return { decision: 'allow' };
+  return { decision: 'deny', reason };
 }
 
 /**
@@ -206,6 +257,27 @@ function classifySubagents(ctx) {
   return allow('agent-coordination');
 }
 
+/**
+ * Agent tools that reach outside the agent runtime. The coordination allow does
+ * not cover them: a browser subagent navigates, clicks and types on its own, so
+ * none of that passes through this policy; image generation writes to a path the
+ * policy never sees; deleting knowledge is not recoverable from the workspace.
+ */
+function classifyOutsideRuntime(ctx) {
+  const name = ctx.toolName;
+  if (name === 'browser_subagent') {
+    if (ctx.config.browser === 'allow') return allow('browser-subagent');
+    return review(
+      'browser-subagent',
+      'Starts a subagent that drives the browser itself. Its navigation and clicks are not classified one by one here, so the browser-action rules cannot see them.',
+    );
+  }
+  if (name === 'delete_knowledge') {
+    return review('destructive-knowledge', 'Deletes stored knowledge. Nothing in the workspace can restore it.');
+  }
+  return review('image-generation', 'Writes an image to a path this policy does not see, so it cannot check that it lands inside a writable root.');
+}
+
 function classifyGuardianTool(ctx) {
   const name = ctx.toolName;
   if (READ_ONLY_TOOLS.has(name) && !name.includes('browser')) return allow('guardian-read');
@@ -225,8 +297,13 @@ function pathArgs(args) {
   return out;
 }
 
-function classifyRead(ctx) {
+function classifyRead(ctx, state = {}) {
   if (!CONTENT_READ_TOOLS.has(ctx.toolName)) return allow('read');
+  // Reading follows symlinks, so in a conversation where part of a path was
+  // already swapped, a read of a file that looks harmless can land anywhere.
+  if (state.untrusted) {
+    return review('untrusted-read', 'Reads are reviewed from here on: an earlier action in this conversation changed what a path resolves to, so this read may not land where it appears to.');
+  }
   const candidates = [...pathArgs(ctx.args), ctx.args.SearchPath].filter((p) => typeof p === 'string');
   for (const raw of candidates) {
     const abs = toAbsolute(raw, ctx.baseDir, ctx.home);
@@ -297,8 +374,13 @@ export function classifyWriteTarget(ctx, abs) {
   return 'outside';
 }
 
-function classifyFileEdit(ctx) {
+function classifyFileEdit(ctx, state = {}) {
   const raws = pathArgs(ctx.args);
+  // Checked before the target walk, so a workspace path that would normally be
+  // auto-approved is still reviewed once the conversation is untrusted.
+  if (state.untrusted && raws.length > 0) {
+    return review('untrusted-write', 'Edits are reviewed from here on: an earlier action in this conversation changed what a path resolves to, and agy writes edited files itself, outside every sandbox.');
+  }
   if (raws.length === 0) return review('write-unknown-target', 'Could not determine which file this edit targets.');
   let sawOutside = null;
   let sawProtected = null;
@@ -350,7 +432,12 @@ export function editTargets(ctx) {
   return out;
 }
 
+// Assignments that relocate the harness or `~` for whatever the command starts.
+// An assignment rather than a bare substring: `XDG_CONFIG_HOME=` must not match.
+const ENV_ASSIGNMENT_RE = /(?:^|[\s;&|(])(HOME|AGY_[A-Z_]*|ANTIGRAVITY_[A-Z_]*|JETSKI_[A-Z_]*)=/;
+
 function mentionsSelf(ctx, commandLine) {
+  if (ENV_ASSIGNMENT_RE.test(commandLine)) return true;
   // AUTOAGY_*: variables such as AUTOAGY_HOME relocate autoagy's config for an agy the command starts.
   const needles = new Set(['.system_generated', 'AUTOAGY_']);
   for (const p of ctx.selfPaths) {
@@ -363,7 +450,7 @@ function mentionsSelf(ctx, commandLine) {
   return [...needles].some((n) => n.length > 3 && commandLine.includes(n));
 }
 
-function classifyCommand(ctx) {
+function classifyCommand(ctx, state = {}) {
   const commandLine = ctx.args.CommandLine;
   if (typeof commandLine !== 'string' || commandLine.trim() === '') {
     return review('command-unparseable', 'The command line is missing or empty.');
@@ -373,9 +460,31 @@ function classifyCommand(ctx) {
   const selfNote = mentionsSelf(ctx, commandLine)
     ? ' The command references autoagy’s own files or environment variables, or Antigravity’s conversation logs, which are security controls and review evidence.'
     : '';
+  // In an untrusted conversation the review evidence is exactly what is in
+  // doubt, so a command that reaches for it is refused rather than judged.
+  if (selfNote && state.untrusted) {
+    return deny('touches-security-controls', `autoagy: refused because this conversation is no longer trusted.${selfNote} Ask the user to look at what changed on disk first.`);
+  }
   // autoagy's own sandbox hides credential stores; elsewhere a command naming one is reviewed.
   const credential = bypass || !ctx.ownSandbox.active ? credentialArgument(ctx, analysis, ctx.args.Cwd) : null;
   const credentialNote = credential ? ` The command names ${credential}, a location that commonly holds credentials or secrets.` : '';
+
+  // A protected directory that does not exist yet is covered by a mount point
+  // autoagy creates for the command and reclaims afterwards. With a command
+  // possibly still running in a terminal, that mount point cannot be reclaimed
+  // safely, so the command runs with the directory unprotected — unless it is
+  // reviewed first. Checked before the rules, so a user allow-rule cannot wave
+  // it through. Inside the sandbox a plain command is otherwise auto-allowed,
+  // so this is the only place that notices.
+  if (!bypass && ctx.ownSandbox.active && state.backgroundSuspected) {
+    const unprotected = missingControlPaths(ctx);
+    if (unprotected.length > 0) {
+      return review(
+        'unprotected-control-directory',
+        `A command may still be running in a terminal, so autoagy cannot safely reclaim the read-only mount point it would put over ${unprotected.join(', ')}. Reviewed instead of run with that directory unprotected.`,
+      );
+    }
+  }
 
   const rules = evaluateRules(analysis, ctx.config.rules);
   if (rules.decision === 'forbidden') {
@@ -393,6 +502,14 @@ function classifyCommand(ctx) {
   // never wave through commands that touch autoagy or the conversation logs.
   if (selfNote) return review('touches-security-controls', selfNote.trim());
   if (credential) return review('credential-read', credentialNote.trim());
+  // Starting another Antigravity is never routine: whether these hooks are
+  // loaded at all is decided by that instance's own configuration and
+  // environment, and this call can set both. Placed after the categories above
+  // so no existing verdict changes.
+  const started = (analysis.segments ?? []).find((s) => /^agy(\.exe)?$/i.test(executableName(s.argv?.[0] ?? '')));
+  if (started) {
+    return review('starts-antigravity', `Starts another Antigravity instance (\`${started.argv.join(' ')}\`). Whether autoagy reviews that session depends on configuration and environment this call can choose.`);
+  }
   if (!ctx.sandbox.active) {
     if (isKnownSafeCommandLine(analysis)) return allow('known-safe-command');
     return review('unsandboxed-command', `Commands are not confined by the terminal sandbox here (${ctx.sandbox.detail}).`);
@@ -423,10 +540,19 @@ export function isTrustedHost(host, trustedDomains) {
   });
 }
 
+/**
+ * Fetching a URL and navigating a browser to it are not the same exposure. A
+ * fetch returns text to the model; a navigation loads a page whose scripts run
+ * in an unsandboxed, networked browser, and a local development server usually
+ * serves files the agent may have edited without review. So the two keep
+ * separate allowlists, and the browser one is empty by default.
+ */
 function classifyUrl(ctx) {
   const url = ctx.args.Url ?? ctx.args.URL ?? ctx.args.url;
   const host = typeof url === 'string' ? hostOf(url) : null;
-  if (host && isTrustedHost(host, ctx.config.trustedDomains)) return allow('network-trusted', host);
+  const browser = ctx.toolName === 'open_browser_url';
+  const list = browser ? ctx.config.browserTrustedDomains : ctx.config.trustedDomains;
+  if (host && isTrustedHost(host, list)) return allow('network-trusted', host);
   return review('network', `Network access to ${host ?? 'an unknown host'}${typeof url === 'string' ? ` (${url})` : ''}.`);
 }
 

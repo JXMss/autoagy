@@ -2,7 +2,7 @@
 // autoagy — Codex-style auto mode ("Approve for me") for Google Antigravity.
 //
 //   autoagy hook pre-tool-use|post-tool-use|post-invocation   (called by hooks.json)
-//   autoagy status | log [-n N] | denials | approve <id> | mode <auto|ask|off>
+//   autoagy status | log [-n N] | denials | approve <id> | trust [<id>] | mode <auto|ask|off>
 //   autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only]
 //   autoagy setup [--dry-run] [--no-settings] | teardown [--dry-run]
 
@@ -11,39 +11,47 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
-import { HookContext, PLUGIN_DIR } from '../lib/context.mjs';
+import { HookContext, PLUGIN_DIR, detectSandbox } from '../lib/context.mjs';
 import { findExecutable } from '../lib/paths.mjs';
 import { detectOwnSandbox, readSandboxCheck } from '../lib/confine.mjs';
-import { classify, READ_ONLY_TOOLS, AGENT_TOOLS } from '../lib/policy.mjs';
+import { classify, failOpenOutput } from '../lib/policy.mjs';
+import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INSTRUCTIONS } from '../lib/guardian.mjs';
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
-import { listStates, updateState } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinNodeInHooks, cliSettingsPath, RECOMMENDED_GRANTS, readSetupRecord } from '../lib/setup.mjs';
+import { listStates, updateState, readState, isUntrusted } from '../lib/state.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, RECOMMENDED_GRANTS, readSetupRecord } from '../lib/setup.mjs';
 
-const HOOK_TIMEOUT_FALLBACK_SEC = 150;
-
-function hookTimeoutSec(event) {
-  const override = Number(process.env.AUTOAGY_HOOK_TIMEOUT_SEC);
-  if (Number.isFinite(override) && override > 0) return override;
+/**
+ * The home directory the account database reports. `HOME` can be set for a
+ * single command, which would move `~` for the policy (`~/.ssh/**` and friends)
+ * and for the paths the agent must never edit; this cannot be.
+ */
+export function accountHome() {
   try {
-    const hooks = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, 'hooks.json'), 'utf8'));
-    const key = { 'pre-tool-use': 'PreToolUse', 'post-tool-use': 'PostToolUse', 'post-invocation': 'PostInvocation' }[event];
-    for (const spec of Object.values(hooks)) {
-      for (const entry of spec?.[key] ?? []) {
-        for (const handler of entry.hooks ?? [entry]) {
-          if (typeof handler.command === 'string' && handler.command.includes(event)) return handler.timeout ?? 30;
-        }
-      }
-    }
+    return os.userInfo().homedir || os.homedir();
   } catch {
-    // fall through
+    return os.homedir();
   }
-  return HOOK_TIMEOUT_FALLBACK_SEC;
 }
 
-async function runHook(event) {
+/** The conversation's trust flag, for the watchdog and error fallbacks. */
+function stateIsUntrusted(payload, env, home) {
+  try {
+    return isUntrusted(readState(resolveAutoagyHome(env, home), payload?.conversationId));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * @param {string} event
+ * @param {{ configHome?: string|null, home?: string|null }} [pinned] the values
+ *   `autoagy setup` wrote into hooks.json, so a command cannot relocate the
+ *   configuration or `~` for the hook that judges it.
+ */
+async function runHook(event, pinned = {}) {
   let input = '';
   try {
     input = fs.readFileSync(0, 'utf8');
@@ -63,37 +71,43 @@ async function runHook(event) {
     const text = output === null || output === undefined ? '' : JSON.stringify(output);
     process.stdout.write(text, () => process.exit(0));
   };
+  const env = { ...process.env };
+  // Pinned wins over the inherited environment, so a command cannot point the
+  // hook at a configuration directory it can write.
+  if (pinned.configHome) env.AUTOAGY_HOME = pinned.configHome;
+  const home = pinned.home || accountHome();
   // Answer before Antigravity kills the hook, which would fail the tool call with an opaque error.
-  const budgetSec = Math.max(5, hookTimeoutSec(event) - 5);
+  const budgetSec = hookBudgetSec(event, { pluginDir: PLUGIN_DIR });
   const watchdog = setTimeout(() => {
     if (event !== 'pre-tool-use') return emit({});
-    const name = payload?.toolCall?.name;
-    emit(READ_ONLY_TOOLS.has(name) || AGENT_TOOLS.has(name) ? { decision: 'allow' } : { decision: 'deny', reason: TIMEOUT_INSTRUCTIONS });
+    // Best effort: a conversation whose paths were already swapped loses its
+    // content reads here too. A read failure is treated as trusted, which is
+    // safe because everything that changes anything is already refused below.
+    emit(failOpenOutput(payload, { untrusted: stateIsUntrusted(payload, env, home), reason: TIMEOUT_INSTRUCTIONS }));
   }, budgetSec * 1000);
   watchdog.unref();
   try {
     if (event === 'pre-tool-use') {
-      const env = { ...process.env };
-      const { config } = loadConfig({ env });
+      const { config } = loadConfig({ env, home });
       // Keep the review deadline (plus process teardown) inside the hook budget.
       const maxReview = Math.max(3, budgetSec - 3);
       if (config.reviewer.timeoutSec > maxReview) env.AUTOAGY_REVIEW_TIMEOUT_CAP = String(maxReview);
-      emit(await handlePreToolUse(payload, { env }));
+      emit(await handlePreToolUse(payload, { env, home }));
     } else if (event === 'post-tool-use') {
-      emit(handlePostToolUse(payload));
+      emit(handlePostToolUse(payload, { env, home }));
     } else if (event === 'post-invocation') {
-      emit(handlePostInvocation(payload));
+      emit(handlePostInvocation(payload, { env, home }));
     } else {
       emit({});
     }
   } catch (err) {
-    appendDecision(resolveAutoagyHome(), {
+    appendDecision(resolveAutoagyHome(env, home), {
       conversation: payload?.conversationId,
       tool: payload?.toolCall?.name,
       verdict: 'error',
       error: String(err?.stack ?? err).slice(0, 2000),
     });
-    emit(event === 'pre-tool-use' ? failClosedOutput(payload, err) : {});
+    emit(event === 'pre-tool-use' ? failClosedOutput(payload, err, { untrusted: stateIsUntrusted(payload, env, home) }) : {});
   }
 }
 
@@ -118,7 +132,39 @@ function parseFlags(args) {
   return flags;
 }
 
+/** A flag's value when it was given as `--name value`, otherwise null. */
+const strFlag = (value) => (typeof value === 'string' && value !== '' ? value : null);
+
 const fmtTime = (iso) => (iso ? iso.replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '');
+
+/**
+ * Clears the "untrusted" flag. The flag is set when the environment did
+ * something autoagy did not approve — an edit whose target resolved elsewhere,
+ * or a command that wrote into a directory the sandbox hid — and it is never
+ * cleared by starting a new turn, because a swapped symlink outlives the turn.
+ * Clearing it is therefore a claim about the filesystem that only a person can
+ * make, which is why it is a command rather than an automatic expiry.
+ */
+function trust(prefix, all) {
+  const home = resolveAutoagyHome();
+  const states = listStates(home).filter(({ state }) => isUntrusted(state));
+  if (states.length === 0) return console.log('No conversation is flagged as untrusted.');
+  const chosen = all ? states : states.filter(({ state }) => String(state.conversationId).startsWith(prefix ?? ''));
+  if (chosen.length === 0) {
+    console.log(`No untrusted conversation matches "${prefix}". Flagged:`);
+    for (const { state } of states) console.log(`  ${state.conversationId}  ${state.untrusted?.reason ?? ''}`);
+    return;
+  }
+  for (const { state } of chosen) {
+    const { reason, detail, step } = state.untrusted ?? {};
+    updateState(home, state.conversationId, (s) => {
+      s.untrusted = null;
+    });
+    console.log(`Trusted again: ${state.conversationId}`);
+    console.log(`  was flagged for ${reason}${step === null || step === undefined ? '' : ` at step ${step}`}${detail ? ` (${detail})` : ''}`);
+  }
+  console.log('Only do this after checking what changed on disk; the next edit or read is judged on its own again.');
+}
 
 function readJsonQuiet(file) {
   try {
@@ -175,8 +221,12 @@ function status() {
     const missing = RECOMMENDED_GRANTS.filter((g) => !allow.includes(g));
     if (missing.length) lines.push(`  ! missing grants ${missing.join(', ')} — approved actions may still prompt; run \`autoagy setup\``);
     if (allow.some((g) => /^read_url\(\*\)$/.test(g))) lines.push('  ! read_url(*) is granted: sandboxed commands can reach any host without review');
-    const sandbox = settings.enableTerminalSandbox === true && (settings.toolPermission ?? 'proceed-in-sandbox') === 'proceed-in-sandbox';
-    if (!sandbox && config.sandbox !== 'on') lines.push('  ! the terminal sandbox is off: every non-read-only command will be reviewed');
+    // Report what the policy will actually conclude, not what the file says: on
+    // a platform where the process arguments cannot be read, detectSandbox
+    // refuses to trust this file, and the difference is worth showing.
+    const sandbox = detectSandbox({ config, host: null, appDataDir: path.dirname(settingsFile), own });
+    lines.push(`  terminal sandbox        ${sandbox.active ? 'in force' : 'not in force'} (${sandbox.source}) — ${sandbox.detail}`);
+    if (!sandbox.active && config.sandbox !== 'on' && !own.active) lines.push('  ! every command that is not known read-only will be reviewed');
   }
   const record = readSetupRecord(home);
   lines.push(`  setup record            ${record ? `${fmtTime(record.time)} (grants added: ${record.addedGrants?.join(', ') || 'none'})` : 'none'}`);
@@ -289,7 +339,7 @@ function setup(flags) {
   console.log(`${cfg.created ? (dryRun ? 'Would create' : 'Created') : 'Keeping'} config ${cfg.file}`);
   const installedRoot = path.join(os.homedir(), '.gemini', 'config', 'plugins');
   if (PLUGIN_DIR.startsWith(installedRoot) || flags['pin-node']) {
-    const pin = pinNodeInHooks(PLUGIN_DIR, process.execPath, { dryRun });
+    const pin = pinHookCommands(PLUGIN_DIR, { configHome: resolveAutoagyHome(process.env, accountHome()), home: accountHome(), dryRun });
     console.log(pin.changed ? `${dryRun ? 'Would pin' : 'Pinned'} hook interpreter to ${process.execPath}` : 'Hook interpreter already pinned');
   }
   if (flags['no-settings']) {
@@ -323,6 +373,7 @@ Usage:
   autoagy log [-n 20]                recent decisions
   autoagy denials                    recent auto-review denials
   autoagy approve <id>               approve one retry of a denied action
+  autoagy trust [<conversation>] [--all]   trust a conversation's paths again
   autoagy mode <auto|ask|off>        switch mode
   autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only] [--show-prompt]
   autoagy setup [--dry-run] [--no-settings]
@@ -334,7 +385,7 @@ async function main() {
   const flags = parseFlags(rest);
   switch (command) {
     case 'hook':
-      return runHook(rest[0]);
+      return runHook(rest[0], { configHome: strFlag(flags['autoagy-home']), home: strFlag(flags.home) });
     case 'status':
       return status();
     case 'log':
@@ -343,6 +394,8 @@ async function main() {
       return listDenials();
     case 'approve':
       return approve(flags._[0]);
+    case 'trust':
+      return trust(flags._[0], Boolean(flags.all));
     case 'mode':
       return setMode(flags._[0]);
     case 'review':

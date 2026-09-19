@@ -33,11 +33,46 @@ function freshState(conversationId) {
     pendingPlaceholders: {},
     // stepIdx -> [{ abs, real }] a file edit targets, resolved when it was approved.
     pendingEdits: {},
+    // Set when supervision saw the environment do something it did not approve:
+    // a path that resolved elsewhere when the edit ran, or a command that wrote
+    // into a protected directory. Sticky for the conversation, because a new
+    // user message does not undo a symlink that was already swapped. See
+    // markUntrusted.
+    untrusted: null,
+    // A command may still be running in a terminal autoagy cannot observe (agy
+    // backgrounded it, or the agent has been typing into a persistent one), so
+    // PostToolUse is not evidence that a mount point is free. Sticky.
+    backgroundSuspected: false,
+    // The workspace files this conversation edited, newest last. The reviewer
+    // gets these because an edit made long ago can fall out of the trimmed
+    // transcript, and it cannot otherwise see that a path already moved.
+    recentEdits: [],
     rootConversationId: undefined,
     denials: [],
     approvals: [],
     updatedAt: null,
   };
+}
+
+/** True when the conversation's environment is no longer trusted. */
+export function isUntrusted(state) {
+  return Boolean(state?.untrusted);
+}
+
+/**
+ * Records that the conversation can no longer be trusted, together with why.
+ * Never cleared by a new turn: the condition is a fact about the filesystem,
+ * not about the agent's behaviour. `autoagy trust` clears it.
+ * @param {object} state
+ * @param {{ reason: string, detail?: string, step?: number|null, at?: string|null }} info
+ */
+export function markUntrusted(state, { reason, detail = '', step = null, at = null }) {
+  if (!state.untrusted) state.untrusted = { reason, detail, step, at };
+  else if (!state.untrusted.detail && detail) state.untrusted.detail = detail;
+  // A one-shot escalation approval from before the compromise must not keep
+  // terminal input auto-allowed for the rest of the conversation.
+  state.escalatedCommandApproved = false;
+  return state.untrusted;
 }
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);

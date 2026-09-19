@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { detectOwnSandbox, confinedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders } from '../plugin/lib/confine.mjs';
+import { detectOwnSandbox, confinedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, safePath } from '../plugin/lib/confine.mjs';
 import { seccompProgram, seccompSupported } from '../plugin/lib/seccomp.mjs';
 import { HookContext, PROTECTED_WORKSPACE_DIRS } from '../plugin/lib/context.mjs';
-import { handlePreToolUse, handlePostToolUse } from '../plugin/lib/hook.mjs';
+import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
 import { parseShell } from '../plugin/lib/shell.mjs';
 import { classify } from '../plugin/lib/policy.mjs';
+import { readState } from '../plugin/lib/state.mjs';
 import { makeSandboxDirs, configWith, payloadFor } from './helpers.mjs';
 
 const dirs = makeSandboxDirs();
@@ -24,15 +25,20 @@ function grant(on) {
   fs.writeFileSync(path.join(dirs.appData, 'settings.json'), JSON.stringify(settings));
 }
 
-function ctxFor(args, { ownSandbox = 'on', probe = okProbe, tempRoots = [dirs.tmp] } = {}) {
+function ctxFor(args, { ownSandbox = 'on', probe = okProbe, tempRoots = [dirs.tmp], env = dirs.env } = {}) {
   return new HookContext(payloadFor(dirs, 'run_command', args), {
     config: configWith({ ownSandbox }),
-    env: dirs.env,
+    env,
     home: dirs.home,
     host: cliHost(),
     tempRoots,
     bwrapProbe: probe,
   });
+}
+
+/** Runs a command line through /bin/sh and returns the result. */
+function runLine(line, env) {
+  return spawnSync('/bin/sh', ['-c', line], { cwd: dirs.workspace, encoding: 'utf8', env });
 }
 
 test('own sandbox activation: auto needs Linux, bubblewrap and the command grant', () => {
@@ -265,6 +271,99 @@ test('a program writing to a pipe keeps its output in the own sandbox', { skip: 
   const res = spawnSync('/bin/sh', ['-c', line], { cwd: dirs.workspace, encoding: 'utf8' });
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.stdout, 'PIPED-OUTPUT\nCONSOLE-LINE\n');
+});
+
+test('the sandbox environment is an allowlist, and clears before it sets', () => {
+  const env = {
+    PATH: '/usr/bin:/bin',
+    HOME: '/home/someone',
+    OPENAI_API_KEY: 'sk-not-a-real-secret',
+    SSH_AUTH_SOCK: '/run/ssh-agent.sock',
+    NODE_OPTIONS: '--require /tmp/evil.js',
+    LC_ALL: 'C.UTF-8',
+    MY_APP_TOKEN: 'x',
+  };
+  assert.deepEqual(sandboxEnv(env).map(([name]) => name), ['HOME', 'LC_ALL', 'PATH']);
+  assert.deepEqual(sandboxEnv(env, { passThrough: ['MY_APP_*'] }).map(([name]) => name), ['HOME', 'LC_ALL', 'MY_APP_TOKEN', 'PATH']);
+
+  const argv = parseShell(confinedCommandLine(ctxFor({ CommandLine: 'true' }), 'true')).commands[0].argv;
+  const clear = argv.indexOf('--clearenv');
+  assert.ok(clear > 0, '--clearenv is passed');
+  // bwrap applies these in order, so a later --clearenv would wipe the values.
+  assert.ok(argv.every((a, i) => a !== '--setenv' || i > clear), '--clearenv comes before every --setenv');
+  assert.ok(!argv.some((a) => a.includes('sk-not-a-real-secret') || a.includes('ssh-agent.sock')), 'no secret value reaches the command line');
+});
+
+test('PATH entries inside a writable root are dropped', () => {
+  const mine = path.join(dirs.workspace, 'node_modules', '.bin');
+  assert.equal(safePath(['/usr/bin', mine, '/bin'].join(path.delimiter), [dirs.workspace]), `/usr/bin${path.delimiter}/bin`);
+  assert.equal(safePath('relative/bin', [dirs.workspace]), '/usr/local/bin:/usr/bin:/bin', 'never leaves PATH empty');
+});
+
+test('a sandboxed command does not inherit the hook environment', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  const out = path.join(dirs.workspace, 'canary-out');
+  fs.rmSync(out, { force: true });
+  const env = { ...dirs.env, AUTOAGY_CANARY_SECRET: 'leaked-value' };
+  const script = `printf 'CANARY=%s\\n' "\${AUTOAGY_CANARY_SECRET:-unset}"; printf 'PATHOK=%s\\n' "$(command -v touch)"; touch ${JSON.stringify(out)}`;
+  const res = runLine(confinedCommandLine(ctxFor({ CommandLine: 'true' }, { probe: () => real, env }), script), env);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /CANARY=unset/, 'the canary variable does not reach the sandbox');
+  assert.match(res.stdout, /PATHOK=\/.*touch/, 'an external binary still resolves through the surviving PATH');
+  assert.equal(fs.existsSync(out), true);
+});
+
+test('a backgrounded command keeps its mount point until the turn ends', async () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
+  // Its own conversation: backgroundSuspected is per-conversation state and
+  // would otherwise leak into the test above.
+  const bg = { conversationId: '99999999-0000-4000-8000-ba6c6700d001', stepIdx: 40 };
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  const target = path.join(dirs.workspace, '.agents');
+  fs.rmSync(target, { recursive: true, force: true });
+
+  const started = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'npm run dev', WaitMsBeforeAsync: 5000 }, bg), opts);
+  assert.equal(started.decision, 'allow');
+  assert.equal(fs.existsSync(target), true, 'created for the command');
+
+  // A later step must not reclaim it: agy can leave the command running, so the
+  // step it was recorded under is no evidence that it has finished.
+  await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'ls' }, { ...bg, stepIdx: 41 }), opts);
+  assert.equal(fs.existsSync(target), true, 'survives a later step');
+
+  // Nor is the tool call returning.
+  assert.deepEqual(handlePostToolUse(payloadFor(dirs, 'run_command', started.overwrite, bg), opts), {});
+  assert.equal(fs.existsSync(target), true, 'survives PostToolUse');
+
+  // The end of the turn is the first moment nothing can still be holding it.
+  handlePostInvocation({ conversationId: bg.conversationId }, opts);
+  assert.equal(fs.existsSync(target), false, 'swept when the turn ends');
+  fs.rmSync(path.join(home, 'config.json'));
+});
+
+test('a mount point a command wrote into is kept and marks the conversation untrusted', async () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
+  const conversationId = '99999999-0000-4000-8000-d1r7y0000001';
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  const target = path.join(dirs.workspace, '.agents');
+  fs.rmSync(target, { recursive: true, force: true });
+
+  const pre = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'ls' }, { conversationId, stepIdx: 50 }), opts);
+  assert.equal(pre.decision, 'allow');
+  // bwrap mounts the tmpfs inside the child's namespace, so the host directory
+  // stays empty while the command runs. Anything here means the command reached
+  // the real directory the mount was supposed to hide.
+  fs.mkdirSync(path.join(target, 'planted'));
+
+  assert.deepEqual(handlePostToolUse(payloadFor(dirs, 'run_command', pre.overwrite, { conversationId, stepIdx: 50 }), opts), {});
+  assert.equal(fs.existsSync(path.join(target, 'planted')), true, 'kept as evidence');
+  assert.equal(readState(home, conversationId).untrusted?.reason, 'protected-path-written');
+
+  fs.rmSync(target, { recursive: true, force: true });
+  fs.rmSync(path.join(home, 'config.json'));
 });
 
 test('the mount points for missing protected directories exist only while the command runs', async () => {
