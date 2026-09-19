@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR, detectSandbox } from '../lib/context.mjs';
 import { findExecutable } from '../lib/paths.mjs';
-import { detectOwnSandbox, readSandboxCheck, removeControlPlaceholders, lockQuiescent } from '../lib/confine.mjs';
+import { detectOwnSandbox, readSandboxCheck, removeControlPlaceholders, lockQuiescent, flockPath } from '../lib/confine.mjs';
 import { classify, failOpenOutput } from '../lib/policy.mjs';
 import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
@@ -313,6 +313,15 @@ function status() {
   }
   const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath()), autoagyHome: autoagyHome });
   lines.push(`  own sandbox     ${own.active ? 'active' : own.required ? 'REQUIRED BUT UNAVAILABLE (commands are reviewed)' : 'inactive'} — ${own.detail}`);
+  // The degraded mode is worth saying out loud rather than falling back in
+  // silence: without a usable `flock`, autoagy cannot tell whether a sandboxed
+  // command is still running, so it has to guess — and the guess can be wrong in
+  // the direction that takes a mount point out from under a command.
+  if (own.active && !flockPath()) {
+    lines.push('  ! liveness      no root-owned `flock` (usually util-linux), so autoagy cannot tell whether a');
+    lines.push('                  sandboxed command is still running. Read-only mount points for protected');
+    lines.push('                  directories are retained until `autoagy trust`.');
+  }
   const check = readSandboxCheck(autoagyHome);
   if (check?.status === 'broken') {
     lines.push(`  ! self-check    FAILED ${fmtTime(check.time)}: ${check.detail}. The own sandbox is off for that agy build; it is checked again after agy updates.`);
