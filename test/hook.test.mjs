@@ -232,6 +232,10 @@ test('internal errors never let a subagent start unreviewed', () => {
   // The browser subagent drives a browser on its own, so it is not part of the
   // set that stays usable when autoagy cannot classify anything.
   assert.equal(failClosedOutput({ toolCall: { name: 'browser_subagent' } }, new Error('x')).decision, 'deny');
+  // Neither is a permission the agent is asking itself for: nothing on this
+  // path can tell whether a user would have answered the prompt.
+  assert.equal(failClosedOutput({ toolCall: { name: 'ask_custom_permission' } }, new Error('x')).decision, 'deny');
+  assert.equal(failClosedOutput({ toolCall: { name: 'ask_permission' } }, new Error('x')).decision, 'deny');
 });
 
 test('an untrusted conversation also loses its content reads on an internal error', () => {

@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, executableName } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
+import { HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, findExecutable } from './paths.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
@@ -52,7 +53,8 @@ export const CONTENT_READ_TOOLS = new Set(['view_file', 'view_content_chunk', 'v
 // Coordination tools with no side effects outside the agent runtime
 // (invoke_subagent is classified on its own, see classifySubagents; the tools
 // that do act outside the runtime — the browser subagent, image generation,
-// knowledge deletion — are classified on their own, see classifyOutsideRuntime).
+// knowledge deletion — are classified on their own, see classifyOutsideRuntime;
+// and so are the two that ask for a permission, see classifyPermissionAsk).
 export const AGENT_TOOLS = new Set([
   'manage_subagents',
   'manage_task',
@@ -66,14 +68,19 @@ export const AGENT_TOOLS = new Set([
   'task_boundary',
   'suggested_responses',
   'ask_question',
-  'ask_permission',
-  'ask_custom_permission',
 ]);
+
+// Tools that ask for a permission rather than doing anything themselves. They
+// are not in the list above because the answer decides whether they do
+// anything: see classifyPermissionAsk.
+export const PERMISSION_ASK_TOOLS = new Set(['ask_permission', 'ask_custom_permission']);
 
 // Tools that stay allowed when autoagy itself fails or its hook times out.
 // Deliberately a separate literal set rather than a reference to AGENT_TOOLS:
 // adding a tool to the coordination list must not silently widen the path that
-// runs with no supervision at all.
+// runs with no supervision at all. The permission asks are not here either —
+// on that path nothing can judge what they are asking for, and the request is
+// one the agent makes of itself.
 export const FAIL_OPEN_TOOLS = new Set([
   'manage_subagents',
   'manage_task',
@@ -87,8 +94,6 @@ export const FAIL_OPEN_TOOLS = new Set([
   'task_boundary',
   'suggested_responses',
   'ask_question',
-  'ask_permission',
-  'ask_custom_permission',
 ]);
 
 // Agent tools that do have effects outside the agent runtime, so they are not
@@ -159,6 +164,7 @@ export function classify(ctx, state = {}) {
   }
   if (READ_ONLY_TOOLS.has(name)) return classifyRead(ctx, state);
   if (name === 'invoke_subagent') return classifySubagents(ctx);
+  if (PERMISSION_ASK_TOOLS.has(name)) return classifyPermissionAsk(ctx);
   if (AGENT_TOOLS.has(name)) return allow('agent-coordination');
   if (OUTSIDE_RUNTIME_TOOLS.has(name)) return classifyOutsideRuntime(ctx);
   if (FILE_EDIT_TOOLS.has(name)) return classifyFileEdit(ctx, state);
@@ -273,6 +279,34 @@ function classifySubagents(ctx) {
     );
   }
   return allow('agent-coordination');
+}
+
+/**
+ * The agent asking for a permission.
+ *
+ * `ask_permission` carries a command (agy refuses it for a dangerous one and
+ * tells the agent to use `run_command` instead, which is how it shows up in the
+ * binary's own strings), and `ask_custom_permission` carries a grant of the
+ * shape `git.read({...})`. So the answer decides whether something happens, and
+ * the answer is supposed to be the user's.
+ *
+ * It is only a question if someone can answer it. Under
+ * `--dangerously-skip-permissions` agy accepts every tool permission by itself
+ * — its own strings say `auto-approving all tool permissions` — and where the
+ * agy arguments cannot be read, that flag cannot be ruled out. Then nothing
+ * between the agent and the grant is human, and the request goes to the
+ * reviewer, whose policy counts widening the agent's own oversight as a
+ * persistent weakening of a sensitive boundary.
+ *
+ * These are the same two conditions `withoutUnanswerablePrompt` (hook.mjs) uses
+ * for autoagy's own prompts — a change to either belongs in both.
+ */
+function classifyPermissionAsk(ctx) {
+  const skip = ctx.host?.flags?.skipPermissions === true;
+  const unknowable = !ctx.host && !HOST_INSPECTABLE_PLATFORMS.includes(process.platform);
+  if (!skip && !unknowable) return allow('agent-coordination');
+  const why = skip ? 'agy runs with --dangerously-skip-permissions' : `the agy arguments cannot be read on ${process.platform}`;
+  return review('self-permission', `Asks for a permission nobody can answer (${why}), so Antigravity would grant it without a user.`);
 }
 
 /**

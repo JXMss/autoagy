@@ -193,6 +193,25 @@ test('a web search is egress, and the configuration decides whether it is review
   assert.equal(reviewed.category, 'network');
 });
 
+test('asking for a permission is reviewed when nobody can answer the prompt', () => {
+  // Normally the prompt reaches the user, who decides — autoagy has nothing to
+  // add, and `ask_permission` is how an agent asks about a command it was
+  // refused, `ask_custom_permission` about a grant like `git.read({...})`.
+  assert.equal(verdict('ask_custom_permission', { Permission: 'git.read({"org":"x"})' }).verdict, 'allow');
+  assert.equal(verdict('ask_permission', { CommandLine: 'npm install' }).verdict, 'allow');
+  // An unidentifiable host on a platform where the arguments *can* be read is
+  // not evidence of the flag — the same reading `withoutUnanswerablePrompt`
+  // makes. Under the flag, agy accepts the prompt itself.
+  assert.equal(verdict('ask_custom_permission', { Permission: 'read_url(*)' }, { host: null }).verdict, 'allow');
+  const skipHost = { kind: 'cli', cwd: dirs.workspace, argv: ['agy'], flags: { skipPermissions: true, sandbox: false, addDirs: [] } };
+  const asked = verdict('ask_custom_permission', { Permission: 'read_url(*)' }, { host: skipHost });
+  assert.equal(asked.verdict, 'review');
+  assert.equal(asked.category, 'self-permission');
+  assert.match(asked.reason, /dangerously-skip-permissions/);
+  assert.match(asked.reason, /grant it without a user/);
+  assert.equal(verdict('ask_permission', { CommandLine: 'rm -rf /' }, { host: skipHost }).verdict, 'review');
+});
+
 test('code execution, agent definitions and unknown tools are reviewed', () => {
   assert.equal(verdict('notebook_execution', {}).category, 'code-execution');
   assert.equal(verdict('define_subagent', {}).category, 'agent-definition');
