@@ -198,11 +198,17 @@ export function classify(ctx, state = {}) {
  * follows the symlink to wherever it now points.
  *
  * @param {{ toolCall?: { name?: string } }} payload
- * @param {{ untrusted?: boolean, reason: string }} options
+ * @param {{ untrusted?: boolean, reason: string, config?: object | null }} options
  */
-export function failOpenOutput(payload, { untrusted = false, reason } = {}) {
+export function failOpenOutput(payload, { untrusted = false, reason, config = null } = {}) {
   const name = payload?.toolCall?.name;
   if (FAIL_OPEN_TOOLS.has(name)) return { decision: 'allow' };
+  // A search the operator asked to have reviewed stays reviewed on this path
+  // too. This is the branch taken when autoagy cannot answer at all, and the
+  // switch exists to keep agent-written queries from leaving the machine — an
+  // operator who set it should not have it quietly stop applying exactly when
+  // supervision is weakest.
+  if (name === 'search_web' && config?.webSearch === 'review') return { decision: 'deny', reason };
   if (READ_ONLY_TOOLS.has(name) && !(untrusted && CONTENT_READ_TOOLS.has(name))) return { decision: 'allow' };
   return { decision: 'deny', reason };
 }

@@ -242,6 +242,16 @@ test('an untrusted conversation also loses its content reads on an internal erro
   assert.equal(failClosedOutput(tool('list_dir'), new Error('x'), { untrusted: true }).decision, 'allow');
 });
 
+test('a search the operator asked to review stays reviewed when autoagy fails', () => {
+  const search = (config) => failClosedOutput({ toolCall: { name: 'search_web' } }, new Error('x'), { config }).decision;
+  // Reads stay usable on this path, searches included, unless the configuration
+  // says otherwise — the switch exists to keep agent-written queries from
+  // leaving the machine, and this is the moment supervision is weakest.
+  assert.equal(search(null), 'allow');
+  assert.equal(search({ webSearch: 'allow' }), 'allow');
+  assert.equal(search({ webSearch: 'review' }), 'deny');
+});
+
 test('a prompt is only emitted when it will actually reach the user', async () => {
   writeConfig({ mode: 'ask' });
   const payload = payloadFor(dirs, 'run_command', { CommandLine: 'npm install', BypassSandbox: true }, ws());

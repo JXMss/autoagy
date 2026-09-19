@@ -120,12 +120,23 @@ async function runHook(event, pinned = {}) {
   const home = pinned.home || accountHome();
   // Answer before Antigravity kills the hook, which would fail the tool call with an opaque error.
   const budgetSec = hookBudgetSec(event, { pluginDir: PLUGIN_DIR });
+  // The failure paths ask the policy one question that needs the configuration:
+  // whether a search is supposed to be reviewed. Both refuse to answer anything
+  // else about it, so a config that cannot be read leaves the previous
+  // behaviour in place rather than turning a failure into an allow.
+  const safeConfig = () => {
+    try {
+      return loadConfig({ env, home }).config;
+    } catch {
+      return null;
+    }
+  };
   const watchdog = setTimeout(() => {
     if (event !== 'pre-tool-use') return emit({});
     // Best effort: a conversation whose paths were already swapped loses its
     // content reads here too. A read failure is treated as trusted, which is
     // safe because everything that changes anything is already refused below.
-    emit(failOpenOutput(payload, { untrusted: stateIsUntrusted(payload, env, home), reason: TIMEOUT_INSTRUCTIONS }));
+    emit(failOpenOutput(payload, { untrusted: stateIsUntrusted(payload, env, home), reason: TIMEOUT_INSTRUCTIONS, config: safeConfig() }));
   }, budgetSec * 1000);
   watchdog.unref();
   try {
@@ -149,7 +160,7 @@ async function runHook(event, pinned = {}) {
       verdict: 'error',
       error: String(err?.stack ?? err).slice(0, 2000),
     });
-    emit(event === 'pre-tool-use' ? failClosedOutput(payload, err, { untrusted: stateIsUntrusted(payload, env, home) }) : {});
+    emit(event === 'pre-tool-use' ? failClosedOutput(payload, err, { untrusted: stateIsUntrusted(payload, env, home), config: safeConfig() }) : {});
   }
 }
 

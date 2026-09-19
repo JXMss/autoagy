@@ -302,9 +302,10 @@ function checkEditTargets(ctx) {
 }
 
 /** The decision used when autoagy itself fails: never block reads, never allow the rest. */
-export function failClosedOutput(payload, error, { untrusted = false } = {}) {
+export function failClosedOutput(payload, error, { untrusted = false, config = null } = {}) {
   return failOpenOutput(payload, {
     untrusted,
+    config,
     reason: `autoagy internal error (${error?.message ?? error}); the action was blocked to fail closed. See ~/.gemini/autoagy/logs/decisions.jsonl.`,
   });
 }
