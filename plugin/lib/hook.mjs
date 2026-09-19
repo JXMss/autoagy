@@ -10,9 +10,9 @@
 
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext } from './context.mjs';
-import { classify, READ_ONLY_TOOLS, AGENT_TOOLS, BROWSER_ACTION_TOOLS } from './policy.mjs';
+import { classify, READ_ONLY_TOOLS, AGENT_TOOLS, BROWSER_ACTION_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
-import { confinedCommandLine } from './confine.mjs';
+import { confinedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
 import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId } from './state.mjs';
@@ -82,7 +82,126 @@ export function withOwnSandbox(output, ctx) {
   if (output?.decision !== 'allow' && output?.decision !== 'force_ask') return output;
   if (ctx.toolName !== 'run_command' || ctx.args.BypassSandbox === true || typeof ctx.args.CommandLine !== 'string') return output;
   if (!ctx.ownSandbox.active) return output;
-  return { ...output, overwrite: { BypassSandbox: true, CommandLine: confinedCommandLine(ctx, ctx.args.CommandLine) } };
+  const placeholders = [];
+  const commandLine = confinedCommandLine(ctx, ctx.args.CommandLine, { placeholders });
+  // Remembered for the PostToolUse self-check and for cleaning the mount points up.
+  if (ctx.stepIdx !== null) {
+    updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
+      // Commands run one at a time, so a mount point recorded for another step
+      // belongs to a command that already finished: PostToolUse removes them,
+      // this catches the ones it did not see.
+      for (const [step, paths] of Object.entries(s.pendingPlaceholders)) {
+        if (Number(step) === ctx.stepIdx) continue;
+        removeControlPlaceholders(paths);
+        delete s.pendingPlaceholders[step];
+      }
+      s.pendingConfined[ctx.stepIdx] = commandHash(commandLine);
+      if (placeholders.length) s.pendingPlaceholders[ctx.stepIdx] = placeholders;
+      const steps = Object.keys(s.pendingConfined);
+      for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_CONFINED))) delete s.pendingConfined[step];
+    });
+  } else {
+    // Nothing to key the cleanup on: do not leave the mount points behind.
+    removeControlPlaceholders(placeholders);
+  }
+  return { ...output, overwrite: { BypassSandbox: true, CommandLine: commandLine } };
+}
+
+const MAX_PENDING_CONFINED = 50;
+
+/**
+ * PostToolUse: the two checks that only the arguments which actually ran can
+ * answer — whether agy kept autoagy's sandbox rewrite, and whether the target
+ * of a file edit still resolved where it did when the edit was approved.
+ */
+export function handlePostToolUse(payload, options = {}) {
+  const env = options.env ?? process.env;
+  const { config } = loadConfig({ env, home: options.home });
+  if (config.mode === 'off') return {};
+  const ctx = new HookContext(payload, { config, env, home: options.home, host: options.host });
+  if (ctx.stepIdx === null) return {};
+  if (ctx.toolName === 'run_command') return checkConfinedRun(ctx);
+  if (FILE_EDIT_TOOLS.has(ctx.toolName)) return checkEditTargets(ctx);
+  return {};
+}
+
+/**
+ * Checks that agy ran the command exactly as autoagy rewrote it (the payload
+ * carries the arguments that actually executed). A mismatch means this agy
+ * build no longer honors the rewrite, so the own sandbox is switched off for
+ * it; see detectOwnSandbox. The mount points of protected directories that did
+ * not exist are taken away again here, once the command has run.
+ */
+function checkConfinedRun(ctx) {
+  const home = ctx.autoagyHome;
+  const recorded = updateState(home, ctx.conversationId, (s) => {
+    const entry = s.pendingConfined[ctx.stepIdx] ? { hash: s.pendingConfined[ctx.stepIdx], placeholders: s.pendingPlaceholders[ctx.stepIdx] ?? [] } : null;
+    delete s.pendingConfined[ctx.stepIdx];
+    delete s.pendingPlaceholders[ctx.stepIdx];
+    return entry;
+  });
+  removeControlPlaceholders(recorded?.placeholders);
+  if (!recorded) return {};
+  let problem = null;
+  if (commandHash(ctx.args.CommandLine) !== recorded.hash) problem = 'agy ran the original command instead of the one autoagy rewrote';
+  else if (ctx.args.BypassSandbox !== true) problem = "agy ran the rewritten command without BypassSandbox, inside its own sandbox";
+  recordSandboxCheck(home, ctx.hostBuild, problem);
+  if (problem) appendDecision(home, { conversation: ctx.conversationId, step: ctx.stepIdx, tool: ctx.toolName, verdict: 'self-check-failed', error: problem });
+  return {};
+}
+
+/** Records where an edit tool's targets resolved, for checkEditTargets. */
+function rememberEditTargets(ctx) {
+  if (ctx.stepIdx === null || !FILE_EDIT_TOOLS.has(ctx.toolName)) return;
+  const targets = editTargets(ctx);
+  if (targets.length === 0) return;
+  updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
+    s.pendingEdits[ctx.stepIdx] = targets;
+    const steps = Object.keys(s.pendingEdits);
+    for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_EDITS))) delete s.pendingEdits[step];
+  });
+}
+
+const MAX_PENDING_EDITS = 50;
+
+/**
+ * agy writes edited files itself, outside every sandbox, so autoagy can only
+ * judge the target before the write. Resolving it again here catches a path
+ * that was swapped for a symlink in between (a command running in the
+ * background could do that): the write may have landed somewhere other than
+ * the location that was approved, which is worth interrupting the turn over.
+ */
+function checkEditTargets(ctx) {
+  const home = ctx.autoagyHome;
+  const recorded = updateState(home, ctx.conversationId, (s) => {
+    const targets = s.pendingEdits[ctx.stepIdx] ?? null;
+    delete s.pendingEdits[ctx.stepIdx];
+    return targets;
+  });
+  if (!recorded) return {};
+  const now = new Map(editTargets(ctx).map((t) => [t.abs, t.real]));
+  for (const { abs, real } of recorded) {
+    const after = now.get(abs);
+    if (!after || after === real) continue;
+    const message =
+      `autoagy: ${abs} resolved to ${real} when the ${ctx.toolName} was approved, but to ${after} when it ran. ` +
+      'Something replaced part of that path in between, so the write may have landed outside the approved location. ' +
+      'Check what changed there before continuing.';
+    appendDecision(home, {
+      conversation: ctx.conversationId,
+      step: ctx.stepIdx,
+      tool: ctx.toolName,
+      verdict: 'edit-target-changed',
+      path: abs,
+      before: real,
+      after,
+    });
+    updateState(home, ctx.conversationId, (s) => {
+      s.interrupt = { turnKey: countUserMessages(ctx.transcriptPath), pending: true, message };
+    });
+    return {};
+  }
+  return {};
 }
 
 /** The decision used when autoagy itself fails: never block reads, never allow the rest. */
@@ -110,6 +229,19 @@ export async function handlePreToolUse(payload, options = {}) {
   if (ctx.role === 'guardian') {
     const verdict = classify(ctx);
     return verdict.verdict === 'allow' ? { decision: 'allow' } : { decision: 'deny', reason: verdict.reason };
+  }
+
+  // Once per agy build: the self-check found that agy no longer honors the sandbox rewrite.
+  const notice = ctx.toolName === 'run_command' && ctx.ownSandbox.broken ? takeSandboxNotice(home, ctx.hostBuild) : null;
+  if (notice) {
+    appendDecision(home, { conversation: ctx.conversationId, step: ctx.stepIdx, tool: ctx.toolName, verdict: 'deny', reason: 'own sandbox self-check notice' });
+    return {
+      decision: 'deny',
+      reason:
+        `autoagy's self-check found that this agy version does not run commands the way autoagy's own sandbox rewrites them (${notice.detail}). ` +
+        `autoagy stopped using its own sandbox for this agy version, so ${ctx.config.ownSandbox === 'on' ? 'every command that is not read-only is now reviewed' : "commands run in Antigravity's terminal sandbox, which leaves .git and the conversation logs writable"}. ` +
+        'Tell the user about this and suggest running `autoagy status`, then retry the command.',
+    };
   }
 
   const state = readState(home, ctx.conversationId);
@@ -144,6 +276,7 @@ export async function handlePreToolUse(payload, options = {}) {
 
   if (classification.verdict === 'allow') {
     if (config.log.allowed) appendDecision(home, { ...base, verdict: 'allow', reason: classification.reason });
+    rememberEditTargets(ctx);
     return withOwnSandbox({ decision: 'allow' }, ctx);
   }
   if (classification.verdict === 'deny') {
@@ -152,7 +285,7 @@ export async function handlePreToolUse(payload, options = {}) {
   }
 
   // Needs review.
-  const reviewer = config.mode === 'auto' ? createReviewer(config, { env, autoagyHome: home }) : null;
+  const reviewer = config.mode === 'auto' ? createReviewer(config, { env, autoagyHome: home, executable: ctx.reviewerExecutable }) : null;
   if (!reviewer) {
     const output = withoutUnanswerablePrompt({ decision: 'force_ask', reason: `autoagy: ${classification.reason}` }, ctx);
     appendDecision(home, { ...base, verdict: output.decision === 'force_ask' ? 'ask' : 'deny', reason: classification.reason });
@@ -223,6 +356,7 @@ export async function handlePreToolUse(payload, options = {}) {
   if (config.log.reviews && prompt) {
     writeReviewRecord(home, `${Date.now()}-${ctx.conversationId.slice(0, 8)}`, { prompt, result });
   }
+  if (output.decision !== 'deny') rememberEditTargets(ctx);
   return withOwnSandbox(output, ctx);
 }
 

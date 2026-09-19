@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { applySetup, applyTeardown, pinNodeInHooks, planSetup, cliSettingsPath } from '../plugin/lib/setup.mjs';
+import { configPath } from '../plugin/lib/config.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-setup-'));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -48,6 +49,12 @@ test('setup adds grants and sandbox settings, teardown restores them', () => {
 test('planSetup reports grants that permissions.deny would override', () => {
   const plan = planSetup({ permissions: { deny: ['mcp(*)'] } });
   assert.deepEqual(plan.conflicting, ['mcp(*)']);
+});
+
+test('only AUTOAGY_HOME relocates the config file', () => {
+  const home = path.join(root, 'home');
+  assert.equal(configPath({ AUTOAGY_CONFIG: path.join(root, 'work', 'cfg.json') }, home), path.join(home, '.gemini', 'autoagy', 'config.json'));
+  assert.equal(configPath({ AUTOAGY_HOME: path.join(root, 'alt') }, home), path.join(root, 'alt', 'config.json'));
 });
 
 test('pinNodeInHooks rewrites bare node commands', () => {

@@ -138,6 +138,58 @@ export function globToRegExp(glob) {
   return new RegExp(body, CASE_INSENSITIVE ? 'i' : '');
 }
 
+/**
+ * Existing paths an absolute glob refers to: literal segments are joined,
+ * `*`-style segments are matched against directory entries, and `**` stops
+ * the walk at the directory that holds the subtree (`/a/.ssh/**` -> /a/.ssh).
+ * @returns {string[]}
+ */
+export function expandAnchoredGlob(glob) {
+  const root = path.parse(glob).root;
+  let current = [root];
+  for (const part of glob.slice(root.length).split(/[\\/]+/).filter(Boolean)) {
+    if (part === '**') break;
+    if (!/[*?[{]/.test(part)) {
+      current = current.map((dir) => path.join(dir, part));
+      continue;
+    }
+    const re = globToRegExp(part);
+    current = current.flatMap((dir) => {
+      try {
+        return fs.readdirSync(dir).filter((name) => re.test(name)).map((name) => path.join(dir, name));
+      } catch {
+        return [];
+      }
+    });
+  }
+  return current.filter((p) => p !== root && fs.existsSync(p));
+}
+
+/**
+ * Looks `command` up on `pathVar` like a shell would, but skips relative
+ * entries and directories inside `untrustedRoots`, where an agent could plant
+ * a file of the same name.
+ * @returns {string | null}
+ */
+export function findExecutable(command, pathVar, untrustedRoots = []) {
+  const suffixes = process.platform === 'win32' ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';')] : [''];
+  for (const dir of String(pathVar ?? '').split(path.delimiter)) {
+    if (!dir || !path.isAbsolute(dir)) continue;
+    if (untrustedRoots.some((root) => isWithin(dir, root) || isWithin(resolveReal(dir), root))) continue;
+    for (const suffix of suffixes) {
+      const candidate = path.join(dir, `${command}${suffix}`);
+      try {
+        if (!fs.statSync(candidate).isFile()) continue;
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        // not here
+      }
+    }
+  }
+  return null;
+}
+
 /** True when absolute path `p` matches any of the globs (`~` expanded). */
 export function matchesAnyGlob(p, globs, home = os.homedir()) {
   if (!p) return false;

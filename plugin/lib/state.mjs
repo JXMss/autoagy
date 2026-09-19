@@ -27,6 +27,12 @@ function freshState(conversationId) {
     recent: [],
     interrupt: null,
     escalatedCommandApproved: false,
+    // stepIdx -> hash of the command autoagy rewrote into its own sandbox, checked at PostToolUse.
+    pendingConfined: {},
+    // stepIdx -> mount points created for protected directories that were missing, removed after the command.
+    pendingPlaceholders: {},
+    // stepIdx -> [{ abs, real }] a file edit targets, resolved when it was approved.
+    pendingEdits: {},
     rootConversationId: undefined,
     denials: [],
     approvals: [],

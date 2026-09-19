@@ -83,7 +83,10 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 
 - 可写：工作区、临时目录、本会话的 artifact 和 scratch 目录、`writableRoots`；
 - 只读：其余所有路径，其中包括工作区里的 `.git`、`.agents`、`.gemini` 等目录，autoagy 自己的目录，以及对话日志；
-- 无网络。
+- 隐藏：`credentialPaths` 里以 `~/` 开头的凭据位置（`~/.ssh`、`~/.aws`、`~/.netrc`……）在沙箱里显示为空目录或空文件；
+- 无网络；`socket`/`socketpair` 只允许 `AF_UNIX`，建立和使用的调用（`connect`、`bind`、`listen`、`sendto`……）一律以 `EPERM` 失败，另外禁掉 `ptrace`、`process_vm_*`、`io_uring_*`（`--unshare-net` 只挡 IP 网络，挡不住文件系统上的 Unix socket）。
+
+工作区里还不存在的受保护目录（比如不是 git 仓库时的 `.git`）：`--ro-bind` 对不存在的路径会直接跳过，而工作区是可写的，沙箱里的命令本来可以把它建出来，等它被别的工具在沙箱外加载。所以这类路径会被就地挂一个只读空 tmpfs，挂载点只在命令执行期间存在，命令结束后 autoagy 会在 PostToolUse 里把它删掉。副作用：命令执行的那一瞬间，工作区里会短暂出现一个空的 `.agents` 之类的目录（Codex 用同样的做法）。
 
 `ownSandbox: "auto"`（默认）的启用条件：Linux；`/usr/bin/bwrap`（root 所有）存在且能创建沙箱，这需要非特权 user namespace；CLI 设置里有 `command(*)`。安装 bubblewrap：`sudo apt install bubblewrap`，或用发行版对应的包。`autoagy status` 会显示它是否生效。
 
@@ -92,6 +95,8 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 - 会写 `.git` 的 git 命令（`commit`、`checkout`、`stash`……）在沙箱里会失败，agent 需要加 `BypassSandbox: true` 重试并经过审核，这一点与 Codex 相同；
 - 沙箱里完全没有网络，`read_url(...)` 授权过的域名在沙箱里也访问不到；
 - agent 看到的工具结果前面会多一行 “A pre-tool hook changed the arguments of this tool call”。
+
+**自检**：这套做法依赖 agy 没有公开的行为，而 agy 会自动更新。所以每条被改写的命令执行后，autoagy 都会在 PostToolUse 里核对 agy 实际执行的参数。只要有一次对不上（比如更新后的 agy 不再执行改写），autoagy 就对这个 agy 版本停用自己的沙箱：`auto` 退回 Antigravity 的沙箱，`on` 改为把命令送审。同时会拒绝下一条命令一次，让 agent 告诉你发生了什么。agy 换了版本会重新检查。`autoagy status` 会显示自检结果。
 
 `ownSandbox: "on"`：不满足条件时不退回 Antigravity 的沙箱，而是把所有非只读命令送审。IDE 用户需要手动设为 `"on"`，因为 autoagy 读不到 IDE 的授权设置。`"off"`：不使用。
 
@@ -130,7 +135,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `trustedDomains` | `localhost` 等 | 抓取网页、浏览器导航到这些域名（含子域名）免审 |
 | `writableRoots` | `[]` | 额外允许免审编辑的目录 |
 | `protectedPaths` | `[]` | 额外需要审核才能修改的路径（glob） |
-| `credentialPaths` | `~/.ssh/**`、`**/.env` 等 | 读取这些文件需要审核 |
+| `credentialPaths` | `~/.ssh/**`、`**/.env` 等 | 凭据位置。文件工具读取这些文件（包括经符号链接读取）、`grep_search` 搜索包含它们的目录需要审核。以 `~/` 或绝对路径开头的条目还会在 autoagy 自己的沙箱里被隐藏；不在该沙箱里时，命令行里直接写出这些路径的命令需要审核（尽力而为：只识别字面路径、`~` 和 `$HOME`）。`**/.env` 这类没有固定位置的模式只对文件工具生效 |
 | `rules` | `[]` | Codex execpolicy 风格前缀规则，例如 `{"pattern": ["terraform", "destroy"], "decision": "forbidden"}`；`allow` 仅对不含重定向、替换、变量、通配的简单命令生效 |
 | `mcp.allow` | `[]` | 免审的 MCP 工具（`"server/tool"` glob，如 `"github/get_*"`） |
 | `browser` | `"review"` | 浏览器点击/输入/执行 JS 是否审核 |
@@ -138,22 +143,23 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `circuitBreaker` | `3 / 10 / 50` | 连续拒绝次数 / 窗口内拒绝次数 / 窗口大小 |
 | `log.allowed` / `log.reviews` | `false` | 记录所有放行的操作 / 保存完整审核 prompt 与回复 |
 
-配置只从全局文件读取：工作区里的文件 agent 自己能改，所以不接受工作区级配置。
+配置只从全局文件读取：工作区里的文件 agent 自己能改，所以不接受工作区级配置。环境变量也不能改变策略（hook 继承 agy 的环境变量，而一条获批的越权命令可以给它启动的 agy 设任意环境变量）；只有 `AUTOAGY_HOME` 能换配置目录，所以提到 `AUTOAGY_` 的命令会被送审。
 
 ## 决策规则（第一层，无模型）
 
 | 工具调用 | 结果 |
 | --- | --- |
-| 读文件、列目录、搜索、查看终端/任务状态、`search_web` | 放行（读取凭据类文件需审核） |
+| 读文件、列目录、搜索、查看终端/任务状态、`search_web` | 放行（读取凭据类文件、搜索包含凭据位置的目录需审核） |
 | 编辑工作区、会话 artifact 目录、临时目录内的文件 | 放行 |
 | 编辑工作区外的文件，或 `.git`、`.agents`、`~/.gemini` 等 | 审核 |
 | 编辑 autoagy 自己的配置/插件目录 | 直接拒绝（防止 agent 关掉自己的监管） |
 | 沙箱内的命令 | 放行（Linux 上改写为在 autoagy 自己的沙箱里运行）；破坏性命令（强制 `rm`、`git reset --hard`、`git clean -f`、`find -delete`……）审核 |
 | `BypassSandbox: true` 的命令、`notebook_execution` | 审核 |
 | 无沙箱环境（关闭沙箱或 `--dangerously-skip-permissions`） | 已知只读命令放行，其余审核 |
+| `invoke_subagent` 启动不继承 customizations、又带工具的自定义 agent | 审核（这种 agent 的工具调用不经过 autoagy） |
 | MCP、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核 |
 
-被审核的删除命令会附带 autoagy 预先检查的目标事实（是否存在、类型、条目数、是否在工作区内、是否是 git 仓库），弥补审核模型没有工具、无法像 Codex 那样自己去看的问题。
+被审核的删除命令会附带 autoagy 预先检查的目标事实（是否存在、类型、条目数、是否在工作区内、是否是 git 仓库；路径经过符号链接时，按 `rm` 实际会删除的位置判断，并给出 `resolves_to`），弥补审核模型没有工具、无法像 Codex 那样自己去看的问题。
 
 ## 已知限制
 
@@ -161,6 +167,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 - Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问（这是为保住沙箱网络隔离做的取舍）。
 - hook 负载里没有可信的用户消息（`lastUserInput` 等字段存在但未填），autoagy 只能从 transcript 里识别用户说的话，而 transcript 的完整性依赖上面的沙箱。
 - 审核模型没有工具（Codex 的 guardian 可以做只读检查）；autoagy 用确定性的目标检查部分弥补。
+- **文件编辑本身不在任何沙箱里执行**：写文件的是 agy 自己（Codex 的 `apply_patch` 在文件系统沙箱里跑），autoagy 只能在写入前检查一次目标路径。如果一条后台的沙箱命令在这中间把路径换成了符号链接，写入就会落到别处（检查时刻和使用时刻不一致）。PostToolUse 会在写入后重新解析目标并比对：对不上就记一条 `edit-target-changed` 并熔断本轮，但它只能事后发现，不能阻止那一次写入。根治要等 Antigravity 把编辑也放进沙箱。
 - 子 agent 的授权以根会话里用户的话为准（通过父会话的 `invoke_subagent` 记录回溯），找不到父会话时按不可信处理。
 - Windows 上命令解析是尽力而为（PowerShell 语法与 POSIX shell 不同，但会偏向保守）。
 - 用 `--dangerously-skip-permissions` 启动 agy 时 Antigravity 的沙箱实际不生效：启用了 autoagy 自己的沙箱时命令仍在其中运行（实测 `overwrite` 在该模式下照样生效）；否则 autoagy 按无沙箱处理，审核会变多；`force_ask` 在该模式下会被自动同意，所以 autoagy 在此模式下只使用 allow/deny。
@@ -168,7 +175,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 ## 开发
 
 ```bash
-npm test                 # 单元与集成测试（使用 mock 审核后端，不调用模型）
+npm test                 # 单元与集成测试（在测试用的配置文件里选 `reviewer.backend: "mock"`，不调用模型）
 npm run validate         # agy plugin validate plugin
 ```
 

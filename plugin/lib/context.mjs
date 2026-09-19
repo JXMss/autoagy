@@ -10,8 +10,8 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { autoagyHome } from './config.mjs';
-import { toAbsolute, uniquePaths, expandHome } from './paths.mjs';
-import { detectOwnSandbox, probeBwrap } from './confine.mjs';
+import { toAbsolute, uniquePaths, expandHome, expandAnchoredGlob, resolveReal, findExecutable } from './paths.mjs';
+import { detectOwnSandbox, probeBwrap, hostBuildId } from './confine.mjs';
 
 export const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -82,6 +82,20 @@ export function findHostProcess(startPid = process.ppid, maxDepth = 8) {
     pid = info.ppid;
   }
   return null;
+}
+
+/** The file a process runs (Linux: /proc/<pid>/exe; macOS: an absolute argv[0]), or null. */
+export function processExecutable(info) {
+  if (!info?.pid) return null;
+  if (process.platform === 'linux') {
+    try {
+      return fs.realpathSync(`/proc/${info.pid}/exe`);
+    } catch {
+      return null;
+    }
+  }
+  const argv0 = info.argv?.[0];
+  return typeof argv0 === 'string' && path.isAbsolute(argv0) ? argv0 : null;
 }
 
 /** Extracts the permission-relevant flags of an `agy` invocation. */
@@ -227,15 +241,43 @@ export class HookContext {
     });
   }
 
-  /** Paths the agent must never modify: autoagy itself. */
+  /** Paths the agent must never modify: autoagy itself, and the agy binaries that run its hooks and reviews. */
   get selfPaths() {
-    return this.memo('selfPaths', () =>
-      uniquePaths([
+    return this.memo('selfPaths', () => {
+      const reviewer = this.config.reviewer?.backend === 'agy' ? this.reviewerExecutable : null;
+      return uniquePaths([
         this.autoagyHome,
         this.pluginDir,
         this.appDataDir ? path.join(this.appDataDir, 'plugin_data', 'autoagy') : null,
-      ]),
-    );
+        this.hostExecutable,
+        reviewer,
+        reviewer ? resolveReal(reviewer) : null,
+      ]);
+    });
+  }
+
+  /** The agy CLI executable running this conversation (it loads the hooks). */
+  get hostExecutable() {
+    return this.memo('hostExecutable', () => (this.host?.kind === 'cli' ? processExecutable(this.host) : null));
+  }
+
+  /**
+   * The binary the agy reviewer runs: `reviewer.agy.command` when it is an
+   * absolute path, else the agy CLI running this conversation, else the
+   * command looked up on PATH outside the directories agents can write. Never
+   * a plain PATH lookup: a PATH entry inside the workspace (a virtualenv's
+   * bin, node_modules/.bin) would let an unreviewed edit replace the reviewer.
+   * @returns {string | null}
+   */
+  get reviewerExecutable() {
+    return this.memo('reviewerExecutable', () => {
+      const command = this.config.reviewer?.agy?.command;
+      if (typeof command !== 'string' || command.trim() === '') return null;
+      if (path.isAbsolute(command)) return command;
+      if (/[\\/]/.test(command)) return null;
+      if (/^agy(\.exe)?$/i.test(command) && this.hostExecutable) return this.hostExecutable;
+      return findExecutable(command, this.env.PATH, this.writableRoots);
+    });
   }
 
   /** Agent configuration in the user's home; Antigravity's own artifact dirs live inside ~/.gemini. */
@@ -256,14 +298,44 @@ export class HookContext {
     });
   }
 
+  /**
+   * Existing credential stores named by the anchored `credentialPaths` globs
+   * (`~/.ssh/**`, `~/.netrc`, ...), with symlinks resolved as well. Patterns
+   * without a fixed location (`**\/.env`) cannot be listed and are left out.
+   */
+  get credentialLocations() {
+    return this.memo('credentialLocations', () => {
+      const out = [];
+      for (const glob of this.config.credentialPaths ?? []) {
+        if (typeof glob !== 'string') continue;
+        const expanded = expandHome(glob, this.home);
+        if (!path.isAbsolute(expanded)) continue;
+        for (const p of expandAnchoredGlob(expanded)) out.push(p, resolveReal(p));
+      }
+      return uniquePaths(out);
+    });
+  }
+
   get protectedGlobs() {
     return (this.config.protectedPaths ?? []).map((p) => expandHome(p, this.home));
+  }
+
+  /** The running agy executable, which self-check results are tied to. */
+  get hostBuild() {
+    return this.memo('hostBuild', () => hostBuildId(this.host));
   }
 
   /** autoagy's own bubblewrap sandbox (see confine.mjs). */
   get ownSandbox() {
     return this.memo('ownSandbox', () =>
-      detectOwnSandbox({ config: this.config, host: this.host, appDataDir: this.appDataDir, autoagyHome: this.autoagyHome, probe: this._bwrapProbe }),
+      detectOwnSandbox({
+        config: this.config,
+        host: this.host,
+        appDataDir: this.appDataDir,
+        autoagyHome: this.autoagyHome,
+        build: this.hostBuild,
+        probe: this._bwrapProbe,
+      }),
     );
   }
 

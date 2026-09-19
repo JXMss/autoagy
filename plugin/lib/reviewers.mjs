@@ -6,7 +6,9 @@
 //           does not inherit customizations, so these hooks do not recurse.
 // - openai: any OpenAI-compatible Chat Completions endpoint (OpenAI, Gemini's
 //           OpenAI endpoint, DeepSeek, local servers, ...).
-// - mock:   deterministic responses for tests (AUTOAGY_MOCK_REVIEW).
+// - mock:   deterministic responses for tests, selected in the config file
+//           (never through environment variables, which reach the hook from
+//           whatever process started agy).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,16 +21,18 @@ import { ReviewTimeoutError } from './guardian.mjs';
 
 /**
  * @param {object} config
- * @param {{ env?: NodeJS.ProcessEnv, autoagyHome: string }} options
+ * @param {{ env?: NodeJS.ProcessEnv, autoagyHome: string, executable?: string | null }} options
+ *   `executable`: the agy binary to run (HookContext.reviewerExecutable); never looked up on PATH here
  * @returns {Reviewer | null} null when no reviewer model is configured
  */
-export function createReviewer(config, { env = process.env, autoagyHome }) {
-  if (env.AUTOAGY_MOCK_REVIEW) return mockReviewer(env);
+export function createReviewer(config, { env = process.env, autoagyHome, executable = null }) {
   switch (config.reviewer.backend) {
     case 'agy':
-      return agyReviewer(config.reviewer.agy, { env, autoagyHome });
+      return agyReviewer(config.reviewer.agy, { env, autoagyHome, executable });
     case 'openai':
       return openaiReviewer(config.reviewer.openai, { env });
+    case 'mock':
+      return mockReviewer(config.reviewer.mock);
     default:
       return null;
   }
@@ -39,10 +43,15 @@ export function agyMessageText({ system, user }) {
   return `<review_policy>\n${system}\n</review_policy>\n\n${user}`;
 }
 
-function agyReviewer(options, { env, autoagyHome }) {
+function agyReviewer(options, { env, autoagyHome, executable }) {
   return {
     name: 'agy',
     review(prompt, { timeoutMs }) {
+      if (!executable) {
+        return Promise.reject(
+          new Error(`cannot find "${options.command}" outside the directories agents can write; set reviewer.agy.command to the absolute path of agy`),
+        );
+      }
       const cwd = path.join(autoagyHome, 'guardian');
       fs.mkdirSync(cwd, { recursive: true });
       const args = ['--agent', options.agent, '--input-format', 'stream-json', '--output-format', 'stream-json'];
@@ -54,11 +63,13 @@ function agyReviewer(options, { env, autoagyHome }) {
         let settled = false;
         let stdout = '';
         let stderr = '';
-        const child = spawn(options.command, args, {
+        // A Windows .cmd shim needs a shell; quote the path for it.
+        const shell = process.platform === 'win32' && !/\.exe$/i.test(executable);
+        const child = spawn(shell ? `"${executable}"` : executable, args, {
           cwd,
           env: { ...env, AUTOAGY_ROLE: 'guardian' },
           stdio: ['pipe', 'pipe', 'pipe'],
-          shell: process.platform === 'win32',
+          shell,
           windowsHide: true,
         });
         const finish = (fn, value) => {
@@ -84,7 +95,7 @@ function agyReviewer(options, { env, autoagyHome }) {
         child.stderr.on('data', (chunk) => {
           stderr = (stderr + chunk).slice(-4000);
         });
-        child.on('error', (err) => finish(reject, new Error(`cannot run ${options.command}: ${err.message}`)));
+        child.on('error', (err) => finish(reject, new Error(`cannot run ${executable}: ${err.message}`)));
         child.on('close', (code) => {
           const result = findResultEvent(stdout);
           if (result?.status === 'SUCCESS' && typeof result.response === 'string') return finish(resolve, result.response);
@@ -157,12 +168,12 @@ const MOCK_RESPONSES = {
   garbage: 'not json',
 };
 
-function mockReviewer(env) {
+function mockReviewer({ response, capture }) {
   return {
     name: 'mock',
     async review(prompt, { timeoutMs }) {
-      if (env.AUTOAGY_MOCK_CAPTURE) fs.appendFileSync(env.AUTOAGY_MOCK_CAPTURE, `${JSON.stringify(prompt)}\n`);
-      let spec = env.AUTOAGY_MOCK_REVIEW;
+      if (capture) fs.appendFileSync(capture, `${JSON.stringify(prompt)}\n`);
+      let spec = response;
       const sleep = /^sleep:(\d+):(.*)$/s.exec(spec);
       if (sleep) {
         const ms = Number(sleep[1]);

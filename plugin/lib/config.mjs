@@ -43,6 +43,12 @@ export const DEFAULT_CONFIG = Object.freeze({
       headers: {},
       jsonMode: true,
     },
+    // "mock" (tests only): a fixed reply ("allow", "deny", "critical", "error",
+    // "timeout", "sleep:<ms>:<spec>" or raw text); `capture` appends each prompt to a file.
+    mock: {
+      response: 'allow',
+      capture: null,
+    },
   },
   // What to do when the reviewer denies, times out, or fails.
   // "deny" is Codex behavior; "ask" hands the decision to the human instead.
@@ -113,7 +119,7 @@ const ENUMS = {
   mode: ['auto', 'ask', 'off'],
   sandbox: ['auto', 'on', 'off'],
   ownSandbox: ['auto', 'on', 'off'],
-  'reviewer.backend': ['agy', 'openai', 'none'],
+  'reviewer.backend': ['agy', 'openai', 'none', 'mock'],
   onDenied: ['deny', 'ask'],
   onTimeout: ['deny', 'ask'],
   onError: ['deny', 'ask'],
@@ -125,8 +131,9 @@ export function autoagyHome(env = process.env, home = os.homedir()) {
   return env.AUTOAGY_HOME ? path.resolve(env.AUTOAGY_HOME) : path.join(home, '.gemini', 'autoagy');
 }
 
+/** Always inside autoagyHome, which agents may not modify. */
 export function configPath(env = process.env, home = os.homedir()) {
-  return env.AUTOAGY_CONFIG ? path.resolve(env.AUTOAGY_CONFIG) : path.join(autoagyHome(env, home), 'config.json');
+  return path.join(autoagyHome(env, home), 'config.json');
 }
 
 function isPlainObject(v) {
@@ -225,9 +232,8 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
   } catch (err) {
     if (err.code !== 'ENOENT') warnings.push(`could not read ${file}: ${err.message}`);
   }
-  if (env.AUTOAGY_MODE) config.mode = env.AUTOAGY_MODE;
-  if (env.AUTOAGY_SANDBOX) config.sandbox = env.AUTOAGY_SANDBOX;
-  if (env.AUTOAGY_REVIEWER) config.reviewer.backend = env.AUTOAGY_REVIEWER;
+  // No environment variable may weaken the policy: the hook inherits agy's
+  // environment, which an escalated command can set for an agy it starts.
   validate(config, warnings);
   // The hook runner caps the review deadline so it always answers inside the hook timeout.
   const cap = Number(env.AUTOAGY_REVIEW_TIMEOUT_CAP);
@@ -237,6 +243,7 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
 
 /** The default config file written by `autoagy setup`. */
 export function defaultConfigFileText() {
-  const { mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, writableRoots, rules, mcp, browser } = DEFAULT_CONFIG;
+  const { mode, sandbox, ownSandbox, onDenied, onTimeout, onError, trustedDomains, writableRoots, rules, mcp, browser } = DEFAULT_CONFIG;
+  const { mock, ...reviewer } = DEFAULT_CONFIG.reviewer;
   return `${JSON.stringify({ mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, writableRoots, rules, mcp, browser }, null, 2)}\n`;
 }

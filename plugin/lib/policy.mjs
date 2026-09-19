@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, executableName } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
-import { toAbsolute, resolveReal, isWithin, matchesAnyGlob } from './paths.mjs';
+import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, expandHome } from './paths.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
   'view_file',
@@ -50,9 +50,9 @@ export const READ_ONLY_TOOLS = new Set([
 // Tools that return file contents to the model (credential reads are reviewed).
 const CONTENT_READ_TOOLS = new Set(['view_file', 'view_content_chunk', 'view_file_outline', 'view_code_item', 'read_file', 'grep_search']);
 
-// Coordination tools with no side effects outside the agent runtime.
+// Coordination tools with no side effects outside the agent runtime
+// (invoke_subagent is classified on its own, see classifySubagents).
 export const AGENT_TOOLS = new Set([
-  'invoke_subagent',
   'manage_subagents',
   'manage_task',
   'manage_inbox',
@@ -120,6 +120,7 @@ export function classify(ctx, state = {}) {
   const name = ctx.toolName;
   if (ctx.role === 'guardian') return classifyGuardianTool(ctx);
   if (READ_ONLY_TOOLS.has(name)) return classifyRead(ctx);
+  if (name === 'invoke_subagent') return classifySubagents(ctx);
   if (AGENT_TOOLS.has(name)) return allow('agent-coordination');
   if (FILE_EDIT_TOOLS.has(name)) return classifyFileEdit(ctx);
   if (name === 'run_command') return classifyCommand(ctx);
@@ -141,6 +142,68 @@ export function classify(ctx, state = {}) {
     );
   }
   return review('unknown-tool', `Tool "${name || '(unnamed)'}" is not known to autoagy, so it is reviewed.`);
+}
+
+/**
+ * Custom agent definitions agy can start. agy 1.2.7 loads user-level agents
+ * (~/.gemini/config/agents, ~/.gemini/agents) and plugin agents, but not
+ * workspace ones; all of these live under ~/.gemini, which agents cannot
+ * write without a review.
+ */
+export function customAgentDefinitions(home) {
+  const dirs = [path.join(home, '.gemini', 'config', 'agents'), path.join(home, '.gemini', 'agents')];
+  const plugins = path.join(home, '.gemini', 'config', 'plugins');
+  try {
+    for (const plugin of fs.readdirSync(plugins)) dirs.push(path.join(plugins, plugin, 'agents'));
+  } catch {
+    // no plugins
+  }
+  const defs = [];
+  for (const dir of dirs) {
+    let files = [];
+    try {
+      files = fs.readdirSync(dir).filter((f) => f.endsWith('.md'));
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      let text = '';
+      try {
+        text = fs.readFileSync(path.join(dir, file), 'utf8');
+      } catch {
+        continue;
+      }
+      const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '';
+      const name = (/^name:\s*(.+?)\s*$/m.exec(front)?.[1] ?? file.slice(0, -'.md'.length)).replace(/^["']|["']$/g, '');
+      defs.push({
+        name,
+        file: path.join(dir, file),
+        // YAML spells false several ways; anything else counts as inheriting.
+        inherits: !/^inheritCustomizations:\s*["']?(false|no|off)["']?\s*(#.*)?$/im.test(front),
+        toolless: /^tools:\s*\[\s*\]\s*$/m.test(front),
+      });
+    }
+  }
+  return defs;
+}
+
+/**
+ * A subagent that does not inherit customizations runs without these hooks, so
+ * its tool calls would skip review (and the setup grants let them through
+ * silently). Starting one that has tools is reviewed. The agent's name is
+ * looked for anywhere in the arguments, so a change in their shape does not
+ * turn this check off.
+ */
+function classifySubagents(ctx) {
+  const args = JSON.stringify(ctx.args);
+  for (const def of customAgentDefinitions(ctx.home)) {
+    if (def.inherits || def.toolless || !args.includes(JSON.stringify(def.name))) continue;
+    return review(
+      'subagent-without-review',
+      `Starts subagent "${def.name}" (${def.file}), which does not inherit customizations: its tool calls would run without autoagy's review.`,
+    );
+  }
+  return allow('agent-coordination');
 }
 
 function classifyGuardianTool(ctx) {
@@ -168,8 +231,14 @@ function classifyRead(ctx) {
   for (const raw of candidates) {
     const abs = toAbsolute(raw, ctx.baseDir, ctx.home);
     if (!abs) continue;
-    if (isCredentialPath(ctx, abs)) {
-      return review('credential-read', `Reads a file that commonly holds credentials or secrets (${abs}).`);
+    // Judge a symlink by what it points to.
+    for (const p of new Set([abs, resolveReal(abs)])) {
+      if (isCredentialPath(ctx, p)) {
+        return review('credential-read', `Reads a file that commonly holds credentials or secrets (${p}).`);
+      }
+      // A search reads every file below its directory.
+      const inside = ctx.toolName === 'grep_search' ? ctx.credentialLocations.find((loc) => isWithin(loc, p)) : null;
+      if (inside) return review('credential-read', `Searches ${p}, which contains ${inside}, a location that commonly holds credentials or secrets.`);
     }
   }
   return allow('read');
@@ -177,7 +246,32 @@ function classifyRead(ctx) {
 
 export function isCredentialPath(ctx, abs) {
   const { credentialPaths, credentialPathExceptions } = ctx.config;
-  return matchesAnyGlob(abs, credentialPaths, ctx.home) && !matchesAnyGlob(abs, credentialPathExceptions, ctx.home);
+  if (matchesAnyGlob(abs, credentialPathExceptions, ctx.home)) return false;
+  return matchesAnyGlob(abs, credentialPaths, ctx.home) || ctx.credentialLocations.some((loc) => isWithin(abs, loc));
+}
+
+/**
+ * A credential store that a command names as an argument or redirect target
+ * (best effort: only literal paths, `~` and `$HOME` are resolved).
+ */
+function credentialArgument(ctx, analysis, cwd) {
+  const base = typeof cwd === 'string' && cwd ? toAbsolute(cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
+  const words = analysis.segments.flatMap((s) => s.argv.slice(1));
+  for (const command of analysis.parsed.commands) {
+    for (const r of command.redirects) if (!r.op.startsWith('<<')) words.push(r.target);
+  }
+  for (const word of words) {
+    let value = word.replace(/^~(?=$|\/)/, ctx.home).replace(/\$\{HOME\}|\$HOME\b/g, ctx.home);
+    if (/[$`]/.test(value)) continue;
+    // For a glob, the directory before the first wildcard.
+    const wildcard = value.search(/[*?[]/);
+    if (wildcard >= 0) value = value.slice(0, wildcard).replace(/[^\\/]*$/, '') || '.';
+    const abs = toAbsolute(value, base, ctx.home);
+    if (!abs) continue;
+    const anchored = (ctx.config.credentialPaths ?? []).filter((g) => typeof g === 'string' && path.isAbsolute(expandHome(g, ctx.home)));
+    if (matchesAnyGlob(abs, anchored, ctx.home) || ctx.credentialLocations.some((loc) => isWithin(abs, loc))) return abs;
+  }
+  return null;
 }
 
 /**
@@ -239,8 +333,26 @@ function classifyFileEdit(ctx) {
   return allow('write-workspace');
 }
 
+/**
+ * Where the targets of a file-editing tool resolve to right now, resolved the
+ * same way `classifyFileEdit` resolves them. agy performs the write itself,
+ * outside any sandbox, so `handlePostToolUse` resolves them again afterwards
+ * and compares: a difference means a command swapped part of the path for a
+ * symlink between the check and the write.
+ * @returns {{ abs: string, real: string }[]}
+ */
+export function editTargets(ctx) {
+  const out = [];
+  for (const raw of pathArgs(ctx.args)) {
+    const abs = toAbsolute(raw, ctx.baseDir, ctx.home);
+    if (abs) out.push({ abs, real: resolveReal(abs) });
+  }
+  return out;
+}
+
 function mentionsSelf(ctx, commandLine) {
-  const needles = new Set(['.system_generated']);
+  // AUTOAGY_*: variables such as AUTOAGY_HOME relocate autoagy's config for an agy the command starts.
+  const needles = new Set(['.system_generated', 'AUTOAGY_']);
   for (const p of ctx.selfPaths) {
     needles.add(p);
     if (p.startsWith(ctx.home)) {
@@ -259,24 +371,28 @@ function classifyCommand(ctx) {
   const bypass = ctx.args.BypassSandbox === true;
   const analysis = analyzeCommandLine(commandLine);
   const selfNote = mentionsSelf(ctx, commandLine)
-    ? ' The command references autoagy’s own files or Antigravity’s conversation logs, which are security controls and review evidence.'
+    ? ' The command references autoagy’s own files or environment variables, or Antigravity’s conversation logs, which are security controls and review evidence.'
     : '';
+  // autoagy's own sandbox hides credential stores; elsewhere a command naming one is reviewed.
+  const credential = bypass || !ctx.ownSandbox.active ? credentialArgument(ctx, analysis, ctx.args.Cwd) : null;
+  const credentialNote = credential ? ` The command names ${credential}, a location that commonly holds credentials or secrets.` : '';
 
   const rules = evaluateRules(analysis, ctx.config.rules);
   if (rules.decision === 'forbidden') {
     return deny('rule-forbidden', `autoagy: blocked by rule ${describeRule(rules.rule)} (matched \`${rules.argv.join(' ')}\`).`);
   }
   if (rules.decision === 'prompt') {
-    return review('rule-prompt', `Matches a rule that requires approval: ${describeRule(rules.rule)}.${selfNote}`);
+    return review('rule-prompt', `Matches a rule that requires approval: ${describeRule(rules.rule)}.${selfNote}${credentialNote}`);
   }
-  if (rules.decision === 'allow' && !selfNote) return allow('rule-allow', describeRule(rules.rule));
+  if (rules.decision === 'allow' && !selfNote && !credential) return allow('rule-allow', describeRule(rules.rule));
 
   if (bypass) {
-    return review('sandbox-escalation', `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}`);
+    return review('sandbox-escalation', `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}${credentialNote}`);
   }
   // The sandbox may mount the conversation's artifact directory writable, so
   // never wave through commands that touch autoagy or the conversation logs.
   if (selfNote) return review('touches-security-controls', selfNote.trim());
+  if (credential) return review('credential-read', credentialNote.trim());
   if (!ctx.sandbox.active) {
     if (isKnownSafeCommandLine(analysis)) return allow('known-safe-command');
     return review('unsandboxed-command', `Commands are not confined by the terminal sandbox here (${ctx.sandbox.detail}).`);
@@ -402,22 +518,31 @@ export function inspectDeletionTargets(ctx, commandLine, cwd) {
         facts.push({ argument: arg, note: 'relative path with unknown working directory' });
         continue;
       }
-      const fact = { argument: arg, path: abs, inside_workspace: ctx.workspaceRoots.some((root) => isWithin(abs, root)) };
+      // What the command actually deletes: symlinks in parent directories are
+      // always followed; the last component only with a trailing slash
+      // (`rm -r link/` deletes the target's contents, `rm link` just the link).
+      const lexical = abs.length > 1 ? abs.replace(/[\\/]+$/, '') : abs;
+      const effective = /[\\/]\.?$/.test(expanded) ? resolveReal(lexical) : path.join(resolveReal(path.dirname(lexical)), path.basename(lexical));
+      const roots = ctx.workspaceRoots.flatMap((root) => [root, resolveReal(root)]);
+      const fact = { argument: arg, path: abs, inside_workspace: roots.some((root) => isWithin(effective, root)) };
+      if (effective !== lexical) fact.resolves_to = effective;
       try {
-        const stat = fs.lstatSync(abs);
+        const stat = fs.lstatSync(effective);
         fact.exists = true;
         fact.type = stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'directory' : 'file';
         if (fact.type === 'directory') {
-          const entries = fs.readdirSync(abs);
+          const entries = fs.readdirSync(effective);
           fact.entries = entries.length;
           fact.is_git_repository = entries.includes('.git');
         } else if (fact.type === 'file') {
           fact.bytes = stat.size;
+        } else {
+          fact.link_target = fs.readlinkSync(effective);
         }
       } catch {
-        fact.exists = false;
+        fact.exists = fact.exists ?? false;
       }
-      if (abs === ctx.home || abs === path.parse(abs).root) fact.note = 'this is the home directory or filesystem root';
+      if ([abs, lexical, effective].some((p) => p === ctx.home || p === path.parse(p).root)) fact.note = 'this is the home directory or filesystem root';
       facts.push(fact);
     }
   }

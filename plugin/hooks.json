@@ -12,6 +12,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./bin/autoagy.mjs hook post-tool-use",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
     "PostInvocation": [
       {
         "type": "command",

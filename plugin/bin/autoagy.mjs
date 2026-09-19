@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // autoagy — Codex-style auto mode ("Approve for me") for Google Antigravity.
 //
-//   autoagy hook pre-tool-use|post-invocation   (called by hooks.json)
+//   autoagy hook pre-tool-use|post-tool-use|post-invocation   (called by hooks.json)
 //   autoagy status | log [-n N] | denials | approve <id> | mode <auto|ask|off>
 //   autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only]
 //   autoagy setup [--dry-run] [--no-settings] | teardown [--dry-run]
@@ -12,9 +12,10 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR } from '../lib/context.mjs';
-import { detectOwnSandbox } from '../lib/confine.mjs';
+import { findExecutable } from '../lib/paths.mjs';
+import { detectOwnSandbox, readSandboxCheck } from '../lib/confine.mjs';
 import { classify, READ_ONLY_TOOLS, AGENT_TOOLS } from '../lib/policy.mjs';
-import { handlePreToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
+import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INSTRUCTIONS } from '../lib/guardian.mjs';
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
@@ -28,7 +29,7 @@ function hookTimeoutSec(event) {
   if (Number.isFinite(override) && override > 0) return override;
   try {
     const hooks = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, 'hooks.json'), 'utf8'));
-    const key = event === 'pre-tool-use' ? 'PreToolUse' : 'PostInvocation';
+    const key = { 'pre-tool-use': 'PreToolUse', 'post-tool-use': 'PostToolUse', 'post-invocation': 'PostInvocation' }[event];
     for (const spec of Object.values(hooks)) {
       for (const entry of spec?.[key] ?? []) {
         for (const handler of entry.hooks ?? [entry]) {
@@ -78,6 +79,8 @@ async function runHook(event) {
       const maxReview = Math.max(3, budgetSec - 3);
       if (config.reviewer.timeoutSec > maxReview) env.AUTOAGY_REVIEW_TIMEOUT_CAP = String(maxReview);
       emit(await handlePreToolUse(payload, { env }));
+    } else if (event === 'post-tool-use') {
+      emit(handlePostToolUse(payload));
     } else if (event === 'post-invocation') {
       emit(handlePostInvocation(payload));
     } else {
@@ -139,11 +142,22 @@ function status() {
     lines.push(`  api key         ${config.reviewer.openai.apiKeyEnv} ${process.env[config.reviewer.openai.apiKeyEnv] ? 'is set' : 'is NOT set'}`);
   }
   if (config.reviewer.backend === 'agy') {
-    const probe = spawnSync(config.reviewer.agy.command, ['--version'], { encoding: 'utf8', timeout: 10000, shell: process.platform === 'win32' });
-    lines.push(`  agy             ${probe.status === 0 ? `found (${probe.stdout.trim()})` : `NOT runnable as "${config.reviewer.agy.command}"`}`);
+    // Inside a session, reviews run the agy CLI of that session unless reviewer.agy.command is an absolute path.
+    const command = config.reviewer.agy.command;
+    const exe = path.isAbsolute(command) ? command : findExecutable(command, process.env.PATH);
+    const probe = exe ? spawnSync(exe, ['--version'], { encoding: 'utf8', timeout: 10000, shell: process.platform === 'win32' && !/\.exe$/i.test(exe) }) : null;
+    lines.push(`  agy             ${probe?.status === 0 ? `found at ${exe} (${probe.stdout.trim()})` : `NOT runnable as "${command}"`}`);
   }
   const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath()), autoagyHome: resolveAutoagyHome() });
   lines.push(`  own sandbox     ${own.active ? 'active' : own.required ? 'REQUIRED BUT UNAVAILABLE (commands are reviewed)' : 'inactive'} — ${own.detail}`);
+  const check = readSandboxCheck(home);
+  if (check?.status === 'broken') {
+    lines.push(`  ! self-check    FAILED ${fmtTime(check.time)}: ${check.detail}. The own sandbox is off for that agy build; it is checked again after agy updates.`);
+  } else if (check?.status === 'verified') {
+    lines.push(`  self-check      agy ran ${check.verified} rewritten command(s) as expected (last ${fmtTime(check.time)})`);
+  } else if (own.active) {
+    lines.push('  self-check      no command has run in the own sandbox yet');
+  }
   for (const w of warnings) lines.push(`  ! config: ${w}`);
 
   const settingsFile = cliSettingsPath();
@@ -255,7 +269,7 @@ async function dryRunReview(flags) {
   console.log(`  sandbox: ${ctx.sandbox.active ? 'active' : 'not active'} — ${ctx.sandbox.detail}`);
   if (flags.tool === 'run_command' && args.BypassSandbox !== true && ctx.ownSandbox.active) console.log("  if allowed, the command runs inside autoagy's own sandbox");
   if (classification.verdict !== 'review' || flags['classify-only']) return;
-  const reviewer = createReviewer(config, { autoagyHome: ctx.autoagyHome });
+  const reviewer = createReviewer(config, { autoagyHome: ctx.autoagyHome, executable: ctx.reviewerExecutable });
   if (!reviewer) return console.log('No reviewer model configured (mode ask / backend none): the user would be asked.');
   const evidence = gatherEvidence(ctx, { rootConversationId: null });
   const prompt = buildReviewPrompt(ctx, classification, evidence);
@@ -313,7 +327,7 @@ Usage:
   autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only] [--show-prompt]
   autoagy setup [--dry-run] [--no-settings]
   autoagy teardown [--dry-run]
-  autoagy hook <pre-tool-use|post-invocation>   (used by hooks.json)`;
+  autoagy hook <pre-tool-use|post-tool-use|post-invocation>   (used by hooks.json)`;
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
