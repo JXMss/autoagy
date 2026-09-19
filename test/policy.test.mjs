@@ -47,6 +47,13 @@ test('reads are allowed, credential reads are reviewed', () => {
   assert.equal(verdict('view_file', { AbsolutePath: '/proc/self/status' }).verdict, 'allow');
   assert.equal(verdict('run_command', { CommandLine: 'cat /proc/cpuinfo' }, { config: noSandbox }).verdict, 'allow');
   assert.equal(verdict('run_command', { CommandLine: 'ls /etc' }, { config: noSandbox }).verdict, 'allow');
+  // PowerShell's `Env:` provider is the same thing on Windows, and it is judged
+  // on the argument rather than on the command name: `ls`, `cat` and `type` are
+  // the cmdlets' aliases, and a whitelist cannot enumerate its own aliases.
+  for (const cmd of ['ls Env:', 'cat Env:\\OPENAI_API_KEY', 'type Env:\\OPENAI_API_KEY', 'Get-ChildItem Env:', 'ls env*']) {
+    assert.equal(verdict('run_command', { CommandLine: cmd }, { config: noSandbox }).category, 'credential-read', cmd);
+  }
+  assert.equal(verdict('run_command', { CommandLine: 'Get-ChildItem C:\\Users' }, { config: noSandbox }).verdict, 'allow');
   // Inside autoagy's own sandbox there is nothing to review: /proc is a private
   // PID namespace with a cleared environment.
   const own = configWith({ ownSandbox: 'on' });

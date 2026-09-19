@@ -482,6 +482,16 @@ function credentialArgument(ctx, analysis, cwd, { hiddenBySandbox = false } = {}
     for (const r of command.redirects) if (!r.op.startsWith('<<')) words.push(r.target);
   }
   for (const word of words) {
+    // PowerShell's `Env:` provider is the environment, and *any* command name
+    // can reach it — `ls`, `cat` and `type` are the cmdlets' aliases, and a
+    // whitelist of names cannot enumerate its own aliases. So this is judged on
+    // the argument as written, before resolution: on Windows `\` is a separator
+    // and the provider name would be gone by the time a path is formed.
+    //
+    // `env*` is the same provider reached by wildcard. It costs a review for a
+    // POSIX `cat env*` too, which is the direction this list is supposed to err
+    // in, and it is the only form the aliases cannot dodge.
+    if (/^env:/i.test(word) || /^env\*$/i.test(word)) return word;
     let value = word.replace(/^~(?=$|\/)/, ctx.home).replace(/\$\{HOME\}|\$HOME\b/g, ctx.home);
     if (/[$`]/.test(value)) continue;
     // For a glob, the directory before the first wildcard.
