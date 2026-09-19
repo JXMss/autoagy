@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS } from '../plugin/lib/state.mjs';
+import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, touchHeartbeat, readHeartbeat } from '../plugin/lib/state.mjs';
 import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
 import { PLUGIN_DIR } from '../plugin/lib/context.mjs';
 
@@ -60,4 +60,20 @@ test('a sticky mark survives a read-modify-write round trip', () => {
   const state = readState(autoagyHome, 'conv-1');
   assert.equal(isUntrusted(state), true);
   assert.equal(state.untrusted.reason, 'edit-target-changed');
+});
+
+test('a hook leaves a heartbeat, so a plugin that stopped loading is visible', () => {
+  // A plugin that is not loading cannot say so; this is the only trace it
+  // leaves, and `autoagy status` is what reads it.
+  const home = path.join(root, 'autoagy-heartbeat');
+  assert.equal(readHeartbeat(home), null, 'nothing recorded yet');
+  touchHeartbeat(home, 'post-invocation');
+  const beat = readHeartbeat(home);
+  assert.equal(beat.event, 'post-invocation');
+  assert.ok(Math.abs(Date.now() - Date.parse(beat.at)) < 5_000, beat.at);
+  // A heartbeat that cannot be written must never break a hook: put a directory
+  // where the file goes, so the rename fails and is swallowed.
+  fs.rmSync(path.join(home, 'state', 'last-hook-run.json'));
+  fs.mkdirSync(path.join(home, 'state', 'last-hook-run.json'));
+  assert.doesNotThrow(() => touchHeartbeat(home, 'post-invocation'));
 });

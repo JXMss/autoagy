@@ -15,7 +15,7 @@ import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, envScrubDisabled, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
-import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted } from './state.mjs';
+import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat } from './state.mjs';
 import { appendDecision, writeReviewRecord } from './log.mjs';
 import { readTranscriptRows } from './transcript.mjs';
 
@@ -608,6 +608,11 @@ export function handlePostInvocation(payload, options = {}) {
   const { config } = loadConfig({ env, home: options.home });
   const home = resolveAutoagyHome(env, options.home);
   const conversationId = payload?.conversationId || env.ANTIGRAVITY_CONVERSATION_ID;
+  // A hook that runs at all is news: `status` uses this to tell a plugin that is
+  // not loading — disabled, its pin replaced, or its interpreter broken — from
+  // one that is merely quiet. Written before the early returns below, so mode
+  // "off" and a payload without a conversation id both leave a mark.
+  touchHeartbeat(home, 'post-invocation');
   if (!conversationId) return {};
   const state = readState(home, conversationId);
   // Sweep the mount points PostToolUse did not see (a backgrounded command, or

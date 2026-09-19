@@ -13,14 +13,14 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR, detectSandbox } from '../lib/context.mjs';
 import { findExecutable } from '../lib/paths.mjs';
-import { detectOwnSandbox, readSandboxCheck, removeControlPlaceholders, lockQuiescent, flockPath } from '../lib/confine.mjs';
+import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath } from '../lib/confine.mjs';
 import { classify, failOpenOutput } from '../lib/policy.mjs';
 import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INSTRUCTIONS } from '../lib/guardian.mjs';
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
-import { listStates, updateState, readState, isUntrusted } from '../lib/state.mjs';
+import { listStates, updateState, readState, isUntrusted, readHeartbeat } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, RECOMMENDED_GRANTS, readSetupRecord } from '../lib/setup.mjs';
 
 /**
@@ -190,6 +190,17 @@ const strFlag = (value) => (typeof value === 'string' && value !== '' ? value : 
 
 const fmtTime = (iso) => (iso ? iso.replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '');
 
+/** "3 minutes", "2 days": for a heartbeat the exact seconds do not matter. */
+function ageText(ms) {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'}`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'}`;
+}
+
 /**
  * Clears the "untrusted" flag. The flag is set when the environment did
  * something autoagy did not approve — an edit whose target resolved elsewhere,
@@ -345,7 +356,11 @@ function status() {
   // there is no sandbox, and it fails independently of the sandbox one.
   if (config.commandEnv?.mode === 'scrub' && !own.active) {
     const scrub = readSandboxCheck(autoagyHome, 'envScrub');
-    if (scrub?.status === 'broken') {
+    if (!envBinaryPath()) {
+      // Saying "no command has run yet" here would claim a rewrite that this
+      // platform cannot perform: there is no `env` to run commands under.
+      lines.push(`  ! command env   "scrub" is set, but ${process.platform} has no root-owned \`env\` to rewrite commands with, so they keep the environment agy was started with`);
+    } else if (scrub?.status === 'broken') {
       lines.push(`  ! command env   SELF-CHECK FAILED ${fmtTime(scrub.time)}: ${scrub.detail}. Commands keep the environment agy was started with, for that agy build.`);
     } else if (scrub?.status === 'verified') {
       lines.push(`  command env     scrubbed: agy ran ${scrub.verified} rewritten command(s) as expected (last ${fmtTime(scrub.time)})`);
@@ -384,6 +399,23 @@ function status() {
   const command = hooks?.autoagy?.PreToolUse?.[0]?.hooks?.[0]?.command;
   lines.push('');
   lines.push(`Hook command: ${command ?? '(hooks.json not found)'}`);
+  // A plugin that is not loading cannot say so: the three ways it goes missing —
+  // `agy plugin disable`, an `agy plugin install` that replaced the pinned
+  // hooks.json, or the pinned interpreter breaking — all look like silence from
+  // inside. The hook leaves a mark instead, and this is how stale it is.
+  const heartbeat = readHeartbeat(autoagyHome);
+  if (heartbeat) {
+    const ageMs = Date.now() - Date.parse(heartbeat.at);
+    lines.push(`  hooks last ran  ${fmtTime(heartbeat.at)} (${ageText(ageMs)} ago)`);
+    if (installed && ageMs > 24 * 3600 * 1000) {
+      lines.push('  ! if you have used agy since then, its hooks are not loading: check that the plugin is');
+      lines.push('    enabled, that the hook command above is intact, and that the interpreter it names runs');
+      lines.push('    (`agy plugin list`, `agy plugin enable autoagy`). Until then no tool call is being');
+      lines.push('    reviewed, while the permission grants from `autoagy setup` still apply.');
+    }
+  } else if (installed) {
+    lines.push('  ! hooks         plugin installed but no hook has ever run: nothing is being reviewed');
+  }
 
   const recent = readDecisions(autoagyHome, 500).filter((r) => r.review);
   const counts = {};

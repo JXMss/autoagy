@@ -171,6 +171,36 @@ export function updateState(autoagyHome, conversationId, mutate) {
   });
 }
 
+/**
+ * Records that a hook just ran, for `autoagy status`.
+ *
+ * A plugin that is not loading cannot report that it is not loading, and the
+ * three ways it can go missing — `agy plugin disable`, `agy plugin install`
+ * replacing the pinned hooks.json, or the pinned interpreter no longer working —
+ * all look the same from the outside: no hook runs. So the hook leaves a mark
+ * instead, and `status` can say how long ago the last one was.
+ */
+export function touchHeartbeat(autoagyHome, event = 'unknown') {
+  const file = path.join(stateDir(autoagyHome), 'last-hook-run.json');
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ at: new Date().toISOString(), event }));
+    fs.renameSync(tmp, file);
+  } catch {
+    // A heartbeat that cannot be written must never fail a hook.
+  }
+}
+
+/** When the last hook ran, or null when there is no record. */
+export function readHeartbeat(autoagyHome) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(stateDir(autoagyHome), 'last-hook-run.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 /** Stable identity of an action for one-shot approvals. */
 export function actionKey(toolName, args) {
   const { toolAction, toolSummary, WaitMsBeforeAsync, ...rest } = args ?? {};
