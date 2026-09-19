@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted } from '../plugin/lib/state.mjs';
+import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS } from '../plugin/lib/state.mjs';
+import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
+import { PLUGIN_DIR } from '../plugin/lib/context.mjs';
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-state-')));
 const autoagyHome = path.join(root, 'autoagy');
@@ -16,10 +18,19 @@ test('only a lock older than the staleness limit may be broken', () => {
   // drop a sticky `untrusted` mark.
   assert.equal(lockIsStale(0), false);
   assert.equal(lockIsStale(4_999), false);
-  assert.equal(lockIsStale(6_000), false);
-  assert.equal(lockIsStale(15_000), false);
-  assert.equal(lockIsStale(15_001), true);
+  assert.equal(lockIsStale(5_000), false);
+  assert.equal(lockIsStale(5_001), true);
   assert.equal(lockIsStale(60_000), true);
+});
+
+test('a lock wait fits inside the tightest hook budget', () => {
+  // The post-tool-use hook runs the self-checks, and its watchdog exits before
+  // they run — so a wait longer than that budget does not delay the checks, it
+  // removes them. Whatever the limit is, it has to stay under it.
+  for (const event of ['post-tool-use', 'post-invocation']) {
+    const budgetMs = hookBudgetSec(event, { pluginDir: PLUGIN_DIR }) * 1000;
+    assert.ok(LOCK_STALE_MS < budgetMs, `${LOCK_STALE_MS}ms of waiting vs the ${event} budget of ${budgetMs}ms`);
+  }
 });
 
 test('withLock runs and releases, and breaks a lock nobody is holding', () => {

@@ -5,7 +5,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-const LOCK_STALE_MS = 15_000;
+/**
+ * How old a lock file must be before a waiter may break it.
+ *
+ * Chosen to fit inside the tightest hook budget, not to measure patience: the
+ * post-tool-use and post-invocation hooks get ten seconds (hooks.json declares
+ * fifteen, the watchdog answers five seconds inside it), and their watchdog
+ * exits before the check runs — so a lock wait longer than that does not delay
+ * the self-checks, it deletes them. The critical sections are a read, a write
+ * and a rename over a small file, so five seconds is already four orders of
+ * magnitude past "the holder is alive".
+ */
+export const LOCK_STALE_MS = 5_000;
 const MAX_DENIALS = 20;
 
 export function stateDir(autoagyHome) {
