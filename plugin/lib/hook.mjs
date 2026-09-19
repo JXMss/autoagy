@@ -9,7 +9,7 @@
 //   {} / invalid JSON / non-zero exit / timeout -> the tool call fails
 
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
-import { HookContext } from './context.mjs';
+import { HookContext, HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders } from './confine.mjs';
@@ -43,10 +43,21 @@ function countUserMessages(transcriptPath) {
  * prompt, so asking the user would silently allow the action. Refuse instead.
  */
 export function withoutUnanswerablePrompt(output, ctx) {
-  if (output?.decision !== 'force_ask' || !ctx.host?.flags?.skipPermissions) return output;
+  if (output?.decision !== 'force_ask') return output;
+  const skip = ctx.host?.flags?.skipPermissions === true;
+  // Where a process's arguments cannot be read at all — Windows has no /proc and
+  // no ps — the flag can never be ruled out, so a prompt could be approved
+  // silently. Treat that as "cannot ask" rather than emitting it. On the
+  // platforms where the arguments are readable the hook runs as agy's child and
+  // the walk finds it, so an unidentified host there is not evidence of the flag.
+  const flagUnknowable = !ctx.host && !HOST_INSPECTABLE_PLATFORMS.includes(process.platform);
+  if (!skip && !flagUnknowable) return output;
+  const why = skip
+    ? 'agy runs with --dangerously-skip-permissions, which would auto-approve the prompt'
+    : `autoagy cannot read the agy process arguments on ${process.platform}, so it cannot rule out --dangerously-skip-permissions`;
   return {
     decision: 'deny',
-    reason: `${output.reason}\nautoagy cannot ask the user here: agy runs with --dangerously-skip-permissions, which would auto-approve the prompt. Ask the user in chat instead.`,
+    reason: `${output.reason}\nautoagy cannot ask the user here: ${why}. Ask the user in chat instead.`,
   };
 }
 
@@ -116,7 +127,7 @@ export function withOwnSandbox(output, ctx) {
  * mounts inside the child's own namespace, so the host directory stays empty
  * for the whole command — entries there mean the rewrite did not cover it.
  */
-function removePlaceholders(home, conversationId, paths) {
+function removePlaceholders(home, conversationId, paths, { attribute = false } = {}) {
   const { dirty } = removeControlPlaceholders(paths);
   if (dirty.length === 0) return;
   const detail = dirty.join(', ');
@@ -127,6 +138,11 @@ function removePlaceholders(home, conversationId, paths) {
   });
   // The decision log is the protocol's stdout; warnings go to stderr.
   process.stderr.write(`autoagy: a command wrote into ${detail}; that path was meant to be read-only inside the sandbox.\n`);
+  // Only a caller that knows a sandboxed command just ran can attribute this.
+  // At a sweep the directory may simply have been filled by agy's own edit
+  // tool, which writes outside every sandbox — marking the conversation
+  // untrusted for that would be a false alarm about a reviewed edit.
+  if (!attribute) return;
   updateState(home, conversationId, (s) => markUntrusted(s, { reason: 'protected-path-written', detail }));
 }
 
@@ -170,7 +186,7 @@ function checkConfinedRun(ctx, state = {}) {
     if (!keepPlaceholders) delete s.pendingPlaceholders[ctx.stepIdx];
     return entry;
   });
-  if (!keepPlaceholders && recorded) removePlaceholders(home, ctx.conversationId, recorded.placeholders);
+  if (!keepPlaceholders && recorded) removePlaceholders(home, ctx.conversationId, recorded.placeholders, { attribute: true });
   if (!recorded) return {};
   let problem = null;
   if (commandHash(ctx.args.CommandLine) !== recorded.hash) problem = 'agy ran the original command instead of the one autoagy rewrote';
@@ -328,7 +344,6 @@ export async function handlePreToolUse(payload, options = {}) {
   const classification = classify(ctx, {
     escalatedCommandApproved: state.escalatedCommandApproved,
     untrusted: isUntrusted(state),
-    backgroundSuspected: state.backgroundSuspected,
   });
   const summary = summarizeAction(ctx.toolName, ctx.args);
   const base = {
@@ -449,10 +464,16 @@ export async function handlePreToolUse(payload, options = {}) {
  * turn ends, which is the first moment nothing can still be running against it.
  */
 function sweepPlaceholders(home, conversationId, state) {
-  // backgroundSuspected is deliberately NOT part of this: a backgrounded
-  // command can outlive the turn, and if it did, the next command would find no
-  // mount point and no reason to be careful. Staying set costs a review only
-  // when a protected directory is missing, and that is the safe direction.
+  // While a command may still be running, reclaiming is not safe: the mount
+  // point exists only in that process's mount namespace, and removing the
+  // directory underneath it makes the path stop resolving there, so the command
+  // can create the directory again — through the writable workspace bind, onto
+  // the host. That is the exact thing the mount point is there to prevent.
+  //
+  // Nothing here can yet tell whether a command is still running (autoagy never
+  // starts bwrap, so it holds no pid), so the conservative answer is to keep
+  // them. `autoagy trust` releases them once the user says nothing is running.
+  if (state.backgroundSuspected) return;
   const pending = Object.values(state.pendingPlaceholders ?? {});
   if (pending.length === 0) return;
   const paths = pending.flatMap((list) => list ?? []);

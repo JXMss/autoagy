@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { detectOwnSandbox, confinedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, safePath } from '../plugin/lib/confine.mjs';
+import { detectOwnSandbox, confinedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv } from '../plugin/lib/confine.mjs';
 import { seccompProgram, seccompSupported } from '../plugin/lib/seccomp.mjs';
 import { HookContext, PROTECTED_WORKSPACE_DIRS } from '../plugin/lib/context.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
 import { parseShell } from '../plugin/lib/shell.mjs';
 import { classify } from '../plugin/lib/policy.mjs';
-import { readState } from '../plugin/lib/state.mjs';
+import { readState, updateState } from '../plugin/lib/state.mjs';
 import { makeSandboxDirs, configWith, payloadFor } from './helpers.mjs';
 
 const dirs = makeSandboxDirs();
@@ -294,10 +294,18 @@ test('the sandbox environment is an allowlist, and clears before it sets', () =>
   assert.ok(!argv.some((a) => a.includes('sk-not-a-real-secret') || a.includes('ssh-agent.sock')), 'no secret value reaches the command line');
 });
 
-test('PATH entries inside a writable root are dropped', () => {
+test('PATH reaches the sandbox unchanged, including entries inside a writable root', () => {
+  // Filtering those entries buys nothing here: the workspace is bound
+  // read-write with exec unrestricted, so a sandboxed command runs any file in
+  // it by path anyway — while dropping them breaks .venv/bin and
+  // node_modules/.bin workflows and can pick the wrong interpreter.
   const mine = path.join(dirs.workspace, 'node_modules', '.bin');
-  assert.equal(safePath(['/usr/bin', mine, '/bin'].join(path.delimiter), [dirs.workspace]), `/usr/bin${path.delimiter}/bin`);
-  assert.equal(safePath('relative/bin', [dirs.workspace]), '/usr/local/bin:/usr/bin:/bin', 'never leaves PATH empty');
+  const pathVar = ['/usr/bin', mine, '/bin'].join(path.delimiter);
+  assert.equal(sandboxEnv({ PATH: pathVar })[0][1], pathVar);
+  const argv = parseShell(confinedCommandLine(ctxFor({ CommandLine: 'true' }), 'true')).commands[0].argv;
+  const set = argv.findIndex((a, i) => a === '--setenv' && argv[i + 1] === 'PATH');
+  assert.ok(set > 0);
+  assert.equal(argv[set + 2], dirs.env.PATH, 'the hook\'s PATH is passed through verbatim');
 });
 
 test('a sandboxed command does not inherit the hook environment', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
@@ -312,7 +320,7 @@ test('a sandboxed command does not inherit the hook environment', { skip: real.o
   assert.equal(fs.existsSync(out), true);
 });
 
-test('a backgrounded command keeps its mount point until the turn ends', async () => {
+test('a backgrounded command keeps its mount point, and the sweep leaves it alone', async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
@@ -324,6 +332,9 @@ test('a backgrounded command keeps its mount point until the turn ends', async (
   fs.rmSync(target, { recursive: true, force: true });
 
   const started = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'npm run dev', WaitMsBeforeAsync: 5000 }, bg), opts);
+  // Still auto-allowed, and correctly so: the very rewrite that approves it
+  // creates the mount point for the missing directory, so the directory is
+  // never actually unprotected and there is nothing for a reviewer to weigh.
   assert.equal(started.decision, 'allow');
   assert.equal(fs.existsSync(target), true, 'created for the command');
 
@@ -336,9 +347,20 @@ test('a backgrounded command keeps its mount point until the turn ends', async (
   assert.deepEqual(handlePostToolUse(payloadFor(dirs, 'run_command', started.overwrite, bg), opts), {});
   assert.equal(fs.existsSync(target), true, 'survives PostToolUse');
 
-  // The end of the turn is the first moment nothing can still be holding it.
+  // Nor is reaching a point where the agent loop pauses: PostInvocation fires
+  // after model invocations, not at the end of a turn, and a dev server keeps
+  // running across both. Removing the mount point now would make the path stop
+  // resolving inside the sandbox, and the running command would recreate the
+  // directory through the writable workspace bind — on the host.
   handlePostInvocation({ conversationId: bg.conversationId }, opts);
-  assert.equal(fs.existsSync(target), false, 'swept when the turn ends');
+  assert.equal(fs.existsSync(target), true, 'kept while a command may still be running');
+
+  // Releasing it is the user's call, once they know nothing is running.
+  updateState(home, bg.conversationId, (s) => {
+    s.backgroundSuspected = false;
+  });
+  handlePostInvocation({ conversationId: bg.conversationId }, opts);
+  assert.equal(fs.existsSync(target), false, 'swept once the flag is released');
   fs.rmSync(path.join(home, 'config.json'));
 });
 

@@ -17,10 +17,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const HOOK_TIMEOUT_FALLBACK_SEC = 150;
-/** Bounds for the pre-tool-use override. A low budget is friction, not a hole:
- *  the watchdog fails closed for everything that changes anything. */
+/** Lower bound for the pre-tool-use override. A low budget is friction, not a
+ *  hole: the watchdog fails closed for everything that changes anything. */
 export const HOOK_TIMEOUT_ENV_MIN_SEC = 10;
-export const HOOK_TIMEOUT_ENV_MAX_SEC = 600;
 
 /** The only event whose budget the environment may override. */
 export const OVERRIDABLE_EVENTS = new Set(['pre-tool-use']);
@@ -59,7 +58,10 @@ export function hookTimeoutSec(event, { env = process.env, pluginDir } = {}) {
   if (!OVERRIDABLE_EVENTS.has(event)) return declared;
   const raw = Number(env.AUTOAGY_HOOK_TIMEOUT_SEC);
   if (!Number.isFinite(raw) || raw <= 0) return declared;
-  return Math.min(HOOK_TIMEOUT_ENV_MAX_SEC, Math.max(HOOK_TIMEOUT_ENV_MIN_SEC, raw));
+  // Never above the declared timeout: past that point agy kills the hook before
+  // the watchdog answers, which is the opaque failure this budget exists to
+  // avoid. The override may only bring the answer forward.
+  return Math.min(declared, Math.max(HOOK_TIMEOUT_ENV_MIN_SEC, raw));
 }
 
 /**

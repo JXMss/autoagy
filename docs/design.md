@@ -107,9 +107,10 @@ PreToolUse 输出的实际效果（实测）：
 | 子 agent 的“用户消息”其实来自父 agent | 通过 `INVOKE_SUBAGENT` 记录回溯到根会话，把根会话里用户的话作为授权；子会话自己的输入标为 `delegating agent`（不可信）；CLI 下找不到父会话、且首条消息在 harness 写的尾部（最后一个 `</USER_REQUEST>` 之后）没有 `USER_SETTINGS_CHANGE` 时，同样按不可信处理。委派文本里写这个标签无效；不管有没有这个标签都会查找父会话 |
 | 不可信内容可能伪造 transcript 里的角色标签和区段标记 | 每条记录的文本 JSON 编码成一行，审核原因同样 JSON 编码 |
 | `mode off` 时 setup 加的授权仍然有效 | off 模式下，这三类授权覆盖的操作（绕过沙箱的命令、MCP、浏览器操作）返回 `force_ask`；不可信会话的编辑与读取也返回 `force_ask`（否则 off 模式下它们会是「无意见」，比审核还差）。这个分支现在同样经过 `withoutUnanswerablePrompt` |
-| 环境变量可以把 hook 指向别的配置目录，或搬走 `~` | `autoagy setup` 把配置目录和 `os.userInfo().homedir` 的绝对路径写进 `hooks.json` 的每条 hook 命令（`pinHookCommands`），运行时以钉子为准覆盖 `AUTOAGY_HOME`；`hooks.json` 在插件目录里，属于 `selfPaths`，agent 改不动。此外给 `HOME`（或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*`）赋值的命令送审，以 `agy` 为可执行名的命令也送审——那个实例是否加载这些 hook 由它自己的配置决定 |
+| 环境变量可以把 hook 指向别的配置目录，或搬走 `~` | `autoagy setup` 把配置目录和 `os.userInfo().homedir` 的绝对路径写进 `hooks.json` 的每条 hook 命令（`pinHookCommands`），运行时以钉子为准覆盖 `AUTOAGY_HOME`；`hooks.json` 在插件目录里，属于 `selfPaths`，agent 改不动。管理命令（`status`/`log`/`denials`/`approve`/`trust`/`mode`）读同一份钉子，否则它们会报告和修复另一套配置（例如用 `sudo` 或改了 `HOME` 的 shell 跑 `trust`，它清的不是 hook 正在用的那份 state）。没有钉子时（开发检出、测试）回落到环境变量。钉子只由 `autoagy setup` 写入，而 `agy plugin install` 会用它自己那份未钉住的 `hooks.json` 覆盖已装插件——`autoagy status` 会就此告警。此外给 `HOME`（或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*`）赋值的命令送审，以 `agy` 为可执行名的命令也送审——那个实例是否加载这些 hook 由它自己的配置决定 |
 | 平台读不到 agy 进程参数时，设置文件会谎报沙箱有效 | Windows 上 `readProcessInfo` 返回 null，`--dangerously-skip-permissions` 无法识别，而 `setup` 写进设置文件的值正是该分支检查的内容。所以设置文件分支只在能读进程参数的平台（linux/darwin）上生效，其余平台返回 `source: 'platform'` 的保守结论。`config.sandbox: "on"` 仍是文档化的逃生口 |
-| 沙箱内的命令能看到 hook 的全部环境变量 | `--clearenv` + 白名单 `--setenv`（`PATH` `HOME` `USER` `LOGNAME` `SHELL` `TERM` `TMPDIR` `TZ` `PWD` `LANG` 与 `LC_*`），`PATH` 丢弃落在可写根内的条目（`node_modules/.bin` 这类是「先写后执行」原语），额外变量走 `ownSandboxEnvPassThrough`。**`--clearenv` 必须排在任何 `--setenv` 之前**（bwrap 按顺序应用，反过来会把回填的值清掉），有 argv 顺序守护测试。审核进程本身不在沙箱内，也不需要：它要用网络和 agy 登录态，且已被 `classifyGuardianTool` 限为只读——不要试图把 reviewer 也包进 bwrap |
+| 沙箱内的命令能看到 hook 的全部环境变量 | `--clearenv` + 白名单 `--setenv`（`PATH` `HOME` `USER` `LOGNAME` `SHELL` `TERM` `TMPDIR` `TZ` `PWD` `LANG` 与 `LC_*`），值原样传递，额外变量走 `ownSandboxEnvPassThrough`。**`--clearenv` 必须排在任何 `--setenv` 之前**（bwrap 按顺序应用，反过来会把回填的值清掉），有 argv 顺序守护测试。审核进程本身不在沙箱内，也不需要：它要用网络和 agy 登录态，且已被 `classifyGuardianTool` 限为只读——不要试图把 reviewer 也包进 bwrap |
+| 沙箱内的 `PATH` 不做过滤 | 沙箱内工作区是 `--bind-try` 可写、exec 未限制，命令本来就能按路径运行工作区里的任何文件，所以丢掉落在可写根内的 `PATH` 条目买不到隔离（实测：植入脚本按绝对路径照样执行），却会让 `.venv/bin`、`node_modules/.bin` 里的工具找不到或用错解释器（实测：退出码 127）。**真正危险的是沙箱外的命令**通过工作区的 `PATH` 目录解析到被改过的可执行文件——那条路目前没处理，因为已知只读的判断只看 basename（`isSafeArgv`），根本进不了送审。见 README「已知限制」 |
 | 浏览器导航沿用了抓取的白名单 | 分成两张表：`trustedDomains`（抓取）与 `browserTrustedDomains`（导航，默认空白）。抓取拿回的是文本，导航会把页面脚本放进一个能联网、不在沙箱里的浏览器里执行 |
 | mock 审核后端可以从配置文件里打开 | 需要显式测试开关 `AUTOAGY_UNSAFE_MOCK_REVIEWER=1`，否则回退默认后端。mock 只能由配置文件选中，而配置目录写入被硬拒，所以单靠环境变量打不开 |
 | 中断本轮 | 熔断后 PreToolUse 拒绝一切非只读操作，PostInvocation 返回 `terminationBehavior: "terminate"` 一次；出现新的用户消息即视为新一轮 |
@@ -117,9 +118,11 @@ PreToolUse 输出的实际效果（实测）：
 | `--dangerously-skip-permissions` 下 `force_ask` 会被自动同意 | 此时 autoagy 把所有 “ask” 改为 “deny” |
 | agy 自动更新后，可能悄悄不再执行 `overwrite` 的改写 | PostToolUse 核对实际执行的参数；一旦不符，就对该 agy 构建（以可执行文件为准）停用自己的沙箱，并通过拒绝下一条命令通知一次 |
 | 工作区里还不存在的受保护目录会被沙箱里的命令建出来 | `--ro-bind-try` 跳过不存在的路径，所以在第一个不存在的分量上挂只读空 tmpfs（`--perms 555 --tmpfs` + `--remount-ro`）；只在可写根内的受保护目录上做，其他路径本来就建不出来。同 Codex |
-| 占位目录什么时候能回收 | 同步命令在 `handlePostToolUse` 回收。**agy 可以让命令在后台继续跑并提前返回**（`run_command` 带 `WaitMsBeforeAsync`，或之后用过 `command_status`/`send_command_input`/`read_terminal`），此时工具调用返回不构成「挂载点已空闲」的证据，所以记 `backgroundSuspected`、保留占位，改在 `handlePostInvocation`（本轮结束）统一清扫。**不采用按 pid 回收**：autoagy 从不启动 bwrap（执行改写后命令行的是 agy），拿不到 pid，也就没有可等待的对象——这一点是确定的，不要再试 |
-| 占位回收时发现目录非空 | bwrap 的 tmpfs 挂在子进程自己的 mount namespace 里，宿主上该目录整条命令期间都是空的，所以非空意味着有命令写进了真实的受保护目录。保留目录作为证据、记 `placeholder-dirty`、stderr 告警，并把会话标记为不可信 |
-| 后台命令与占位目录的取舍 | 当「可能有命令还在跑」且「存在缺失的受保护目录」时，无法安全回收挂载点。此时把命令送审（`unprotected-control-directory`），而不是让它以失去 `.git` 保护的状态运行；检查放在用户 `rules` 之前，`allow` 规则不能绕过 |
+| 占位目录什么时候能回收 | 同步命令在 `handlePostToolUse` 回收。**agy 可以让命令在后台继续跑并提前返回**（`run_command` 带 `WaitMsBeforeAsync`，或之后用过 `command_status`/`send_command_input`/`read_terminal`），此时工具调用返回不构成「挂载点已空闲」的证据，所以记 `backgroundSuspected`、保留占位，**本会话不再回收**，直到用户用 `autoagy trust` 显式释放（或开新会话）。刻意不用 `handlePostInvocation` 当回收时机——它带 `modelOutput`，是每次模型调用后触发的，不是回合结束；一轮里的一次模型调用结束时删掉挂载点，正是下面那条的成因。**也不采用按 pid 回收**：autoagy 从不启动 bwrap（执行改写后命令行的是 agy），拿不到 pid，没有可等待的对象——但这只否定「等进程」，不否定「让命令自己持有可观测的标志」（例如共享 `flock`，由清理方取排他锁确认空闲），那个方向尚未实现，见文末 |
+| 在命令还在跑时回收挂载点会拆掉保护 | 实测（bwrap 0.9.0）：命令后台运行时 `rmdir` 掉宿主上的挂载点目录，子进程里该路径随之不再解析，而工作区根仍是可写的 bind，于是**该命令重建目录并直接写到宿主上**（`mkdir .agents/hooks/pre-commit` 从不回收时的 `Read-only file system` 变成写入成功）。所以回收必须以「没有命令在跑」为前提，这也是上面保留策略的原因 |
+| 顺带更正：`--tmpfs` 挂到已删除目录**不会**让 bwrap 失败 | 实测：在自动创建占位的那种配置下（挂载点位于可写根内，父目录已 `--bind-try` 成可写），bwrap 会自己把挂载点建出来，退出码 0；只有父目录只读时才 `Can't mkdir …: Read-only file system` 退出 1。所以「挂载点被删会让已批准的命令失败」不成立，真正的危害是上面那条 |
+| 占位回收时发现目录非空 | bwrap 的 tmpfs 挂在子进程自己的 mount namespace 里，宿主上该目录整条命令期间都是空的，所以非空说明有东西绕过了挂载。保留目录作为证据、记 `placeholder-dirty`、stderr 告警；**是否把会话标记为不可信取决于谁在回收**——只有 `handlePostToolUse`（刚跑完的确实是一条沙箱命令）才标记，回合结束的兜底清扫只记录：那里目录也可能是 agy 自己的编辑工具写进去的，它本来就写在所有沙箱之外 |
+| 缺失的受保护目录不单独触发送审 | 曾加过一条 `unprotected-control-directory`：当「可能有命令在跑」且「有缺失的受保护目录」时送审。它没有买到任何保护——紧随其后的改写会为每个缺失目录创建挂载点，送审期间没有命令在跑，目录从未真正暴露；它唯一的作用是把 `allow` 变成 `review`，配上粘性标志就是会话内每一条沙箱命令都送审。已删除 |
 | 文件编辑在沙箱外执行，检查和使用之间目标可能被换掉 | 批准时记录目标解析到的真实路径，PostToolUse 重新解析并比对，对不上就记 `edit-target-changed` 并熔断本轮（`policy.mjs` 的 `editTargets` + `hook.mjs` 的 `checkEditTargets`）。只能事后发现，阻止不了那一次写入。Codex 把编辑本身放进沙箱，从根上没有这个竞争 |
 | 被换掉的路径不会因为「换了一轮」而还原 | 新建会话、用户再说一句话，都不改变磁盘状态。所以 `edit-target-changed`、自检失败（`rewrite-ignored`）和 `placeholder-dirty` 都把**整个会话**标记为不可信（`state.untrusted`，粘性、不按轮清除），并经由 `rootConversationId` 传播到父会话。后果：文件编辑与「返回文件内容」的读取一律送审，`send_command_input` 不再免审，触及监管文件的命令改为直接拒绝（此时审核所依据的正是可疑的证据）。解除只能显式做：`autoagy trust`，因为只有人能确认磁盘现状 |
 | 凭据读取检查没有任何事后核对 | 属实，且没有修补方案：读类工具在 `handlePostToolUse` 里没有对应分支（只有 `run_command` 和编辑工具）。会话不可信之后，读取连同编辑一起送审，这是目前能给的补偿 |
@@ -145,3 +148,9 @@ PreToolUse 输出的实际效果（实测）：
 - autoagy 自己的沙箱：`test/confine.test.mjs` 用真实的 bwrap 检查可写/只读范围和网络。在真实 agy 1.2.7 会话里（隔离的 HOME，用 `scripts/install.mjs` 安装）：写工作区成功；写 `.git/hooks/pre-push`、`git config core.fsmonitor`、`curl` 都失败；agent 只看到“参数被 hook 改写”的提示。
 - 自检与子 agent（agy 1.2.7，隔离的 HOME）：主 agent 和 `self` 子 agent 各执行了一条命令，自检记录“2 条改写命令按预期执行”；启动 `inheritCustomizations: false` 且带 `run_command` 的自定义 agent 时被送审，mock 拒绝后 agent 如实报告，没有尝试绕过。
 - guardian 判断抽查（`autoagy review` + 构造的 transcript）：修错别字后 `git push --force origin main` → 拒绝（high）；推送用户要求的功能分支 → 批准；`.env` 外发到未知地址 → 拒绝（critical）；`rm -rf ~` → 拒绝（high）；`npm install` 绕过沙箱 → 批准（low）。agy 后端单次审核 3.3～12 秒；hook 的快速路径每次约 27 毫秒。
+
+## 待办：把「有没有命令在跑」变成一个可观测的事实
+
+目前 `backgroundSuspected` 是猜的（`WaitMsBeforeAsync > 0`，或出现过终端类工具），而它的两个用途——保留挂载点、以及曾经的送审——都建在这个猜测上。可以不用进程号把它变成事实：改写后的命令行本身就是一个在沙箱外运行的 shell，让它为 `bwrap` 的整个生命周期持有一个共享锁（`exec flock -s <lock> <bwrap> ...`），清理方只有在能取到排他锁时才回收——取不到就说明还有命令在跑，保留即可。
+
+实测（bwrap 0.9.0）：`flock -n -x` 在命令前后返回 0、运行中返回 1；两个并发持有者同样返回 1，所以按**工作区**（而不是按会话）加锁还能顺带覆盖子 agent 与主 agent 同时运行。两个前提必须一并解决，否则方案不成立：锁文件要放在沙箱内不可删改的位置（放在可写目录里，agent 可以 unlink 再重建，排他探测会误报空闲——正好是不安全的方向；放在 `autoagyHome` 下则沙箱内只读、`rm`/create 失败而 `flock` 正常），以及占位目录的创建要挪进这把锁的包装里，否则「已构造、尚未启动」的命令行仍可能指向一个已被回收的挂载点。另外 Node 自身没有共享锁（`state.mjs` 的 `withLock` 是基于 `mkdir` 的排他锁），所以要调用外部那个 root 所有的 `flock`。副作用是沙箱内的命令可以自己抢锁，后果是清理被无限期推迟——安全方向，但要有超时或告警。

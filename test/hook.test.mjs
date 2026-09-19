@@ -11,6 +11,7 @@ import { makeSandboxDirs, payloadFor } from './helpers.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
 import { readState } from '../plugin/lib/state.mjs';
 import { handlePreToolUse, failClosedOutput } from '../plugin/lib/hook.mjs';
+import { HOST_INSPECTABLE_PLATFORMS } from '../plugin/lib/context.mjs';
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin', 'bin', 'autoagy.mjs');
 const dirs = makeSandboxDirs();
@@ -241,6 +242,24 @@ test('an untrusted conversation also loses its content reads on an internal erro
   assert.equal(failClosedOutput(tool('list_dir'), new Error('x'), { untrusted: true }).decision, 'allow');
 });
 
+test('a prompt is only emitted when it will actually reach the user', async () => {
+  writeConfig({ mode: 'ask' });
+  const payload = payloadFor(dirs, 'run_command', { CommandLine: 'npm install', BypassSandbox: true }, ws());
+  const at = (host) => handlePreToolUse(payload, { env: dirs.env, home: dirs.home, host });
+  const identified = { kind: 'cli', cwd: dirs.workspace, argv: ['agy'], flags: { skipPermissions: false, sandbox: false, addDirs: [] } };
+  assert.equal((await at(identified)).decision, 'force_ask');
+  const skipped = { ...identified, flags: { ...identified.flags, skipPermissions: true } };
+  assert.equal((await at(skipped)).decision, 'deny');
+  // An unidentified host is not evidence of the flag where the arguments could
+  // have been read (here); on a platform that cannot read them at all, the flag
+  // cannot be ruled out and the prompt is refused instead.
+  if (HOST_INSPECTABLE_PLATFORMS.includes(process.platform)) {
+    assert.equal((await at(null)).decision, 'force_ask');
+  } else {
+    assert.equal((await at(null)).decision, 'deny');
+  }
+});
+
 test('mode off never asks the user when agy cannot show the prompt', async () => {
   const host = { kind: 'cli', cwd: dirs.workspace, argv: ['agy'], flags: { skipPermissions: true, sandbox: false, addDirs: [] } };
   writeConfig({ mode: 'off' });
@@ -298,12 +317,18 @@ test('autoagy trust clears the untrusted flag', () => {
   const src = swapUnderApprovedEdit();
   try {
     const home = dirs.env.AUTOAGY_HOME;
-    const res = spawnSync(process.execPath, [BIN, 'trust'], { env: dirs.env, encoding: 'utf8' });
-    assert.equal(res.status, 0, res.stderr);
-    assert.match(res.stdout, /Trusted again/);
+    const run = (...args) => {
+      const res = spawnSync(process.execPath, [BIN, ...args], { env: dirs.env, encoding: 'utf8' });
+      assert.equal(res.status, 0, res.stderr);
+      return res.stdout;
+    };
+    // Releasing is deliberate: a bare call lists what is flagged rather than
+    // clearing every conversation at once.
+    assert.match(run('trust'), /Pass a conversation id prefix, or --all/);
+    assert.equal(readState(home, dirs.conversationId).untrusted?.reason, 'edit-target-changed');
+    assert.match(run('trust', '--all'), /Trusted again/);
     assert.equal(readState(home, dirs.conversationId).untrusted, null);
-    // Once cleared there is nothing left to clear.
-    assert.equal(spawnSync(process.execPath, [BIN, 'trust'], { env: dirs.env, encoding: 'utf8' }).stdout, 'No conversation is flagged as untrusted.\n');
+    assert.equal(run('trust'), 'No conversation is flagged.\n');
   } finally {
     fs.rmSync(src, { force: true });
   }

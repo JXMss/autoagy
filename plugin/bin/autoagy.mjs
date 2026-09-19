@@ -36,6 +36,48 @@ export function accountHome() {
   }
 }
 
+/**
+ * The paths `autoagy setup` pinned into hooks.json, if it ran.
+ *
+ * The hooks always use these. Management commands are run from the user's shell,
+ * which may have a different HOME or AUTOAGY_HOME than setup wrote (a launcher,
+ * sudo, or an exported variable), and without reading the same pin they would
+ * report on — and repair — a different configuration than the one in force.
+ */
+export function hookPins(pluginDir = PLUGIN_DIR) {
+  const hooks = readJsonQuiet(path.join(pluginDir, 'hooks.json'));
+  let command = null;
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (value && typeof value === 'object') {
+      if (command === null && typeof value.command === 'string') command = value.command;
+      Object.values(value).forEach(visit);
+    }
+  };
+  visit(hooks);
+  const read = (flag) => {
+    if (!command) return null;
+    const match = new RegExp(`${flag}\\s+(?:"([^"]+)"|(\\S+))`).exec(command);
+    return match ? match[1] ?? match[2] : null;
+  };
+  const configHome = read('--autoagy-home');
+  const home = read('--home');
+  return { pinned: Boolean(command && configHome && home), command, configHome, home };
+}
+
+/**
+ * Environment, user home and configuration directory for a management command.
+ * The pin wins where it exists; without one the ambient environment decides, as
+ * it did before — a dev checkout and the test harness rely on that.
+ */
+function managementContext() {
+  const pins = hookPins();
+  const env = { ...process.env };
+  if (pins.configHome) env.AUTOAGY_HOME = pins.configHome;
+  const home = pins.home || accountHome();
+  return { env, home, autoagyHome: resolveAutoagyHome(env, home), pins };
+}
+
 /** The conversation's trust flag, for the watchdog and error fallbacks. */
 function stateIsUntrusted(payload, env, home) {
   try {
@@ -145,25 +187,43 @@ const fmtTime = (iso) => (iso ? iso.replace('T', ' ').replace(/\.\d+Z$/, 'Z') : 
  * Clearing it is therefore a claim about the filesystem that only a person can
  * make, which is why it is a command rather than an automatic expiry.
  */
+const flagDescription = (state) => {
+  const parts = [];
+  if (state.untrusted) parts.push(`untrusted: ${state.untrusted.reason}${state.untrusted.detail ? ` (${state.untrusted.detail})` : ''}`);
+  if (state.backgroundSuspected) parts.push('a backgrounded command may still be running, so read-only mount points are retained');
+  return parts.join('; ');
+};
+
 function trust(prefix, all) {
-  const home = resolveAutoagyHome();
-  const states = listStates(home).filter(({ state }) => isUntrusted(state));
-  if (states.length === 0) return console.log('No conversation is flagged as untrusted.');
-  const chosen = all ? states : states.filter(({ state }) => String(state.conversationId).startsWith(prefix ?? ''));
+  const { autoagyHome: home } = managementContext();
+  const flagged = (state) => isUntrusted(state) || state.backgroundSuspected === true;
+  const states = listStates(home).filter(({ state }) => flagged(state));
+  if (states.length === 0) return console.log('No conversation is flagged.');
+  // A bare `autoagy trust` lists rather than clearing: releasing every
+  // conversation at once is a decision about the filesystem that the user
+  // should make deliberately, not the default reading of an omitted argument.
+  if (!all && !prefix) {
+    console.log('These conversations are flagged. Pass a conversation id prefix, or --all, to release them:');
+    for (const { state } of states) console.log(`  ${state.conversationId}  ${flagDescription(state)}`);
+    return;
+  }
+  const chosen = all ? states : states.filter(({ state }) => String(state.conversationId).startsWith(prefix));
   if (chosen.length === 0) {
-    console.log(`No untrusted conversation matches "${prefix}". Flagged:`);
-    for (const { state } of states) console.log(`  ${state.conversationId}  ${state.untrusted?.reason ?? ''}`);
+    console.log(`No flagged conversation matches "${prefix}". Flagged:`);
+    for (const { state } of states) console.log(`  ${state.conversationId}  ${flagDescription(state)}`);
     return;
   }
   for (const { state } of chosen) {
-    const { reason, detail, step } = state.untrusted ?? {};
+    console.log(`Trusted again: ${state.conversationId}`);
+    console.log(`  was flagged for ${flagDescription(state)}`);
     updateState(home, state.conversationId, (s) => {
       s.untrusted = null;
+      s.backgroundSuspected = false;
     });
-    console.log(`Trusted again: ${state.conversationId}`);
-    console.log(`  was flagged for ${reason}${step === null || step === undefined ? '' : ` at step ${step}`}${detail ? ` (${detail})` : ''}`);
   }
-  console.log('Only do this after checking what changed on disk; the next edit or read is judged on its own again.');
+  console.log('Only do this once you have checked what changed on disk AND know that no backgrounded command is still running:');
+  console.log('  - the next edit or read is judged on its own again;');
+  console.log('  - the read-only mount points retained for that conversation are released at the end of its next turn.');
 }
 
 function readJsonQuiet(file) {
@@ -175,12 +235,30 @@ function readJsonQuiet(file) {
 }
 
 function status() {
-  const { config, warnings, path: cfgPath, exists } = loadConfig();
-  const home = resolveAutoagyHome();
+  const { env, home, autoagyHome, pins } = managementContext();
+  const { config, warnings, path: cfgPath, exists } = loadConfig({ env, home });
   const lines = [];
   lines.push(`autoagy — Codex-style auto mode for Antigravity`);
   lines.push(`  plugin dir      ${PLUGIN_DIR}`);
   lines.push(`  config          ${cfgPath}${exists ? '' : ' (not found — using defaults)'}`);
+  // The hooks read a pin written at setup time, not the ambient environment. If
+  // the two disagree, this report describes a different configuration than the
+  // one that is actually judging tool calls.
+  const installed = PLUGIN_DIR.includes(path.join('.gemini', 'config', 'plugins'));
+  if (pins.pinned) {
+    lines.push(`  home            ${pins.home}   (pinned by autoagy setup)`);
+    const ambientHome = resolveAutoagyHome();
+    if (ambientHome !== pins.configHome) {
+      lines.push(`  ! this shell would use ${ambientHome}; the hooks use the pinned ${pins.configHome}`);
+    }
+  } else if (installed) {
+    // The pin is written by `autoagy setup`, and `agy plugin install` replaces
+    // hooks.json with the unpinned copy from the source tree — so an installed
+    // plugin without a pin went in without setup, or was updated around it.
+    lines.push('  home            not pinned');
+    lines.push('  ! the installed hooks.json has no pinned configuration directory, so the hooks take the');
+    lines.push('    config directory and home from the environment agy inherits. Run `autoagy setup`.');
+  }
   lines.push(`  mode            ${config.mode}${config.mode === 'auto' ? ' (Approve for me: risky actions go to the reviewer model)' : config.mode === 'ask' ? ' (risky actions prompt you)' : ' (no review; sandbox escapes, MCP and browser actions prompt you)'}`);
   const model = config.reviewer.backend === 'agy' ? config.reviewer.agy.model ?? '(your default agy model)' : config.reviewer.openai.model;
   lines.push(`  reviewer        ${config.reviewer.backend}${config.reviewer.backend === 'none' ? '' : `, model ${model}, ${config.reviewer.timeoutSec}s deadline`}`);
@@ -194,7 +272,7 @@ function status() {
     const probe = exe ? spawnSync(exe, ['--version'], { encoding: 'utf8', timeout: 10000, shell: process.platform === 'win32' && !/\.exe$/i.test(exe) }) : null;
     lines.push(`  agy             ${probe?.status === 0 ? `found at ${exe} (${probe.stdout.trim()})` : `NOT runnable as "${command}"`}`);
   }
-  const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath()), autoagyHome: resolveAutoagyHome() });
+  const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath()), autoagyHome: autoagyHome });
   lines.push(`  own sandbox     ${own.active ? 'active' : own.required ? 'REQUIRED BUT UNAVAILABLE (commands are reviewed)' : 'inactive'} — ${own.detail}`);
   const check = readSandboxCheck(home);
   if (check?.status === 'broken') {
@@ -245,7 +323,7 @@ function status() {
 
 function printLog(flags) {
   const limit = Number(flags.n ?? 20);
-  const records = readDecisions(resolveAutoagyHome(), limit);
+  const records = readDecisions(managementContext().autoagyHome, limit);
   if (records.length === 0) return console.log('No decisions logged yet.');
   for (const r of records) {
     const review = r.review ? ` [${r.review.backend} ${r.review.status}${r.review.risk ? `, risk ${r.review.risk}` : ''}${r.review.latencyMs ? `, ${(r.review.latencyMs / 1000).toFixed(1)}s` : ''}]` : '';
@@ -257,7 +335,7 @@ function printLog(flags) {
 }
 
 function listDenials() {
-  const home = resolveAutoagyHome();
+  const { autoagyHome: home } = managementContext();
   const rows = [];
   for (const { state } of listStates(home)) {
     for (const d of state.denials ?? []) rows.push({ ...d, conversation: state.conversationId });
@@ -274,7 +352,7 @@ function listDenials() {
 
 function approve(id) {
   if (!id) throw new Error('usage: autoagy approve <denial-id>');
-  const home = resolveAutoagyHome();
+  const { autoagyHome: home } = managementContext();
   for (const { state } of listStates(home)) {
     const denial = (state.denials ?? []).find((d) => d.id === id);
     if (!denial) continue;
@@ -290,9 +368,10 @@ function approve(id) {
 }
 
 function setMode(mode) {
+  const { env, home } = managementContext();
   if (!['auto', 'ask', 'off'].includes(mode)) throw new Error('usage: autoagy mode <auto|ask|off>');
-  ensureConfigFile();
-  const file = configPath();
+  ensureConfigFile({ env, home });
+  const file = configPath(env, home);
   const config = readJsonQuiet(file) ?? {};
   config.mode = mode;
   fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);

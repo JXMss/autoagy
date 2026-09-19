@@ -52,7 +52,6 @@ const ENV_ALLOWLIST = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TMPD
 const ENV_ALLOWLIST_PREFIXES = ['LC_'];
 /** Long values only inflate the tool-call payload the agent sees. */
 const ENV_VALUE_MAX = 4096;
-const PATH_FALLBACK = '/usr/local/bin:/usr/bin:/bin';
 
 /** True for the names `sandboxEnv` passes through by default. */
 export function envNameAllowed(name, passThrough = []) {
@@ -61,34 +60,25 @@ export function envNameAllowed(name, passThrough = []) {
 }
 
 /**
- * A PATH with the entries an unreviewed command could have written removed. A
- * `node_modules/.bin` or `.venv/bin` entry inside a writable root is a
- * write-then-execute primitive: the agent edits a file, then any command
- * resolves it through PATH.
- */
-export function safePath(value, writableRoots = []) {
-  const kept = String(value ?? '')
-    .split(path.delimiter)
-    .filter((entry) => entry && path.isAbsolute(entry))
-    .filter((entry) => {
-      const real = resolveReal(entry);
-      return !writableRoots.some((root) => isWithin(entry, root) || isWithin(real, root));
-    });
-  return kept.length > 0 ? kept.join(path.delimiter) : PATH_FALLBACK;
-}
-
-/**
  * The environment variables the sandboxed command starts with.
+ *
+ * PATH is passed through unchanged. Filtering out entries inside a writable
+ * root buys nothing here: the workspace is bound read-write with exec
+ * unrestricted, so a sandboxed command can run any file in it by path with or
+ * without a PATH entry — while dropping those entries breaks ordinary
+ * toolchains (.venv/bin, node_modules/.bin) or picks the wrong interpreter.
+ * The place a workspace PATH entry is actually dangerous is a command that runs
+ * *outside* this sandbox, and that is not this function.
+ *
  * @param {NodeJS.ProcessEnv} env the hook's environment (not process.env, so tests can inject)
- * @param {{ writableRoots?: string[], passThrough?: string[] }} options
+ * @param {{ passThrough?: string[] }} options
  * @returns {[string, string][]} name/value pairs, in a stable order
  */
-export function sandboxEnv(env = {}, { writableRoots = [], passThrough = [] } = {}) {
+export function sandboxEnv(env = {}, { passThrough = [] } = {}) {
   const out = [];
   for (const name of Object.keys(env).sort()) {
     if (!envNameAllowed(name, passThrough)) continue;
-    const value = String(env[name] ?? '');
-    out.push([name, name === 'PATH' ? safePath(value, writableRoots) : value.slice(0, ENV_VALUE_MAX)]);
+    out.push([name, String(env[name] ?? '').slice(0, ENV_VALUE_MAX)]);
   }
   return out;
 }
@@ -266,7 +256,7 @@ export function readOnlyPaths(ctx) {
  * again afterwards. Codex stages the same placeholder for the same reason.
  * @returns {string[]} the mount points that were created
  */
-export function missingControlPaths(ctx) {
+function missingControlPaths(ctx) {
   const out = [];
   for (const p of ctx.workspaceControlPaths) {
     // Only a directory the command could create: one inside a writable root,
@@ -351,7 +341,7 @@ export function confinedCommandLine(ctx, commandLine, { placeholders } = {}) {
   // `~` is the same `~` the credential list and the protected paths are built
   // from even when the environment says otherwise.
   const env = { ...ctx.env, HOME: ctx.home ?? ctx.env.HOME };
-  for (const [name, value] of sandboxEnv(env, { writableRoots: ctx.writableRoots, passThrough: ctx.config.ownSandboxEnvPassThrough })) {
+  for (const [name, value] of sandboxEnv(env, { passThrough: ctx.config.ownSandboxEnvPassThrough })) {
     args.push('--setenv', name, value);
   }
   const filter = seccompProgramFile(ctx.autoagyHome);

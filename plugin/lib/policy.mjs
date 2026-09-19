@@ -13,7 +13,6 @@ import path from 'node:path';
 import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, executableName } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
 import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, expandHome } from './paths.mjs';
-import { missingControlPaths } from './confine.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
   'view_file',
@@ -468,23 +467,6 @@ function classifyCommand(ctx, state = {}) {
   // autoagy's own sandbox hides credential stores; elsewhere a command naming one is reviewed.
   const credential = bypass || !ctx.ownSandbox.active ? credentialArgument(ctx, analysis, ctx.args.Cwd) : null;
   const credentialNote = credential ? ` The command names ${credential}, a location that commonly holds credentials or secrets.` : '';
-
-  // A protected directory that does not exist yet is covered by a mount point
-  // autoagy creates for the command and reclaims afterwards. With a command
-  // possibly still running in a terminal, that mount point cannot be reclaimed
-  // safely, so the command runs with the directory unprotected — unless it is
-  // reviewed first. Checked before the rules, so a user allow-rule cannot wave
-  // it through. Inside the sandbox a plain command is otherwise auto-allowed,
-  // so this is the only place that notices.
-  if (!bypass && ctx.ownSandbox.active && state.backgroundSuspected) {
-    const unprotected = missingControlPaths(ctx);
-    if (unprotected.length > 0) {
-      return review(
-        'unprotected-control-directory',
-        `A command may still be running in a terminal, so autoagy cannot safely reclaim the read-only mount point it would put over ${unprotected.join(', ')}. Reviewed instead of run with that directory unprotected.`,
-      );
-    }
-  }
 
   const rules = evaluateRules(analysis, ctx.config.rules);
   if (rules.decision === 'forbidden') {

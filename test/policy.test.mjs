@@ -180,16 +180,16 @@ test('an untrusted conversation reviews every edit and content read', () => {
   assert.equal(withState('list_dir', { DirectoryPath: dirs.workspace }, { untrusted: true }).verdict, 'allow');
 });
 
-test('a command that would run without its read-only mount point is reviewed', () => {
+test('a missing protected directory does not by itself send a sandboxed command to review', () => {
+  // The rewrite that follows an allow creates the mount point for every missing
+  // protected directory, so the directory is never unprotected while the
+  // command runs. Making this a review would only convert an allow into a
+  // review, and — with the "a command may be running" flag being sticky — for
+  // every later command in the conversation too.
   const own = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe };
   const targets = PROTECTED_WORKSPACE_DIRS.map((d) => path.join(dirs.workspace, d));
   for (const t of targets) fs.rmSync(t, { recursive: true, force: true });
   try {
-    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls' }, own), {}).verdict, 'allow');
-    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls' }, own), { backgroundSuspected: true }).category, 'unprotected-control-directory');
-    // With every protected directory present there is nothing left to mount
-    // over, so a command possibly still running no longer matters.
-    for (const t of targets) fs.mkdirSync(t, { recursive: true });
     assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls' }, own), { backgroundSuspected: true }).verdict, 'allow');
   } finally {
     for (const t of targets) fs.rmSync(t, { recursive: true, force: true });
