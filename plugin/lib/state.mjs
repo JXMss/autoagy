@@ -6,7 +6,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 const LOCK_STALE_MS = 15_000;
-const LOCK_WAIT_MS = 5_000;
 const MAX_DENIALS = 20;
 
 export function stateDir(autoagyHome) {
@@ -80,24 +79,44 @@ export function markUntrusted(state, { reason, detail = '', step = null, at = nu
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/** Runs fn while holding an exclusive lock file next to `file`. */
+/**
+ * Whether a lock file of this age may be broken.
+ *
+ * Age is the whole rule. A waiter's own elapsed time says nothing about whether
+ * the holder is alive, so letting a long wait cause a break would take the lock
+ * from a process that may be in the middle of a read-modify-write.
+ */
+export function lockIsStale(ageMs) {
+  return ageMs > LOCK_STALE_MS;
+}
+
+/**
+ * Runs fn while holding an exclusive lock file next to `file`.
+ *
+ * Breaking a lock two processes hold means two read-modify-writes interleave,
+ * which silently loses whichever wrote first. What is stored here is not just
+ * counters: an `untrusted` mark is sticky and cleared only by `autoagy trust`,
+ * so losing one to a race would undo a security decision with nothing to show
+ * it happened. The critical sections are a read, a write and a rename over a
+ * small file, so a lock older than LOCK_STALE_MS belongs to a process that is
+ * gone or wedged.
+ */
 export function withLock(file, fn) {
   const lock = `${file}.lock`;
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
       fs.closeSync(fs.openSync(lock, 'wx'));
       break;
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
-      let stale = Date.now() > deadline;
+      let age;
       try {
-        stale = stale || Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS;
+        age = Date.now() - fs.statSync(lock).mtimeMs;
       } catch {
-        continue;
+        continue; // released while we looked; try to take it again
       }
-      if (stale) {
+      if (lockIsStale(age)) {
         fs.rmSync(lock, { force: true });
         continue;
       }
