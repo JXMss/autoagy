@@ -1,0 +1,17 @@
+{
+  "name": "autoagy",
+  "version": "0.1.0",
+  "description": "Codex-style auto mode (\"Approve for me\" auto-review) for Google Antigravity, implemented as an Antigravity plugin.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "validate": "agy plugin validate plugin",
+    "install-plugin": "node scripts/install.mjs",
+    "uninstall-plugin": "node scripts/install.mjs --uninstall"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "autoagy",
+  "description": "Codex-style auto mode (\"Approve for me\"): safe actions run, risky ones are judged by an automatic reviewer instead of prompting you.",
+  "version": "0.1.0"
+}

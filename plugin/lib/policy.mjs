@@ -1,0 +1,460 @@
+// Layer 1: the deterministic policy. It decides, without a model, which tool
+// calls run immediately, which must be reviewed, and which are refused.
+//
+// It mirrors what Codex's "Approve for me" mode lets through without asking:
+// reads anywhere, edits inside the writable roots (minus protected metadata
+// such as .git/.agents), and commands confined by the sandbox unless they are
+// destructive. Everything Codex would have turned into an approval prompt —
+// sandbox escalations, edits elsewhere, network access, MCP tools — goes to the
+// reviewer instead of the user.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, executableName } from './command-safety.mjs';
+import { evaluateRules, describeRule } from './exec-rules.mjs';
+import { toAbsolute, resolveReal, isWithin, matchesAnyGlob } from './paths.mjs';
+
+export const READ_ONLY_TOOLS = new Set([
+  'view_file',
+  'view_content_chunk',
+  'view_file_outline',
+  'view_code_item',
+  'read_file',
+  'list_dir',
+  'find_by_name',
+  'grep_search',
+  'codebase_search',
+  'read_terminal',
+  'command_status',
+  'trajectory_search',
+  'read_resource',
+  'list_resources',
+  'search_web',
+  'list_permissions',
+  // Observing the browser does not change anything.
+  'read_browser_page',
+  'capture_browser_screenshot',
+  'capture_browser_console_logs',
+  'list_browser_pages',
+  'browser_get_dom',
+  'browser_list_network_requests',
+  'browser_get_network_request',
+  'browser_scroll',
+  'browser_scroll_dom',
+  'browser_scroll_up',
+  'browser_scroll_down',
+  'browser_resize_window',
+  'browser_refresh_page',
+]);
+
+// Tools that return file contents to the model (credential reads are reviewed).
+const CONTENT_READ_TOOLS = new Set(['view_file', 'view_content_chunk', 'view_file_outline', 'view_code_item', 'read_file', 'grep_search']);
+
+// Coordination tools with no side effects outside the agent runtime.
+export const AGENT_TOOLS = new Set([
+  'invoke_subagent',
+  'manage_subagents',
+  'manage_task',
+  'manage_inbox',
+  'schedule',
+  'send_message',
+  'wait',
+  'wait_5_seconds',
+  'finish',
+  'notify_user',
+  'task_boundary',
+  'suggested_responses',
+  'ask_question',
+  'ask_permission',
+  'ask_custom_permission',
+  'generate_image',
+  'browser_subagent',
+  'delete_knowledge',
+]);
+
+export const FILE_EDIT_TOOLS = new Set([
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
+  'sed_file',
+  'notebook_edit',
+  'edit_file',
+  'create_file',
+  'delete_file',
+]);
+
+export const URL_TOOLS = new Set(['read_url_content', 'open_browser_url']);
+
+export const BROWSER_ACTION_TOOLS = new Set([
+  'browser_click_element',
+  'click_browser_pixel',
+  'browser_input',
+  'browser_press_key',
+  'browser_select_option',
+  'browser_drag_pixel_to_pixel',
+  'browser_mouse_down',
+  'browser_mouse_up',
+  'browser_move_mouse',
+  'browser_mouse_wheel',
+  'execute_browser_javascript',
+]);
+
+const PATH_ARG_RE = /^(TargetFile|TargetFiles|File|FilePath|Path|AbsolutePath|NotebookPath|TargetPath|DestinationPath|DestinationFile|SourceFile|Files)$/i;
+
+/**
+ * @typedef {'allow' | 'review' | 'deny'} Verdict
+ * @typedef {{ verdict: Verdict, category: string, reason: string }} Classification
+ */
+
+const allow = (category, reason = '') => ({ verdict: 'allow', category, reason });
+const review = (category, reason) => ({ verdict: 'review', category, reason });
+const deny = (category, reason) => ({ verdict: 'deny', category, reason });
+
+/**
+ * Classifies one tool call.
+ * @param {import('./context.mjs').HookContext} ctx
+ * @param {{ escalatedCommandApproved?: boolean }} [state]
+ * @returns {Classification}
+ */
+export function classify(ctx, state = {}) {
+  const name = ctx.toolName;
+  if (ctx.role === 'guardian') return classifyGuardianTool(ctx);
+  if (READ_ONLY_TOOLS.has(name)) return classifyRead(ctx);
+  if (AGENT_TOOLS.has(name)) return allow('agent-coordination');
+  if (FILE_EDIT_TOOLS.has(name)) return classifyFileEdit(ctx);
+  if (name === 'run_command') return classifyCommand(ctx);
+  if (name === 'send_command_input') {
+    if (ctx.sandbox.active && !state.escalatedCommandApproved) return allow('terminal-input', 'input to a sandboxed terminal');
+    return review('terminal-input', 'Input to a running terminal that may not be confined by the terminal sandbox.');
+  }
+  if (URL_TOOLS.has(name)) return classifyUrl(ctx);
+  if (BROWSER_ACTION_TOOLS.has(name)) {
+    if (ctx.config.browser === 'allow') return allow('browser-action');
+    return review('browser-action', 'Interactive browser action (click, typing or script execution) with possible external side effects.');
+  }
+  if (name === 'call_mcp_tool' || name.startsWith('mcp_')) return classifyMcp(ctx);
+  if (name === 'notebook_execution') return review('code-execution', 'Executes notebook code outside the terminal sandbox.');
+  if (name === 'define_subagent') {
+    return review(
+      'agent-definition',
+      'Defines a new subagent. A subagent that does not inherit customizations (or excludes default components) would run without these auto-review hooks.',
+    );
+  }
+  return review('unknown-tool', `Tool "${name || '(unnamed)'}" is not known to autoagy, so it is reviewed.`);
+}
+
+function classifyGuardianTool(ctx) {
+  const name = ctx.toolName;
+  if (READ_ONLY_TOOLS.has(name) && !name.includes('browser')) return allow('guardian-read');
+  if (name === 'run_command' && ctx.args.BypassSandbox !== true && ctx.sandbox.active && isKnownSafeCommandLine(String(ctx.args.CommandLine ?? ''))) {
+    return allow('guardian-read');
+  }
+  return deny('guardian-read-only', 'autoagy: approval review sessions may only use read-only tools.');
+}
+
+function pathArgs(args) {
+  const out = [];
+  for (const [key, value] of Object.entries(args)) {
+    if (!PATH_ARG_RE.test(key)) continue;
+    if (typeof value === 'string') out.push(value);
+    else if (Array.isArray(value)) out.push(...value.filter((v) => typeof v === 'string'));
+  }
+  return out;
+}
+
+function classifyRead(ctx) {
+  if (!CONTENT_READ_TOOLS.has(ctx.toolName)) return allow('read');
+  const candidates = [...pathArgs(ctx.args), ctx.args.SearchPath].filter((p) => typeof p === 'string');
+  for (const raw of candidates) {
+    const abs = toAbsolute(raw, ctx.baseDir, ctx.home);
+    if (!abs) continue;
+    if (isCredentialPath(ctx, abs)) {
+      return review('credential-read', `Reads a file that commonly holds credentials or secrets (${abs}).`);
+    }
+  }
+  return allow('read');
+}
+
+export function isCredentialPath(ctx, abs) {
+  const { credentialPaths, credentialPathExceptions } = ctx.config;
+  return matchesAnyGlob(abs, credentialPaths, ctx.home) && !matchesAnyGlob(abs, credentialPathExceptions, ctx.home);
+}
+
+/**
+ * Antigravity's own conversation logs (…/brain/<id>/.system_generated/…) are the
+ * reviewer's evidence; forging a "user" message there must be impossible.
+ */
+function isConversationLog(ctx, p) {
+  return Boolean(ctx.appDataDir) && isWithin(p, ctx.appDataDir) && p.split(/[\\/]/).includes('.system_generated');
+}
+
+/** Where a write lands, from the most to the least restrictive answer. */
+export function classifyWriteTarget(ctx, abs) {
+  const real = resolveReal(abs);
+  const either = (roots) => roots.some((root) => isWithin(abs, root) || isWithin(real, root));
+  if (either(ctx.selfPaths)) return 'self';
+  if (isConversationLog(ctx, abs) || isConversationLog(ctx, real)) return 'evidence';
+  if (matchesAnyGlob(abs, ctx.protectedGlobs, ctx.home) || matchesAnyGlob(real, ctx.protectedGlobs, ctx.home)) return 'protected';
+  // Like Codex's read-only subpaths, .git and agent metadata stay protected in every writable root.
+  if (either(ctx.workspaceControlPaths) || abs.split(/[\\/]/).includes('.git') || real.split(/[\\/]/).includes('.git')) return 'protected';
+  if (ctx.managedWritableRoots.some((root) => isWithin(real, root))) return 'managed';
+  if (either(ctx.homeControlPaths)) return 'protected';
+  if (ctx.workspaceRoots.some((root) => isWithin(real, root))) return 'workspace';
+  return 'outside';
+}
+
+function classifyFileEdit(ctx) {
+  const raws = pathArgs(ctx.args);
+  if (raws.length === 0) return review('write-unknown-target', 'Could not determine which file this edit targets.');
+  let sawOutside = null;
+  let sawProtected = null;
+  for (const raw of raws) {
+    const abs = toAbsolute(raw, ctx.baseDir, ctx.home);
+    if (!abs) return review('write-unknown-target', `Could not resolve the edit target "${raw}" to an absolute path.`);
+    const where = classifyWriteTarget(ctx, abs);
+    if (where === 'self') {
+      return deny(
+        'self-protection',
+        `autoagy: editing ${abs} would modify the auto-review safeguard itself. This is never auto-approved; ask the user to make the change.`,
+      );
+    }
+    if (where === 'evidence') {
+      return deny(
+        'self-protection',
+        `autoagy: ${abs} is part of Antigravity's conversation log, which the auto-reviewer relies on. Agents may not edit it.`,
+      );
+    }
+    if (where === 'protected') sawProtected = sawProtected ?? abs;
+    if (where === 'outside') sawOutside = sawOutside ?? abs;
+  }
+  if (sawProtected) {
+    return review('write-protected', `Edits protected metadata or agent configuration (${sawProtected}), e.g. .git, .agents, or ~/.gemini.`);
+  }
+  if (sawOutside) {
+    if (ctx.workspaceRoots.length === 0) {
+      return review('write-outside-workspace', `Edits ${sawOutside}; the workspace root could not be determined.`);
+    }
+    return review('write-outside-workspace', `Edits ${sawOutside}, outside the workspace (${ctx.workspaceRoots.join(', ')}).`);
+  }
+  return allow('write-workspace');
+}
+
+function mentionsSelf(ctx, commandLine) {
+  const needles = new Set(['.system_generated']);
+  for (const p of ctx.selfPaths) {
+    needles.add(p);
+    if (p.startsWith(ctx.home)) {
+      needles.add(`~${p.slice(ctx.home.length)}`);
+      needles.add(`$HOME${p.slice(ctx.home.length)}`);
+    }
+  }
+  return [...needles].some((n) => n.length > 3 && commandLine.includes(n));
+}
+
+function classifyCommand(ctx) {
+  const commandLine = ctx.args.CommandLine;
+  if (typeof commandLine !== 'string' || commandLine.trim() === '') {
+    return review('command-unparseable', 'The command line is missing or empty.');
+  }
+  const bypass = ctx.args.BypassSandbox === true;
+  const analysis = analyzeCommandLine(commandLine);
+  const selfNote = mentionsSelf(ctx, commandLine)
+    ? ' The command references autoagy’s own files or Antigravity’s conversation logs, which are security controls and review evidence.'
+    : '';
+
+  const rules = evaluateRules(analysis, ctx.config.rules);
+  if (rules.decision === 'forbidden') {
+    return deny('rule-forbidden', `autoagy: blocked by rule ${describeRule(rules.rule)} (matched \`${rules.argv.join(' ')}\`).`);
+  }
+  if (rules.decision === 'prompt') {
+    return review('rule-prompt', `Matches a rule that requires approval: ${describeRule(rules.rule)}.${selfNote}`);
+  }
+  if (rules.decision === 'allow' && !selfNote) return allow('rule-allow', describeRule(rules.rule));
+
+  if (bypass) {
+    return review('sandbox-escalation', `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}`);
+  }
+  // The sandbox may mount the conversation's artifact directory writable, so
+  // never wave through commands that touch autoagy or the conversation logs.
+  if (selfNote) return review('touches-security-controls', selfNote.trim());
+  if (!ctx.sandbox.active) {
+    if (isKnownSafeCommandLine(analysis)) return allow('known-safe-command');
+    return review('unsandboxed-command', `Commands are not confined by the terminal sandbox here (${ctx.sandbox.detail}).`);
+  }
+  if (analysis.error) {
+    return review('command-unparseable', `autoagy could not fully parse this command (${analysis.error}), so it cannot rule out destructive effects.`);
+  }
+  const danger = findDangerousCommand(analysis);
+  if (danger) {
+    return review('dangerous-command', `Potentially destructive command inside the sandbox: ${danger.description}.`);
+  }
+  return allow('sandboxed-command');
+}
+
+export function hostOf(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+export function isTrustedHost(host, trustedDomains) {
+  if (!host) return false;
+  return (trustedDomains ?? []).some((domain) => {
+    const d = String(domain).toLowerCase().replace(/^\*\./, '');
+    return host === d || host.endsWith(`.${d}`);
+  });
+}
+
+function classifyUrl(ctx) {
+  const url = ctx.args.Url ?? ctx.args.URL ?? ctx.args.url;
+  const host = typeof url === 'string' ? hostOf(url) : null;
+  if (host && isTrustedHost(host, ctx.config.trustedDomains)) return allow('network-trusted', host);
+  return review('network', `Network access to ${host ?? 'an unknown host'}${typeof url === 'string' ? ` (${url})` : ''}.`);
+}
+
+export function mcpTarget(ctx) {
+  const a = ctx.args;
+  if (ctx.toolName === 'call_mcp_tool') {
+    const server = a.ServerName ?? a.Server ?? a.server_name ?? a.server ?? a.McpServerName ?? '';
+    const tool = a.ToolName ?? a.Tool ?? a.tool_name ?? a.tool ?? a.Name ?? a.name ?? '';
+    return { server: String(server), tool: String(tool), args: a.Arguments ?? a.Args ?? a.arguments ?? a.Input ?? a.input };
+  }
+  const rest = ctx.toolName.slice('mcp_'.length);
+  return { server: '', tool: rest, args: stripMeta(a) };
+}
+
+function classifyMcp(ctx) {
+  const { server, tool } = mcpTarget(ctx);
+  const id = server ? `${server}/${tool}` : tool;
+  const allowed = (ctx.config.mcp?.allow ?? []).some((glob) => {
+    const re = new RegExp(`^${String(glob).replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
+    return re.test(id) || re.test(ctx.toolName);
+  });
+  if (allowed) return allow('mcp-allowed', id);
+  return review('mcp', `Calls MCP tool ${id || ctx.toolName}; MCP tools are reviewed unless listed in mcp.allow.`);
+}
+
+function stripMeta(args) {
+  if (!args || typeof args !== 'object') return args;
+  const { toolAction, toolSummary, ...rest } = args;
+  return rest;
+}
+
+// ---------------------------------------------------------------------------
+// Planned action JSON (the reviewer's view of the request)
+
+const MAX_ACTION_STRING_BYTES = 16_000 * 4;
+
+export function truncateMiddle(text, maxBytes) {
+  if (typeof text !== 'string' || Buffer.byteLength(text) <= maxBytes) return text;
+  const omittedTokens = Math.ceil((Buffer.byteLength(text) - maxBytes) / 4);
+  const marker = `<truncated omitted_approx_tokens="${omittedTokens}" />`;
+  const keep = Math.max(0, maxBytes - marker.length);
+  const head = Math.floor(keep / 2);
+  return `${text.slice(0, head)}${marker}${text.slice(text.length - (keep - head))}`;
+}
+
+function truncateDeep(value) {
+  if (typeof value === 'string') return truncateMiddle(value, MAX_ACTION_STRING_BYTES);
+  if (Array.isArray(value)) return value.map(truncateDeep);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, truncateDeep(v)]));
+  return value;
+}
+
+const DELETING_COMMANDS = new Set(['rm', 'rmdir', 'shred', 'unlink']);
+const MAX_INSPECTED_TARGETS = 10;
+
+/** Expands `~`, `$HOME` and `${HOME}`; returns null when other expansions remain. */
+function expandPathArgument(arg, home) {
+  let value = arg.replace(/^~(?=$|\/)/, home).replace(/\$\{HOME\}|\$HOME\b/g, home);
+  if (/[$`*?[]/.test(value)) return null;
+  return value;
+}
+
+/**
+ * Read-only facts about the paths a deleting command targets. Codex's reviewer
+ * inspects targets with read-only tools; the autoagy reviewer has no tools, so
+ * autoagy gathers the same facts up front.
+ */
+export function inspectDeletionTargets(ctx, commandLine, cwd) {
+  const analysis = analyzeCommandLine(commandLine);
+  const base = typeof cwd === 'string' && cwd ? toAbsolute(cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
+  const facts = [];
+  for (const segment of analysis.segments) {
+    if (!DELETING_COMMANDS.has(executableName(segment.argv[0]))) continue;
+    let options = true;
+    for (const arg of segment.argv.slice(1)) {
+      if (options && arg === '--') {
+        options = false;
+        continue;
+      }
+      if (options && arg.startsWith('-')) continue;
+      if (facts.length >= MAX_INSPECTED_TARGETS) break;
+      const expanded = expandPathArgument(arg, ctx.home);
+      if (expanded === null) {
+        facts.push({ argument: arg, note: 'contains variables or globs that autoagy cannot resolve' });
+        continue;
+      }
+      const abs = toAbsolute(expanded, base, ctx.home);
+      if (!abs) {
+        facts.push({ argument: arg, note: 'relative path with unknown working directory' });
+        continue;
+      }
+      const fact = { argument: arg, path: abs, inside_workspace: ctx.workspaceRoots.some((root) => isWithin(abs, root)) };
+      try {
+        const stat = fs.lstatSync(abs);
+        fact.exists = true;
+        fact.type = stat.isSymbolicLink() ? 'symlink' : stat.isDirectory() ? 'directory' : 'file';
+        if (fact.type === 'directory') {
+          const entries = fs.readdirSync(abs);
+          fact.entries = entries.length;
+          fact.is_git_repository = entries.includes('.git');
+        } else if (fact.type === 'file') {
+          fact.bytes = stat.size;
+        }
+      } catch {
+        fact.exists = false;
+      }
+      if (abs === ctx.home || abs === path.parse(abs).root) fact.note = 'this is the home directory or filesystem root';
+      facts.push(fact);
+    }
+  }
+  return facts.length > 0 ? facts : undefined;
+}
+
+/**
+ * The action as the reviewer sees it (Codex "Planned action JSON").
+ * @param {import('./context.mjs').HookContext} ctx
+ */
+export function plannedAction(ctx) {
+  const a = ctx.args;
+  const justification = [a.toolSummary, a.toolAction].filter((s) => typeof s === 'string' && s.trim()).join(' — ') || undefined;
+  let action;
+  if (ctx.toolName === 'run_command') {
+    action = {
+      tool: 'run_command',
+      command: a.CommandLine,
+      cwd: a.Cwd ?? ctx.baseDir ?? undefined,
+      sandbox: a.BypassSandbox === true ? 'bypass_requested' : ctx.sandbox.active ? 'sandboxed' : 'unsandboxed',
+      justification,
+    };
+    if (typeof a.CommandLine === 'string') {
+      const targets = inspectDeletionTargets(ctx, a.CommandLine, a.Cwd);
+      if (targets) action.deletion_targets = targets;
+    }
+  } else if (FILE_EDIT_TOOLS.has(ctx.toolName)) {
+    const files = pathArgs(a).map((p) => toAbsolute(p, ctx.baseDir, ctx.home) ?? p);
+    action = { tool: ctx.toolName, files, ...stripMeta(a), justification };
+  } else if (URL_TOOLS.has(ctx.toolName)) {
+    const url = a.Url ?? a.URL ?? a.url;
+    action = { tool: ctx.toolName, url, host: typeof url === 'string' ? hostOf(url) : undefined, justification };
+  } else if (ctx.toolName === 'call_mcp_tool' || ctx.toolName.startsWith('mcp_')) {
+    const { server, tool, args } = mcpTarget(ctx);
+    action = { tool: 'mcp_tool_call', server: server || undefined, tool_name: tool, arguments: args, justification };
+  } else {
+    action = { tool: ctx.toolName, arguments: stripMeta(a), justification };
+  }
+  return truncateDeep(JSON.parse(JSON.stringify(action)));
+}

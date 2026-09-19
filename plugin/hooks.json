@@ -1,0 +1,23 @@
+{
+  "autoagy": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./bin/autoagy.mjs hook pre-tool-use",
+            "timeout": 150
+          }
+        ]
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "node ./bin/autoagy.mjs hook post-invocation",
+        "timeout": 15
+      }
+    ]
+  }
+}

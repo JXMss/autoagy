@@ -1,0 +1,18 @@
+autoagy
+Codex-style auto mode for Google Antigravity.
+
+This project contains material adapted from OpenAI Codex
+(https://github.com/openai/codex, tag rust-v0.154.0), licensed under the
+Apache License, Version 2.0:
+
+- plugin/prompts/policy_template.md and plugin/prompts/policy.md are adapted
+  from codex-rs/core/assets/guardian/policy_template.md and policy.md.
+- The reviewer output contract, the rejection and timeout messages, the
+  transcript budgets and selection rules, the rejection circuit breaker, and
+  the dangerous-command and known-safe-command heuristics follow
+  codex-rs/core/src/guardian/, codex-rs/guardian-context/ and
+  codex-rs/shell-command/src/command_safety/.
+
+Changes: the prompts were rewritten for Google Antigravity's tools, terminal
+sandbox and permission model, for a reviewer without tools, and extended with
+rules about agent-oversight tampering and routine development actions.
