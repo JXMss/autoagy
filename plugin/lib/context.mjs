@@ -268,7 +268,58 @@ export class HookContext {
         this.hostExecutable,
         reviewer,
         reviewer ? resolveReal(reviewer) : null,
+        this.hookInterpreter,
+        // The interpreter this hook is running under right now. hooks.json
+        // names it too (see hookInterpreter), but that file is unpinned until
+        // `autoagy setup` runs, and a hook started by something else than the
+        // pinned command — the test suite, `autoagy review` — still runs under
+        // this one.
+        process.execPath,
       ]);
+    });
+  }
+
+  /**
+   * The Node interpreter the pinned hook commands run, as `autoagy setup` wrote
+   * it into hooks.json.
+   *
+   * hooks.json itself is in selfPaths, but the file it names is not, and that
+   * file is the code every hook runs: replacing it replaces the review. Node is
+   * often installed by a version manager under `~` (`~/.nvm`, `~/.volta`,
+   * `~/.local/share/fnm`), so when the workspace root is `~` — starting `agy`
+   * in the home directory does that — it lands inside a writable root and a
+   * plain edit would otherwise be auto-approved.
+   * @returns {string | null}
+   */
+  get hookInterpreter() {
+    return this.memo('hookInterpreter', () => {
+      const hooks = readJson(path.join(this.pluginDir, 'hooks.json'));
+      let found = null;
+      const visit = (value) => {
+        if (found || !value || typeof value !== 'object') return;
+        if (Array.isArray(value)) {
+          for (const item of value) visit(item);
+          return;
+        }
+        if (typeof value.command === 'string') {
+          const text = value.command.trim();
+          const quoted = /^"((?:[^"\\]|\\.)*)"/.exec(text);
+          let token = quoted ? quoted[1] : text.split(/\s+/)[0];
+          if (quoted) {
+            try {
+              token = JSON.parse(`"${quoted[1]}"`);
+            } catch {
+              // keep the raw contents
+            }
+          }
+          // A bare `node` (the source tree before setup pins it) is a PATH
+          // lookup, not a path: only an absolute one can be protected.
+          if (token && path.isAbsolute(token)) found = token;
+        }
+        for (const item of Object.values(value)) visit(item);
+      };
+      visit(hooks);
+      return found;
     });
   }
 
