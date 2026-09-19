@@ -184,6 +184,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | 以 `agy` 为可执行名的命令（启动另一个 Antigravity 实例） | 审核：那个实例是否加载这些 hook，由它自己的配置和环境决定，而这条命令两样都能设 |
 | 命令里给 `HOME` 或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值 | 审核：`HOME` 决定 `~` 指向哪里，也就决定了策略里的凭据清单和「不可编辑路径」 |
 | `send_command_input` | 只在 autoagy 自己的沙箱生效时放行（`config.sandbox: "on"` 是声明，Antigravity 的沙箱也让 `.git` 和日志可写）；macOS/Windows/无 bwrap 时一律审核 |
+| 向用户申请权限（`ask_permission`、`ask_custom_permission`） | 放行——正常情况下弹窗会到你手里，由你决定，autoagy 没什么可加的。但 `--dangerously-skip-permissions` 下 agy 会自己同意所有工具权限（它自己的字符串就是这么写的：`auto-approving all tool permissions`），平台读不到 agy 参数时也无法排除这个标志——那时没有人能回答，申请就送审（策略里「削弱 agent 自身的监管」属于持续性安全削弱） |
 | MCP（含 `read_resource` / `list_resources` 这类 MCP 资源读取）、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核 |
 | **会话被标记为不可信之后**（见下）的文件编辑和读取文件内容 | 审核；触及监管文件的命令改为直接拒绝 |
 
@@ -207,7 +208,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 ## 已知限制
 
 - **没有启用 autoagy 自己的沙箱时**（macOS、Windows、没装 bubblewrap、IDE 没设 `ownSandbox: "on"`），沙箱内的命令仍然能写 `.git`（植入 git hook）和对话日志（伪造审核模型看到的用户消息）。autoagy 能做的只有把命令里字面出现 `.system_generated`、autoagy 自身路径或凭据位置的命令送审——这是原始命令行上的子串匹配，变量拼接或 base64 之类可以绕过，而且事后没有任何完整性校验能发现日志被改过。**这不是「和 Linux 上差不多」，而是明显更弱**，也不能靠配置补上。审核模型现在会收到一行明确的提示，知道在此配置下不能把 transcript 里的用户发言当作已确立的授权。
-- **autoagy 自己的沙箱不生效时，环境变量仍可能被读到。** hook 继承的是 agy 的环境，里面通常有你 export 的 API key。会送审的：`printenv`、裸 `env`、参数里带 `$变量` 的命令、`ps` 里取环境变量的写法（`ps auxe`、`ps eww`、`-E`、`-o env`；`ps -ef` 是「所有进程」，不受影响）、`jq` 的 `env` 内建，以及 `/proc/<pid>/environ`、`/proc/<pid>/cmdline` 和对 `/proc` 或其中目录做遍历的搜索（`grep_search /proc`、`grep -r /proc`）。这是一份已知写法的清单，不是证明：白名单里还没被审到的写法、或工具新版本新加的取值方式，仍可能漏过去。真正的缓解只有 autoagy 自己的沙箱（`--clearenv`，并给命令一个私有的 /proc），或者不要把密钥放在环境里，改用文件或密钥管理器。
+- **autoagy 自己的沙箱不生效时，环境变量仍可能被读到。** hook 继承的是 agy 的环境，里面通常有你 export 的 API key。会送审的：`printenv`、裸 `env`、参数里带 `$变量` 的命令、`ps` 里取环境变量的写法（`ps auxe`、`ps eww`、`-E`、`-o env`；`ps -ef` 是「所有进程」，不受影响）、`jq` 的 `env` 与 `$ENV` 内建、PowerShell 的 `Env:` 提供程序（`Get-ChildItem Env:`），以及 `/proc/<pid>/environ`、`/proc/<pid>/cmdline` 和对 `/proc` 或其中目录做遍历的搜索（`grep_search /proc`、`grep -r /proc`）。这是一份已知写法的清单，不是证明：白名单里还没被审到的写法、或工具新版本新加的取值方式，仍可能漏过去。真正的缓解只有 autoagy 自己的沙箱（`--clearenv`，并给命令一个私有的 /proc），或者不要把密钥放在环境里，改用文件或密钥管理器。
 - **Windows 上从设置文件推断沙箱状态已被停用**：Windows 读不到 agy 进程的参数，`--dangerously-skip-permissions` 无法识别，而 `autoagy setup` 写进设置文件的那两个值正是检查所依据的。所以那里不再声称「沙箱有效」，而是按无沙箱处理——后果是不带沙箱的普通命令（`npm test`、`ls`、`curl`）从免审变成送审。同样因为读不到启动参数，Windows 上**弹窗一律改为拒绝**：那个标志无法排除，弹窗可能被静默自动同意，宁可不问。
 - **沙箱外的已知只读命令要看它解析到哪里。** autoagy 自己的沙箱不跑的时候（macOS、Windows、没装 bwrap），命令用的是继承来的 `PATH`，很多开发环境会包含 `.venv/bin`、`node_modules/.bin` 这类目录——都在可写根内，改动免审。已知只读的白名单只比较 basename，所以 `ls` 会被当作安全的，哪怕实际执行的是 agent 刚写进 `node_modules/.bin` 的那个 `ls`。现在这条链会被送审：无沙箱时，如果命令解析到的文件落在可写根内，就不放行（`command-from-writable-root`）。代价是这类环境里从 `.venv/bin` 调工具会多一次审核——这是刻意的，因为那正是「先写后执行」成立的地方。autoagy 自己的沙箱内不问这个问题：沙箱已经限定了任何二进制能碰到什么。
 - Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问（这是为保住沙箱网络隔离做的取舍）。
