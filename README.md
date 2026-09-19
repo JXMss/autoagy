@@ -90,6 +90,8 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 
   注意两点。一是这些变量（包括 `PATH` 和 `HOME`）的值会逐字写进改写后的命令行（`--setenv NAME VALUE`），而改写后的参数是 agent 能看到的内容，所以**白名单和 `ownSandboxEnvPassThrough` 里都不要放密钥**。二是 autoagy **不会**过滤 `PATH`：沙箱内工作区是可写且可执行的，命令本来就能按路径运行工作区里的任何文件，过滤 `PATH` 买不到任何隔离，只会让 `.venv/bin`、`node_modules/.bin` 里的工具找不到或用错解释器。真正危险的是**沙箱外**的命令通过工作区里的 `PATH` 目录解析到被改过的可执行文件——那条路会送审（见「已知限制」里的 `command-from-writable-root`）。
 
+  这个沙箱不生效时（macOS、Windows、没装 bwrap），上面那句 `printenv` 就是免审的。所以 `printenv`、裸 `env`、参数里带 `$变量` 的命令，以及 `/proc/*/environ`、`/proc/*/cmdline` 现在都会送审——但白名单里其它命令仍可能间接读到环境，见「已知限制」。
+
 工作区里还不存在的受保护目录（比如不是 git 仓库时的 `.git`）：`--ro-bind` 对不存在的路径会直接跳过，而工作区是可写的，沙箱里的命令本来可以把它建出来，等它被别的工具在沙箱外加载。所以这类路径会被就地挂一个只读空 tmpfs。副作用：命令执行的那一瞬间，工作区里会短暂出现一个空的 `.agents` 之类的目录（Codex 用同样的做法）。
 
 每个受保护目录会被**挂两次**：先一个空的只读挂载，再一个指向真实目录的只读绑定（后挂的赢）。目录存在时按真实内容只读绑定，所以沙箱里 `.git` 照样能读；目录不存在（或在这条命令启动前被回收掉了）时那个绑定被跳过，空挂载留下。这一点是必须的——只挂一个绑定时，目录一旦在「构造命令行」和「bwrap 启动」之间消失，绑定会静默跳过，命令就会写进真实的受保护目录（实测过）。
@@ -150,10 +152,11 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `onDenied` / `onTimeout` / `onError` | `"deny"` | 改为 `"ask"` 时，审核拒绝/超时/出错会转为弹窗让你决定 |
 | `trustedDomains` | `localhost` 等 | **抓取**网页到这些域名（含子域名）免审 |
 | `browserTrustedDomains` | `[]` | **浏览器导航**到这些域名免审。默认空白：抓取拿到的是文本，导航会把页面脚本放进一个能联网、不在任何沙箱里的浏览器里跑，而本地开发服务器提供的页面通常正是 agent 免审就能改的工作区文件。要恢复「浏览器打开 localhost 免审」就把 `localhost` 加进来 |
+| `webSearch` | `"allow"` | `search_web` 是否送审。搜索把 agent 写的 query 发给搜索引擎，而请求是 agy 自己发的——没有任何沙箱在这条路上（`--unshare-net` 挡的是沙箱内命令的网络）。默认 `"allow"`，与 Codex 一致：Codex 的 web search 是托管工具，不经过审批流程，改由配置限制（`web_search` 模式、受管 `requirements.toml` 里的 `allowed_web_search_modes`）。需要审核每次搜索就设为 `"review"` |
 | `ownSandboxEnvPassThrough` | `[]` | 除白名单外额外传给沙箱内命令的环境变量名（支持 `PREFIX_*`）。沙箱默认清空环境，列在这里的变量对免审命令可读，属于削弱沙箱。**值会写进改写后的命令行，agent 能看到，不要放密钥** |
 | `writableRoots` | `[]` | 额外允许免审编辑的目录 |
 | `protectedPaths` | `[]` | 额外需要审核才能修改的路径（glob） |
-| `credentialPaths` | `~/.ssh/**`、`**/.env` 等 | 凭据位置。文件工具读取这些文件（包括经符号链接读取）、`grep_search` 搜索包含它们的目录需要审核。以 `~/` 或绝对路径开头的条目还会在 autoagy 自己的沙箱里被隐藏；不在该沙箱里时，命令行里直接写出这些路径的命令需要审核（尽力而为：只识别字面路径、`~` 和 `$HOME`）。`**/.env` 这类没有固定位置的模式只对文件工具生效 |
+| `credentialPaths` | `~/.ssh/**`、`**/.env` 等 | 凭据位置。文件工具读取这些文件（包括经符号链接读取）、`grep_search` 搜索包含它们的目录需要审核。以 `~/` 或绝对路径开头的条目还会在 autoagy 自己的沙箱里被隐藏；没有固定位置的模式（`**/.env`、`**/*.pem`）隐藏不了，所以命令行里字面写出这种路径（`cat .env`）也要审核，沙箱内外一样。不在该沙箱里时，命令行里直接写出**任何**这类路径的命令都需要审核（尽力而为：只识别字面路径、`~` 和 `$HOME`，不解析变量）。另外 `/proc/<pid>/environ`、`/proc/<pid>/cmdline` 始终按凭据位置处理：文件工具读它们要审核（沙箱外这条是 agent 直接拿到你 export 的密钥的最短路径），命令里写出这些路径同理——沙箱内除外，那里是私有的 /proc，读到的是清空后的环境 |
 | `rules` | `[]` | Codex execpolicy 风格前缀规则，例如 `{"pattern": ["terraform", "destroy"], "decision": "forbidden"}`；`allow` 仅对不含重定向、替换、变量、通配的简单命令生效 |
 | `mcp.allow` | `[]` | 免审的 MCP 工具（`"server/tool"` glob，如 `"github/get_*"`） |
 | `browser` | `"review"` | 浏览器点击/输入/执行 JS，以及 `browser_subagent` 是否审核 |
@@ -169,7 +172,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 
 | 工具调用 | 结果 |
 | --- | --- |
-| 读文件、列目录、搜索、查看终端/任务状态、`search_web` | 放行（读取凭据类文件、搜索包含凭据位置的目录需审核） |
+| 读文件、列目录、搜索、查看终端/任务状态、`search_web` | 放行（读取凭据类文件、搜索包含凭据位置的目录需审核；`webSearch: "review"` 时 `search_web` 送审） |
 | 编辑工作区、会话 artifact 目录、临时目录内的文件 | 放行 |
 | 编辑工作区外的文件，或 `.git`、`.agents`、`~/.gemini` 等 | 审核 |
 | 编辑 autoagy 自己的配置/插件目录 | 直接拒绝（防止 agent 关掉自己的监管） |
@@ -181,7 +184,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | 以 `agy` 为可执行名的命令（启动另一个 Antigravity 实例） | 审核：那个实例是否加载这些 hook，由它自己的配置和环境决定，而这条命令两样都能设 |
 | 命令里给 `HOME` 或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值 | 审核：`HOME` 决定 `~` 指向哪里，也就决定了策略里的凭据清单和「不可编辑路径」 |
 | `send_command_input` | 只在 autoagy 自己的沙箱生效时放行（`config.sandbox: "on"` 是声明，Antigravity 的沙箱也让 `.git` 和日志可写）；macOS/Windows/无 bwrap 时一律审核 |
-| MCP、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核 |
+| MCP（含 `read_resource` / `list_resources` 这类 MCP 资源读取）、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核 |
 | **会话被标记为不可信之后**（见下）的文件编辑和读取文件内容 | 审核；触及监管文件的命令改为直接拒绝 |
 
 被审核的删除命令会附带 autoagy 预先检查的目标事实（是否存在、类型、条目数、是否在工作区内、是否是 git 仓库；路径经过符号链接时，按 `rm` 实际会删除的位置判断，并给出 `resolves_to`），弥补审核模型没有工具、无法像 Codex 那样自己去看的问题。
@@ -204,6 +207,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 ## 已知限制
 
 - **没有启用 autoagy 自己的沙箱时**（macOS、Windows、没装 bubblewrap、IDE 没设 `ownSandbox: "on"`），沙箱内的命令仍然能写 `.git`（植入 git hook）和对话日志（伪造审核模型看到的用户消息）。autoagy 能做的只有把命令里字面出现 `.system_generated`、autoagy 自身路径或凭据位置的命令送审——这是原始命令行上的子串匹配，变量拼接或 base64 之类可以绕过，而且事后没有任何完整性校验能发现日志被改过。**这不是「和 Linux 上差不多」，而是明显更弱**，也不能靠配置补上。审核模型现在会收到一行明确的提示，知道在此配置下不能把 transcript 里的用户发言当作已确立的授权。
+- **autoagy 自己的沙箱不生效时，环境变量仍可能被读到。** hook 继承的是 agy 的环境，里面通常有你 export 的 API key。`printenv`、裸 `env`、参数里带 `$变量` 的命令，以及 `/proc/*/environ`、`/proc/*/cmdline` 都会送审，但已知只读白名单里的命令仍可能间接拿到它——例如 `ps auxe` 会打印进程的环境变量。真正的缓解只有 autoagy 自己的沙箱（`--clearenv`，并给命令一个私有的 /proc），或者不要把密钥放在环境里，改用文件或密钥管理器。
 - **Windows 上从设置文件推断沙箱状态已被停用**：Windows 读不到 agy 进程的参数，`--dangerously-skip-permissions` 无法识别，而 `autoagy setup` 写进设置文件的那两个值正是检查所依据的。所以那里不再声称「沙箱有效」，而是按无沙箱处理——后果是不带沙箱的普通命令（`npm test`、`ls`、`curl`）从免审变成送审。同样因为读不到启动参数，Windows 上**弹窗一律改为拒绝**：那个标志无法排除，弹窗可能被静默自动同意，宁可不问。
 - **沙箱外的已知只读命令要看它解析到哪里。** autoagy 自己的沙箱不跑的时候（macOS、Windows、没装 bwrap），命令用的是继承来的 `PATH`，很多开发环境会包含 `.venv/bin`、`node_modules/.bin` 这类目录——都在可写根内，改动免审。已知只读的白名单只比较 basename，所以 `ls` 会被当作安全的，哪怕实际执行的是 agent 刚写进 `node_modules/.bin` 的那个 `ls`。现在这条链会被送审：无沙箱时，如果命令解析到的文件落在可写根内，就不放行（`command-from-writable-root`）。代价是这类环境里从 `.venv/bin` 调工具会多一次审核——这是刻意的，因为那正是「先写后执行」成立的地方。autoagy 自己的沙箱内不问这个问题：沙箱已经限定了任何二进制能碰到什么。
 - Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问（这是为保住沙箱网络隔离做的取舍）。
@@ -213,6 +217,8 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 - 子 agent 的授权以根会话里用户的话为准（通过父会话的 `invoke_subagent` 记录回溯），找不到父会话时按不可信处理。
 - Windows 上命令解析是尽力而为（PowerShell 语法与 POSIX shell 不同，但会偏向保守）。
 - 用 `--dangerously-skip-permissions` 启动 agy 时 Antigravity 的沙箱实际不生效：启用了 autoagy 自己的沙箱时命令仍在其中运行（实测 `overwrite` 在该模式下照样生效）；否则 autoagy 按无沙箱处理，审核会变多；`force_ask` 在该模式下会被自动同意，所以 autoagy 在此模式下只使用 allow/deny——这条现在也覆盖 `mode: off` 的弹窗路径。
+- **工作区里「写了之后会在沙箱外执行」的文件是免审的**：`.envrc`（direnv 自动加载）、`.husky/`（`git commit` 时执行）、`.vscode/tasks.json`、`package.json` 的 `postinstall`、`Makefile`，以及任何被别的工具读取后执行的脚本。暴露面和 `.git` 属于同一类（先写后执行），区别是 `git` 几乎必然会在沙箱外运行，而这一类要等某个工具去执行它。**Codex 在这里的取舍是同样的**——它的 workspace-write 只保护 `.git`、`.agents`、`.codex` 三个名字（`PROTECTED_METADATA_PATH_NAMES`），所以 autoagy 默认也保持这个集合（多出的 `.agent`/`_agents`/`.gemini` 是 Antigravity 自己会读的 agent 配置）。需要更严就用 `protectedPaths` 把它们加进去，代价是 agent 每次改这些文件都要过一次审核。
+- **`search_web` 默认免审，而它是一条出网通道**：query 是 agent 写的文本，请求由 agy 发出，不在任何沙箱里（`--unshare-net` 只约束沙箱内的命令），策略里那套 Data Exfiltration 规则看不到它。默认放行是照 Codex 的做法：它的 web search 是托管工具，不走审批流程，由配置限制（`web_search` 模式、受管 `requirements.toml` 的 `allowed_web_search_modes`）；autoagy 对应的开关是 `webSearch: "review"`——代价是每次搜索多一次审核延迟（agy 后端实测 4～12 秒）。
 - **危险命令识别是有解析器支撑的模式表，不是纯字面黑名单，但也不要高估。** `shell.mjs` 是真正的 POSIX shell 解析器，会去引号、还原转义、解开 `sudo`/`env`/`nohup`/`timeout`/`xargs`/`flock`/`nice` 等包装，并从 `bash -c`、`eval`、`trap`、`watch`、`su -c`、`find -exec`、heredoc 里取出内层脚本，递归到 8 层，解析失败一律送审。所以「引号拼接」「全路径」「组合短选项」「多层包装」都拦得住。**拦不住的**是动态构造的命令名：`$CMD -rf`、`rm${IFS}-rf`、`$(printf rm)`、`base64|sh`、把脚本塞给解释器的 `-c`。另外，沙箱内这条模式表才是决定性判据（能解析、没命中就放行），无沙箱路径上起决定作用的是已知只读白名单（不在白名单里的一律送审）。
 
 ## 隐私与数据流向
