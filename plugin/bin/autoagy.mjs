@@ -341,6 +341,18 @@ function status() {
   } else if (own.active) {
     lines.push('  self-check      no command has run in the own sandbox yet');
   }
+  // The env-scrub rewrite has its own check: it is the rewrite that runs where
+  // there is no sandbox, and it fails independently of the sandbox one.
+  if (config.commandEnv?.mode === 'scrub' && !own.active) {
+    const scrub = readSandboxCheck(autoagyHome, 'envScrub');
+    if (scrub?.status === 'broken') {
+      lines.push(`  ! command env   SELF-CHECK FAILED ${fmtTime(scrub.time)}: ${scrub.detail}. Commands keep the environment agy was started with, for that agy build.`);
+    } else if (scrub?.status === 'verified') {
+      lines.push(`  command env     scrubbed: agy ran ${scrub.verified} rewritten command(s) as expected (last ${fmtTime(scrub.time)})`);
+    } else {
+      lines.push('  command env     to be scrubbed by rewriting each command under `env -i`; no command has run yet');
+    }
+  }
   for (const w of warnings) lines.push(`  ! config: ${w}`);
 
   const settingsFile = cliSettingsPath();

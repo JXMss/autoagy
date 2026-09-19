@@ -39,6 +39,9 @@ function freshState(conversationId) {
     escalatedCommandApproved: false,
     // stepIdx -> hash of the command autoagy rewrote into its own sandbox, checked at PostToolUse.
     pendingConfined: {},
+    // stepIdx -> hash of the command autoagy rewrote to run under `env -i`, for
+    // the platforms where it has no sandbox of its own; checked the same way.
+    pendingEnvScrub: {},
     // stepIdx -> mount points created for protected directories that were missing, removed after the command.
     pendingPlaceholders: {},
     // The lock file those mount points were protected under, recorded when the

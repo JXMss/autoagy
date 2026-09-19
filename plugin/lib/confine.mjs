@@ -202,9 +202,12 @@ export function probeBwrap(autoagyHome) {
 // Self-check. The sandbox relies on agy behavior that is measured, not
 // documented, and agy updates itself. PostToolUse sees the arguments that
 // actually ran, so every rewritten command is compared with what autoagy
-// asked for; one mismatch disables the own sandbox for that agy build.
+// asked for; one mismatch disables that rewrite for that agy build. The
+// env-scrub rewrite (no own sandbox) is measured the same way and keeps its
+// own record: the two fail independently.
 
-const checkFile = (autoagyHome) => path.join(autoagyHome, 'state', 'own-sandbox-check.json');
+const CHECK_FILES = { sandbox: 'own-sandbox-check.json', envScrub: 'command-env-check.json' };
+const checkFile = (autoagyHome, kind = 'sandbox') => path.join(autoagyHome, 'state', CHECK_FILES[kind] ?? CHECK_FILES.sandbox);
 
 /** Identity of the running agy executable, so a self-check result applies to one build. */
 export function hostBuildId(host) {
@@ -219,43 +222,57 @@ export function hostBuildId(host) {
 
 export const commandHash = (commandLine) => crypto.createHash('sha256').update(String(commandLine)).digest('hex').slice(0, 16);
 
-export function readSandboxCheck(autoagyHome) {
+export function readSandboxCheck(autoagyHome, kind = 'sandbox') {
   try {
-    return JSON.parse(fs.readFileSync(checkFile(autoagyHome), 'utf8'));
+    return JSON.parse(fs.readFileSync(checkFile(autoagyHome, kind), 'utf8'));
   } catch {
     return null;
   }
 }
 
-function updateSandboxCheck(autoagyHome, mutate) {
-  const file = checkFile(autoagyHome);
+function updateSandboxCheck(autoagyHome, mutate, kind = 'sandbox') {
+  const file = checkFile(autoagyHome, kind);
   return withLock(file, () => {
-    const next = mutate(readSandboxCheck(autoagyHome));
+    const next = mutate(readSandboxCheck(autoagyHome, kind));
     if (next) fs.writeFileSync(file, JSON.stringify(next, null, 2));
     return next;
   });
 }
 
 /** Records one comparison; `problem` is null when agy ran exactly the rewritten command. */
-export function recordSandboxCheck(autoagyHome, build, problem) {
-  return updateSandboxCheck(autoagyHome, (prev) => {
-    const same = prev?.build === build;
-    if (problem) return { build, status: 'broken', detail: problem, time: new Date().toISOString(), notified: false };
-    // A build that failed once stays disabled; its later commands are no longer rewritten anyway.
-    if (same && prev.status === 'broken') return null;
-    return { build, status: 'verified', verified: (same ? prev.verified ?? 0 : 0) + 1, time: new Date().toISOString() };
-  });
+export function recordSandboxCheck(autoagyHome, build, problem, kind = 'sandbox') {
+  return updateSandboxCheck(
+    autoagyHome,
+    (prev) => {
+      const same = prev?.build === build;
+      if (problem) return { build, status: 'broken', detail: problem, time: new Date().toISOString(), notified: false };
+      // A build that failed once stays disabled; its later commands are no longer rewritten anyway.
+      if (same && prev.status === 'broken') return null;
+      return { build, status: 'verified', verified: (same ? prev.verified ?? 0 : 0) + 1, time: new Date().toISOString() };
+    },
+    kind,
+  );
 }
 
 /** Returns the broken check once, so the user hears about it a single time per build. */
-export function takeSandboxNotice(autoagyHome, build) {
+export function takeSandboxNotice(autoagyHome, build, kind = 'sandbox') {
   let notice = null;
-  updateSandboxCheck(autoagyHome, (prev) => {
-    if (prev?.build !== build || prev.status !== 'broken' || prev.notified) return null;
-    notice = prev;
-    return { ...prev, notified: true };
-  });
+  updateSandboxCheck(
+    autoagyHome,
+    (prev) => {
+      if (prev?.build !== build || prev.status !== 'broken' || prev.notified) return null;
+      notice = prev;
+      return { ...prev, notified: true };
+    },
+    kind,
+  );
   return notice;
+}
+
+/** True when the env-scrub rewrite failed its self-check for this agy build. */
+export function envScrubDisabled(autoagyHome, build) {
+  const check = readSandboxCheck(autoagyHome, 'envScrub');
+  return Boolean(check && check.status === 'broken' && check.build === build);
 }
 
 function commandGrantPresent(appDataDir) {
@@ -294,6 +311,36 @@ export function detectOwnSandbox({ config, host, appDataDir, autoagyHome, build 
 }
 
 const quote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
+/** The absolute `env` a scrubbed command line runs under, or null when there is none. */
+export const envBinaryPath = () => trustedBinary(['/usr/bin/env', '/bin/env'])?.file ?? null;
+
+/**
+ * The command line with a scrubbed environment: `env -i NAME=VALUE … sh -c '<command>'`.
+ *
+ * Where autoagy has no sandbox of its own, this is the one part of the
+ * `--clearenv` idea that still applies: agy applies an `overwrite` that leaves
+ * `BypassSandbox` unset (measured, design.md), so the rewritten command runs
+ * inside Antigravity's sandbox with an environment built from the same
+ * allowlist. The inner command goes through a shell because the original line is
+ * a shell command — pipes, redirections and all — and it was going to be run by
+ * one anyway.
+ *
+ * The values are written into the command line verbatim, which the agent can
+ * read, so `ownSandboxEnvPassThrough` must not name a secret. Same caveat as the
+ * sandbox's `--setenv`.
+ *
+ * @returns {string | null} null when no trusted `env` can be found
+ */
+export function scrubbedCommandLine(ctx, commandLine) {
+  const env = envBinaryPath();
+  if (!env) return null;
+  const parts = [quote(env), '-i'];
+  for (const [name, value] of sandboxEnv(ctx.env, { passThrough: ctx.config.ownSandboxEnvPassThrough })) {
+    parts.push(quote(`${name}=${value}`));
+  }
+  return `${parts.join(' ')} ${quote(shellPath())} -c ${quote(commandLine)}`;
+}
 
 /** Paths that stay read-only inside the sandbox even when they lie in a writable root. */
 export function readOnlyPaths(ctx) {

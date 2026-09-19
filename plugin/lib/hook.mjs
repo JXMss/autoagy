@@ -12,7 +12,7 @@ import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext, HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
-import { confinedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
+import { confinedCommandLine, scrubbedCommandLine, envScrubDisabled, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
 import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted } from './state.mjs';
@@ -97,7 +97,7 @@ export function offModeOutput(ctx, state = {}) {
 export function withOwnSandbox(output, ctx) {
   if (output?.decision !== 'allow' && output?.decision !== 'force_ask') return output;
   if (ctx.toolName !== 'run_command' || ctx.args.BypassSandbox === true || typeof ctx.args.CommandLine !== 'string') return output;
-  if (!ctx.ownSandbox.active) return output;
+  if (!ctx.ownSandbox.active) return withScrubbedEnv(output, ctx);
   const placeholders = [];
   const commandLine = confinedCommandLine(ctx, ctx.args.CommandLine, { placeholders });
   // Remembered for the PostToolUse self-check and for cleaning the mount points up.
@@ -127,6 +127,56 @@ export function withOwnSandbox(output, ctx) {
     removeControlPlaceholders(placeholders);
   }
   return { ...output, overwrite: { BypassSandbox: true, CommandLine: commandLine } };
+}
+
+/**
+ * Where autoagy has no sandbox of its own (macOS, Windows, no bubblewrap, IDE
+ * without `ownSandbox: "on"`), `commandEnv.mode: "scrub"` takes away the one
+ * thing it still can: the environment. The command is rewritten to run under
+ * `env -i` with the same allowlist the sandbox uses, so an unreviewed command
+ * cannot print the API keys agy was started with — and neither can a reviewed
+ * one whose output lands in the transcript.
+ *
+ * agy applies an `overwrite` that leaves `BypassSandbox` unset (measured), so
+ * the command still runs inside Antigravity's sandbox and needs no `command`
+ * grant. Escalated commands are left alone: they were reviewed as full-privilege
+ * actions, and the environment is part of what that means.
+ */
+function withScrubbedEnv(output, ctx) {
+  if (ctx.config.commandEnv?.mode !== 'scrub') return output;
+  if (envScrubDisabled(ctx.autoagyHome, ctx.hostBuild)) return output;
+  const commandLine = scrubbedCommandLine(ctx, ctx.args.CommandLine);
+  if (!commandLine) return output;
+  if (ctx.stepIdx !== null) {
+    updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
+      s.pendingEnvScrub[ctx.stepIdx] = commandHash(commandLine);
+      const steps = Object.keys(s.pendingEnvScrub);
+      for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_CONFINED))) delete s.pendingEnvScrub[step];
+    });
+  }
+  return { ...output, overwrite: { CommandLine: commandLine } };
+}
+
+/**
+ * The env-scrub counterpart of the sandbox self-check: PostToolUse sees the
+ * arguments that actually ran, so a mismatch means the rewrite was ignored and
+ * the command saw the inherited environment after all. The response is to stop
+ * claiming the environment is scrubbed for this agy build — not to mark the
+ * conversation, which is about the filesystem — and to say so once.
+ */
+function checkScrubbedEnv(ctx) {
+  const recorded = updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
+    const hash = s.pendingEnvScrub?.[ctx.stepIdx] ?? null;
+    if (s.pendingEnvScrub) delete s.pendingEnvScrub[ctx.stepIdx];
+    return hash;
+  });
+  if (!recorded) return;
+  const problem = commandHash(ctx.args.CommandLine) === recorded ? null : 'agy ran the original command instead of the one autoagy rewrote to run under env -i';
+  recordSandboxCheck(ctx.autoagyHome, ctx.hostBuild, problem, 'envScrub');
+  if (problem) {
+    appendDecision(ctx.autoagyHome, { conversation: ctx.conversationId, step: ctx.stepIdx, tool: ctx.toolName, verdict: 'env-scrub-self-check-failed', error: problem });
+    process.stderr.write(`autoagy: this agy version did not run the scrubbed command line; commands will keep the inherited environment. Run \`autoagy status\`.\n`);
+  }
 }
 
 /**
@@ -169,7 +219,12 @@ export function handlePostToolUse(payload, options = {}) {
   // These checks run even in mode "off": they clean up mount points a command
   // left behind and verify what actually ran, and a conversation whose mode was
   // switched mid-flight would otherwise strand them.
-  if (ctx.toolName === 'run_command') return checkConfinedRun(ctx, readState(ctx.autoagyHome, ctx.conversationId));
+  if (ctx.toolName === 'run_command') {
+    // The env-scrub check first: it is a state read and a write, and it belongs
+    // to a conversation whose own-sandbox state may well be empty.
+    checkScrubbedEnv(ctx);
+    return checkConfinedRun(ctx, readState(ctx.autoagyHome, ctx.conversationId));
+  }
   if (FILE_EDIT_TOOLS.has(ctx.toolName)) return checkEditTargets(ctx);
   return {};
 }
@@ -379,6 +434,22 @@ export async function handlePreToolUse(payload, options = {}) {
       reason:
         `autoagy's self-check found that this agy version does not run commands the way autoagy's own sandbox rewrites them (${notice.detail}). ` +
         `autoagy stopped using its own sandbox for this agy version, so ${ctx.config.ownSandbox === 'on' ? 'every command that is not read-only is now reviewed' : "commands run in Antigravity's terminal sandbox, which leaves .git and the conversation logs writable"}. ` +
+        'Tell the user about this and suggest running `autoagy status`, then retry the command.',
+    };
+  }
+
+  // Once per agy build: the self-check found that this agy version does not run
+  // the command line autoagy rewrites to scrub the environment where it has no
+  // sandbox of its own.
+  const scrubNotice =
+    ctx.toolName === 'run_command' && ctx.config.commandEnv?.mode === 'scrub' && !ctx.ownSandbox.active ? takeSandboxNotice(home, ctx.hostBuild, 'envScrub') : null;
+  if (scrubNotice) {
+    appendDecision(home, { conversation: ctx.conversationId, step: ctx.stepIdx, tool: ctx.toolName, verdict: 'deny', reason: 'env scrub self-check notice' });
+    return {
+      decision: 'deny',
+      reason:
+        `autoagy's self-check found that this agy version does not run the command line autoagy rewrites to scrub the environment (${scrubNotice.detail}). ` +
+        'autoagy stopped rewriting commands for this agy version, so they run with the environment agy itself was started with. ' +
         'Tell the user about this and suggest running `autoagy status`, then retry the command.',
     };
   }

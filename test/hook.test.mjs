@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { makeSandboxDirs, payloadFor } from './helpers.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
 import { readState, updateState } from '../plugin/lib/state.mjs';
+import { readSandboxCheck } from '../plugin/lib/confine.mjs';
 import { handlePreToolUse, failClosedOutput } from '../plugin/lib/hook.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from '../plugin/lib/context.mjs';
 
@@ -85,6 +86,47 @@ test('reads and sandboxed commands are allowed without a review', () => {
     runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: path.join(dirs.workspace, 'a.txt'), CodeContent: 'x' }, ws())),
     { decision: 'allow' },
   );
+});
+
+test('commandEnv: "scrub" rewrites the command line and verifies it ran', () => {
+  // No own sandbox here (macOS, Windows, no bubblewrap): the environment is what
+  // autoagy can still take away, by rewriting the command under `env -i`.
+  writeConfig({ commandEnv: { mode: 'scrub' }, ownSandbox: 'off' });
+  const out = runHook('pre-tool-use', payloadFor(dirs, 'run_command', { CommandLine: 'echo hi', Cwd: dirs.workspace }, ws()));
+  assert.equal(out.decision, 'allow');
+  assert.match(out.overwrite.CommandLine, /'\/usr\/bin\/env' -i .*-c 'echo hi'$/);
+  assert.equal(out.overwrite.BypassSandbox, undefined, 'the command stays in the Antigravity sandbox');
+  const state = readState(dirs.env.AUTOAGY_HOME, dirs.conversationId);
+  assert.ok(state.pendingEnvScrub[3], 'the rewritten line is remembered for the self-check');
+
+  // PostToolUse sees what actually ran, so the scrub gets the same check the
+  // sandbox rewrite gets.
+  runHook('post-tool-use', payloadFor(dirs, 'run_command', { CommandLine: out.overwrite.CommandLine, Cwd: dirs.workspace }, ws()));
+  assert.equal(readSandboxCheck(dirs.env.AUTOAGY_HOME, 'envScrub').status, 'verified');
+  assert.equal(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).untrusted, null, 'a verified scrub marks nothing');
+});
+
+test('commandEnv: a scrub that did not run is reported and then dropped, without marking the conversation', () => {
+  writeConfig({ commandEnv: { mode: 'scrub' }, ownSandbox: 'off' });
+  const out = runHook('pre-tool-use', payloadFor(dirs, 'run_command', { CommandLine: 'echo hi', Cwd: dirs.workspace }, ws()));
+  // agy ran the original instead of the rewrite: the environment was not scrubbed.
+  runHook('post-tool-use', payloadFor(dirs, 'run_command', { CommandLine: 'echo hi', Cwd: dirs.workspace }, ws()));
+  const check = readSandboxCheck(dirs.env.AUTOAGY_HOME, 'envScrub');
+  assert.equal(check.status, 'broken');
+  assert.match(check.detail, /ran the original command/);
+  assert.equal(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).untrusted, null, 'the rewrite failing is not a fact about the filesystem');
+  assert.equal(readDecisions(dirs.env.AUTOAGY_HOME, 1)[0].verdict, 'env-scrub-self-check-failed');
+
+  // The next command is refused once, so the agent tells the user rather than
+  // quietly running unscrubbed.
+  const notice = runHook('pre-tool-use', payloadFor(dirs, 'run_command', { CommandLine: 'echo hi', Cwd: dirs.workspace }, ws()));
+  assert.equal(notice.decision, 'deny');
+  assert.match(notice.reason, /does not run the command line autoagy rewrites/);
+  // ... and after that the rewrite is off for this build, so the command runs
+  // as it would have without the setting rather than half-scrubbed.
+  const after = runHook('pre-tool-use', payloadFor(dirs, 'run_command', { CommandLine: 'echo hi', Cwd: dirs.workspace }, ws()));
+  assert.equal(after.decision, 'allow');
+  assert.equal(after.overwrite, undefined);
 });
 
 test('an escalation approved by the reviewer is allowed and logged', () => {

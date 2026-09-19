@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
-import { detectOwnSandbox, confinedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath } from '../plugin/lib/confine.mjs';
+import { detectOwnSandbox, confinedCommandLine, scrubbedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath } from '../plugin/lib/confine.mjs';
 import { seccompProgram, seccompSupported } from '../plugin/lib/seccomp.mjs';
 import { HookContext, PROTECTED_WORKSPACE_DIRS } from '../plugin/lib/context.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
@@ -487,4 +487,26 @@ test('the mount points for missing protected directories exist only while the co
   assert.deepEqual(handlePostToolUse(payloadFor(dirs, 'run_command', pre.overwrite, { stepIdx: 30 }), opts), {});
   assert.equal(fs.existsSync(target), false, 'removed after the command');
   fs.rmSync(path.join(home, 'config.json'));
+});
+
+test('the env scrub runs the command under env -i with the sandbox allowlist', () => {
+  const env = { PATH: '/usr/bin:/bin', HOME: '/home/someone', LANG: 'en_US.UTF-8', GEMINI_API_KEY: 'secret-value', AUTOAGY_HOME: '/tmp/other' };
+  const ctx = ctxFor({ CommandLine: 'echo hi' }, { env: { ...env } });
+  const line = scrubbedCommandLine(ctx, 'echo hi && ls -l > out.txt');
+  assert.match(line, /^'\/usr\/bin\/env' -i /, 'env -i comes first');
+  assert.match(line, /'PATH=\/usr\/bin:\/bin'/);
+  assert.match(line, /'HOME=\/home\/someone'/);
+  assert.match(line, /'LANG=en_US\.UTF-8'/);
+  assert.ok(!line.includes('GEMINI_API_KEY'), 'the hook\'s own secrets are not put in the command line');
+  assert.ok(!line.includes('AUTOAGY_HOME'), 'nor is anything else the allowlist does not name');
+  assert.match(line, / -c 'echo hi && ls -l > out\.txt'$/, 'the shell keeps pipes and redirections working');
+});
+
+test('the scrub can be widened by ownSandboxEnvPassThrough', () => {
+  const env = { PATH: '/usr/bin', CARGO_HOME: '/home/someone/.cargo', OTHER: 'x' };
+  const base = configWith({ ownSandbox: 'on', ownSandboxEnvPassThrough: ['CARGO_HOME'] });
+  const ctx = new HookContext(payloadFor(dirs, 'run_command', { CommandLine: 'cargo build' }), { config: base, env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe });
+  const line = scrubbedCommandLine(ctx, 'cargo build');
+  assert.match(line, /'CARGO_HOME=\/home\/someone\/\.cargo'/, 'the one list widens both rewrites');
+  assert.ok(!line.includes('OTHER='));
 });

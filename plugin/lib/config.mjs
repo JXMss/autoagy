@@ -113,6 +113,15 @@ export const DEFAULT_CONFIG = Object.freeze({
   // requirements.toml), so the default here is the same — allowed. Set
   // "review" to send every search to the reviewer.
   webSearch: 'allow',
+  // What environment a command runs with where autoagy has no sandbox of its
+  // own. "inherit" is the default and is what Codex does by default too: the
+  // command gets the environment the hook inherited, which holds whatever the
+  // user exported before starting agy (`shell_environment_policy` has the same
+  // default — inherit everything, default excludes off). "scrub" starts it from
+  // the allowlist the own sandbox already uses, plus `ownSandboxEnvPassThrough`,
+  // by rewriting the command line to run under `env -i`. The own sandbox always
+  // scrubs; this switch is for the platforms where it does not exist.
+  commandEnv: { mode: 'inherit' },
   circuitBreaker: {
     maxConsecutiveDenials: 3,
     maxRecentDenials: 10,
@@ -142,6 +151,7 @@ const ENUMS = {
   onError: ['deny', 'ask'],
   browser: ['review', 'allow'],
   webSearch: ['allow', 'review'],
+  'commandEnv.mode': ['inherit', 'scrub'],
 };
 
 /** Directory holding config.json, state/ and logs/. */
@@ -274,7 +284,7 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
 
 /** The default config file written by `autoagy setup`. */
 export function defaultConfigFileText() {
-  const { mode, sandbox, ownSandbox, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch } = DEFAULT_CONFIG;
+  const { mode, sandbox, ownSandbox, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv } = DEFAULT_CONFIG;
   const { mock, ...reviewer } = DEFAULT_CONFIG.reviewer;
-  return `${JSON.stringify({ mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch }, null, 2)}\n`;
+  return `${JSON.stringify({ mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv }, null, 2)}\n`;
 }
