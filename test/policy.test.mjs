@@ -151,6 +151,16 @@ test('network, browser and MCP', () => {
   const mcpAllowed = configWith({ mcp: { allow: ['github/get_*'] } });
   assert.equal(verdict('call_mcp_tool', { ServerName: 'github', ToolName: 'get_issue' }, { config: mcpAllowed }).verdict, 'allow');
   assert.equal(verdict('call_mcp_tool', { ServerName: 'github', ToolName: 'delete_repo' }, { config: mcpAllowed }).verdict, 'review');
+  // MCP resources: the URI is the agent's choice, and a file:// one is a path
+  // the credential check never sees (it reads path arguments, not URIs), so
+  // these are reviewed like any other MCP call.
+  const resource = verdict('read_resource', { ServerName: 'fs', Uri: 'file:///etc/passwd' });
+  assert.equal(resource.verdict, 'review');
+  assert.equal(resource.category, 'mcp-resource');
+  assert.match(resource.reason, /file:\/\/\/etc\/passwd/);
+  assert.equal(verdict('read_resource', { Uri: 'https://example.com/collect?d=x' }).verdict, 'review');
+  assert.equal(verdict('list_resources', { ServerName: 'fs' }).verdict, 'review');
+  assert.equal(verdict('read_resource', { ServerName: 'fs', Uri: 'x' }, { config: configWith({ mcp: { allow: ['fs/read_resource'] } }) }).verdict, 'allow');
 });
 
 test('code execution, agent definitions and unknown tools are reviewed', () => {

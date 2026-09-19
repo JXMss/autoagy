@@ -27,8 +27,6 @@ export const READ_ONLY_TOOLS = new Set([
   'read_terminal',
   'command_status',
   'trajectory_search',
-  'read_resource',
-  'list_resources',
   'search_web',
   'list_permissions',
   // Observing the browser does not change anything.
@@ -110,6 +108,13 @@ export const FILE_EDIT_TOOLS = new Set([
 
 export const URL_TOOLS = new Set(['read_url_content', 'open_browser_url']);
 
+// MCP resource reads. Not read-only in the sense the set above means: the URI
+// is chosen by the agent, and reading one can reach a remote server or a file
+// that no other rule here sees — a `file://` URI never passes through the
+// credential check, which reads path arguments, not URIs. So they are reviewed
+// like every other MCP call, with `mcp.allow` able to name them.
+export const MCP_RESOURCE_TOOLS = new Set(['read_resource', 'list_resources']);
+
 export const BROWSER_ACTION_TOOLS = new Set([
   'browser_click_element',
   'click_browser_pixel',
@@ -164,7 +169,7 @@ export function classify(ctx, state = {}) {
     if (ctx.config.browser === 'allow') return allow('browser-action');
     return review('browser-action', 'Interactive browser action (click, typing or script execution) with possible external side effects.');
   }
-  if (name === 'call_mcp_tool' || name.startsWith('mcp_')) return classifyMcp(ctx);
+  if (name === 'call_mcp_tool' || name.startsWith('mcp_') || MCP_RESOURCE_TOOLS.has(name)) return classifyMcp(ctx);
   if (name === 'notebook_execution') return review('code-execution', 'Executes notebook code outside the terminal sandbox.');
   if (name === 'define_subagent') {
     return review(
@@ -628,6 +633,10 @@ export function mcpTarget(ctx) {
     const tool = a.ToolName ?? a.Tool ?? a.tool_name ?? a.tool ?? a.Name ?? a.name ?? '';
     return { server: String(server), tool: String(tool), args: a.Arguments ?? a.Args ?? a.arguments ?? a.Input ?? a.input };
   }
+  if (MCP_RESOURCE_TOOLS.has(ctx.toolName)) {
+    const server = a.ServerName ?? a.Server ?? a.server_name ?? a.server ?? a.McpServerName ?? '';
+    return { server: String(server), tool: ctx.toolName, args: stripMeta(a) };
+  }
   const rest = ctx.toolName.slice('mcp_'.length);
   return { server: '', tool: rest, args: stripMeta(a) };
 }
@@ -640,6 +649,13 @@ function classifyMcp(ctx) {
     return re.test(id) || re.test(ctx.toolName);
   });
   if (allowed) return allow('mcp-allowed', id);
+  if (MCP_RESOURCE_TOOLS.has(ctx.toolName)) {
+    const uri = ctx.args.Uri ?? ctx.args.URI ?? ctx.args.uri ?? ctx.args.ResourceUri ?? ctx.args.resource_uri;
+    return review(
+      'mcp-resource',
+      `Reads MCP resource ${id}${typeof uri === 'string' ? ` (${uri})` : ''}: the URI is chosen by the agent, and reading one can reach a remote server or a file the path rules never see.`,
+    );
+  }
   return review('mcp', `Calls MCP tool ${id || ctx.toolName}; MCP tools are reviewed unless listed in mcp.allow.`);
 }
 
