@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, executableName } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
-import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, expandHome, findExecutable } from './paths.mjs';
+import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, findExecutable } from './paths.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
   'view_file',
@@ -320,17 +320,60 @@ function classifyRead(ctx, state = {}) {
   return allow('read');
 }
 
+/**
+ * `/proc/<pid>/environ` and `/proc/<pid>/cmdline`: what a process was started
+ * with. The hook inherits agy's environment, which normally holds the API keys
+ * the user exported before starting it, so one unreviewed read here hands the
+ * agent the same secrets the credential list exists to protect. It matters
+ * exactly where autoagy's own sandbox is not the thing doing the reading: the
+ * file tools never run in a sandbox at all, and that sandbox is the only path
+ * with `--clearenv` (it also mounts a fresh /proc, so nothing there is hidden).
+ *
+ * Matched on the path rather than by glob so a symlink resolved in
+ * `resolveReal` — `/proc/self/environ` becomes `/proc/<pid>/environ` — still
+ * counts.
+ */
+function isProcessInfoPath(abs) {
+  const parts = String(abs).split(/[\\/]/);
+  // parts[0] === '' is what makes this an absolute POSIX path: `/proc/...`, and
+  // not `C:\proc\...`, `work/proc/...` or a path that merely contains `proc`.
+  if (parts[0] !== '' || parts[1] !== 'proc') return false;
+  const last = parts[parts.length - 1];
+  return last === 'environ' || last === 'cmdline';
+}
+
 export function isCredentialPath(ctx, abs) {
   const { credentialPaths, credentialPathExceptions } = ctx.config;
   if (matchesAnyGlob(abs, credentialPathExceptions, ctx.home)) return false;
+  if (isProcessInfoPath(abs)) return true;
   return matchesAnyGlob(abs, credentialPaths, ctx.home) || ctx.credentialLocations.some((loc) => isWithin(abs, loc));
+}
+
+/**
+ * True when a read of `abs` is already prevented by autoagy's own sandbox, so
+ * that reviewing it would only cost the user a prompt for a read that cannot
+ * happen. That sandbox mounts a private /proc and masks every credential store
+ * it can name by location.
+ *
+ * Location, not pattern: the `id_ed25519` pattern matches the key in `~/.ssh`
+ * (masked) and a copy someone made inside the workspace (not masked), and only
+ * the mount list says which one a given path is.
+ */
+function hiddenByOwnSandbox(ctx, abs) {
+  if (isProcessInfoPath(abs)) return true;
+  return ctx.credentialLocations.some((loc) => isWithin(abs, loc));
 }
 
 /**
  * A credential store that a command names as an argument or redirect target
  * (best effort: only literal paths, `~` and `$HOME` are resolved).
+ *
+ * The patterns without a fixed location count here as much as the anchored
+ * ones: `cat .env` reads the same secrets as `read_file .env`, which has always
+ * been reviewed, and nothing masks it inside autoagy's own sandbox either.
+ * `hiddenBySandbox` drops the reads that sandbox does prevent.
  */
-function credentialArgument(ctx, analysis, cwd) {
+function credentialArgument(ctx, analysis, cwd, { hiddenBySandbox = false } = {}) {
   const base = typeof cwd === 'string' && cwd ? toAbsolute(cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
   const words = analysis.segments.flatMap((s) => s.argv.slice(1));
   for (const command of analysis.parsed.commands) {
@@ -344,8 +387,9 @@ function credentialArgument(ctx, analysis, cwd) {
     if (wildcard >= 0) value = value.slice(0, wildcard).replace(/[^\\/]*$/, '') || '.';
     const abs = toAbsolute(value, base, ctx.home);
     if (!abs) continue;
-    const anchored = (ctx.config.credentialPaths ?? []).filter((g) => typeof g === 'string' && path.isAbsolute(expandHome(g, ctx.home)));
-    if (matchesAnyGlob(abs, anchored, ctx.home) || ctx.credentialLocations.some((loc) => isWithin(abs, loc))) return abs;
+    if (!isCredentialPath(ctx, abs)) continue;
+    if (hiddenBySandbox && hiddenByOwnSandbox(ctx, abs)) continue;
+    return abs;
   }
   return null;
 }
@@ -493,8 +537,11 @@ function classifyCommand(ctx, state = {}) {
   if (selfNote && state.untrusted) {
     return deny('touches-security-controls', `autoagy: refused because this conversation is no longer trusted.${selfNote} Ask the user to look at what changed on disk first.`);
   }
-  // autoagy's own sandbox hides credential stores; elsewhere a command naming one is reviewed.
-  const credential = bypass || !ctx.ownSandbox.active ? credentialArgument(ctx, analysis, ctx.args.Cwd) : null;
+  // autoagy's own sandbox masks the credential stores it can locate by path and
+  // gives the command a private /proc, so a read it prevents there is not worth
+  // a review. Everywhere else — including a command that asked to leave the
+  // sandbox — naming a store is enough.
+  const credential = credentialArgument(ctx, analysis, ctx.args.Cwd, { hiddenBySandbox: ctx.ownSandbox.active && !bypass });
   const credentialNote = credential ? ` The command names ${credential}, a location that commonly holds credentials or secrets.` : '';
 
   const rules = evaluateRules(analysis, ctx.config.rules);

@@ -424,7 +424,7 @@ const SIMPLE_SAFE = new Set([
   'cat', 'cd', 'cut', 'echo', 'expr', 'false', 'grep', 'egrep', 'fgrep', 'head', 'id', 'ls', 'nl', 'paste',
   'pwd', 'rev', 'seq', 'stat', 'tail', 'tr', 'true', 'uname', 'wc', 'which', 'whoami', 'basename', 'dirname',
   'realpath', 'readlink', 'file', 'du', 'df', 'printf', 'test', '[', '[[', 'diff', 'cmp', 'comm', 'md5sum',
-  'sha1sum', 'sha256sum', 'sha512sum', 'shasum', 'cksum', 'nproc', 'printenv', 'uptime', 'free', 'ps', 'type',
+  'sha1sum', 'sha256sum', 'sha512sum', 'shasum', 'cksum', 'nproc', 'uptime', 'free', 'ps', 'type',
   'numfmt', 'tac', 'column', 'fold', 'fmt', 'expand', 'unexpand', 'od', 'hexdump', 'strings', 'jq', 'arch',
   'groups', 'tty', 'locale', 'getconf', 'lscpu', 'sleep', 'where', 'Get-ChildItem', 'Get-Content', 'Get-Location',
 ]);
@@ -447,13 +447,20 @@ const UNSAFE_GIT_ARGS = new Set(['--output', '-o', '--ext-diff', '--textconv', '
 
 /**
  * True when every command in the line is read-only and the line uses no
- * construct that could write files or hide what runs.
+ * construct that could write files, hide what runs, or name a value the line
+ * does not spell out — an environment variable can hold a credential, and the
+ * command's output goes straight back to the agent.
+ *
+ * `variable` is rejected for that last reason: this list is what runs without
+ * review when autoagy's own sandbox is not in force, and the hook inherits
+ * agy's environment, which normally holds the API keys the user exported.
+ * Without the sandbox there is no `--clearenv` to make `echo $KEY` harmless.
  * @param {CommandAnalysis | string} analysisOrSource
  */
 export function isKnownSafeCommandLine(analysisOrSource) {
   const analysis = typeof analysisOrSource === 'string' ? analyzeCommandLine(analysisOrSource) : analysisOrSource;
   if (analysis.error || analysis.tooDeep) return false;
-  for (const feature of ['substitution', 'process-substitution', 'redirect-write', 'background', 'function', 'heredoc', 'herestring', 'arith']) {
+  for (const feature of ['substitution', 'process-substitution', 'redirect-write', 'background', 'function', 'heredoc', 'herestring', 'arith', 'variable']) {
     if (analysis.features.has(feature)) return false;
   }
   const topLevel = analysis.parsed.commands;
@@ -479,7 +486,8 @@ export function isSafeArgv(argv) {
   const script = shellScriptOf(argv);
   if (script !== null && SHELLS.has(name)) return script.trim() !== '' && isKnownSafeCommandLine(script);
   if (name === 'timeout' || name === 'nice' || name === 'time' || name === 'nohup' || name === 'env') {
-    if (name === 'env' && args.length === 0) return true;
+    // Bare `env` prints the environment, which is the one thing this list must
+    // not hand over unreviewed; `env A=1 cmd` is judged by what it runs.
     const inner = unwrapCommand(argv);
     return inner ? isSafeArgv(inner) : false;
   }

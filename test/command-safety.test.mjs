@@ -134,10 +134,10 @@ test('known-safe read-only command lines', () => {
     'head -n 20 a.txt; tail -n 5 b.txt',
     'node --version',
     'python3 --version',
-    'env',
     'timeout 5 ls',
     "bash -lc 'ls && git status'",
     'cd src && ls',
+    'env -i ls',
   ]) {
     assert.equal(isKnownSafeCommandLine(cmd), true, cmd);
   }
@@ -172,6 +172,16 @@ test('commands that are not known-safe', () => {
     'npm install',
     'awk \'{print > "f"}\' x',
     "bash -lc 'ls; rm -f x'",
+    // These are read-only, but this list is what runs unreviewed where
+    // autoagy's own sandbox is not in force, and the hook inherits agy's
+    // environment — the user's exported API keys. There is no `--clearenv`
+    // there, so printing the environment, or naming a value the line does not
+    // spell out, must go to the reviewer.
+    'env',
+    'printenv',
+    'echo $GEMINI_API_KEY',
+    'echo "$HOME"',
+    'cat $FILE',
   ]) {
     assert.equal(isKnownSafeCommandLine(cmd), false, cmd);
   }

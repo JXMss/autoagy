@@ -21,6 +21,18 @@ test('reads are allowed, credential reads are reviewed', () => {
   assert.equal(verdict('view_file', { AbsolutePath: path.join(dirs.workspace, '.env') }).verdict, 'review');
   assert.equal(verdict('view_file', { AbsolutePath: path.join(dirs.workspace, '.env.example') }).verdict, 'allow');
   assert.equal(verdict('grep_search', { SearchPath: path.join(dirs.home, '.aws'), Query: 'key' }).verdict, 'review');
+  // What a process was started with: agy's environment is where the user's
+  // exported keys live, and the file tools never run in a sandbox, so this is
+  // judged as a credential store on every platform.
+  const environ = verdict('view_file', { AbsolutePath: '/proc/self/environ' });
+  assert.equal(environ.verdict, 'review');
+  assert.equal(environ.category, 'credential-read');
+  assert.equal(verdict('view_file', { AbsolutePath: '/proc/self/cmdline' }).verdict, 'review');
+  assert.equal(verdict('view_file', { AbsolutePath: '/proc/1234/environ' }).verdict, 'review');
+  assert.equal(verdict('view_file', { AbsolutePath: '/proc/self/status' }).verdict, 'allow');
+  assert.equal(verdict('view_file', { AbsolutePath: path.join(dirs.workspace, 'proc', 'environ') }).verdict, 'allow');
+  // ... and the same path named by a command, wherever no own sandbox hides it.
+  assert.equal(verdict('run_command', { CommandLine: 'cat /proc/self/environ' }, { config: configWith({ ownSandbox: 'off' }) }).category, 'credential-read');
 });
 
 test('agent coordination tools are allowed', () => {
