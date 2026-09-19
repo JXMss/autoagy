@@ -149,6 +149,14 @@ const deny = (category, reason) => ({ verdict: 'deny', category, reason });
 export function classify(ctx, state = {}) {
   const name = ctx.toolName;
   if (ctx.role === 'guardian') return classifyGuardianTool(ctx);
+  // A search is egress: the query is the agent's own text and agy makes the
+  // request, so nothing here — not even autoagy's own sandbox — sits between it
+  // and the search engine. Codex does not put its hosted web search through the
+  // approval flow either; it gates it by configuration, which is what this
+  // switch is. The default follows Codex and allows it.
+  if (name === 'search_web' && ctx.config.webSearch === 'review') {
+    return review('network', 'Sends the agent\'s query, which is agent-written text, to a search engine. No sandbox here covers that request.');
+  }
   if (READ_ONLY_TOOLS.has(name)) return classifyRead(ctx, state);
   if (name === 'invoke_subagent') return classifySubagents(ctx);
   if (AGENT_TOOLS.has(name)) return allow('agent-coordination');

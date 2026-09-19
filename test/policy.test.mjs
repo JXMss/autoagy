@@ -163,6 +163,16 @@ test('network, browser and MCP', () => {
   assert.equal(verdict('read_resource', { ServerName: 'fs', Uri: 'x' }, { config: configWith({ mcp: { allow: ['fs/read_resource'] } }) }).verdict, 'allow');
 });
 
+test('a web search is egress, and the configuration decides whether it is reviewed', () => {
+  // Codex keeps its hosted web search out of the approval flow and gates it by
+  // configuration, so the default here matches that; "review" is the switch for
+  // an operator who wants the query judged before it leaves the machine.
+  assert.equal(verdict('search_web', { Query: 'how to rotate an api key' }).verdict, 'allow');
+  const reviewed = verdict('search_web', { Query: 'how to rotate an api key' }, { config: configWith({ webSearch: 'review' }) });
+  assert.equal(reviewed.verdict, 'review');
+  assert.equal(reviewed.category, 'network');
+});
+
 test('code execution, agent definitions and unknown tools are reviewed', () => {
   assert.equal(verdict('notebook_execution', {}).category, 'code-execution');
   assert.equal(verdict('define_subagent', {}).category, 'agent-definition');

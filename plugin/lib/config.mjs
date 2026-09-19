@@ -106,6 +106,13 @@ export const DEFAULT_CONFIG = Object.freeze({
   },
   // "review": clicks/typing/JS in the browser are reviewed; "allow": not reviewed.
   browser: 'review',
+  // A web search sends the agent's query off the machine, and unlike a command
+  // it goes through no sandbox: agy makes the request itself. Codex keeps its
+  // hosted web search out of the approval flow and gates it by configuration
+  // instead (`web_search` mode, and `allowed_web_search_modes` in a managed
+  // requirements.toml), so the default here is the same — allowed. Set
+  // "review" to send every search to the reviewer.
+  webSearch: 'allow',
   circuitBreaker: {
     maxConsecutiveDenials: 3,
     maxRecentDenials: 10,
@@ -134,6 +141,7 @@ const ENUMS = {
   onTimeout: ['deny', 'ask'],
   onError: ['deny', 'ask'],
   browser: ['review', 'allow'],
+  webSearch: ['allow', 'review'],
 };
 
 /** Directory holding config.json, state/ and logs/. */
@@ -266,7 +274,7 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
 
 /** The default config file written by `autoagy setup`. */
 export function defaultConfigFileText() {
-  const { mode, sandbox, ownSandbox, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser } = DEFAULT_CONFIG;
+  const { mode, sandbox, ownSandbox, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch } = DEFAULT_CONFIG;
   const { mock, ...reviewer } = DEFAULT_CONFIG.reviewer;
-  return `${JSON.stringify({ mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser }, null, 2)}\n`;
+  return `${JSON.stringify({ mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch }, null, 2)}\n`;
 }
