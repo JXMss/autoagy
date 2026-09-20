@@ -20,7 +20,7 @@ import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOu
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INSTRUCTIONS } from '../lib/guardian.mjs';
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
-import { listStates, updateState, readState, isUntrusted, readHeartbeat } from '../lib/state.mjs';
+import { listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, readSetupRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
 import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath } from '../lib/tripwire.mjs';
@@ -234,7 +234,7 @@ function trust(prefix, all, force) {
   const chosenPaths = new Set(chosen.flatMap(({ state }) => Object.values(state.pendingPlaceholders ?? {}).flatMap((list) => list ?? [])));
   const shared = [...chosenPaths].filter((p) => others.has(p));
 
-  for (const { state } of chosen) {
+  for (const { file: stateFile, state } of chosen) {
     // "Nothing is running" is this command's whole premise, and it is now a
     // question the lock can answer — so ask it rather than take the word for it.
     const held = state.pendingLock ? lockQuiescent(null, { lockFile: state.pendingLock }) : null;
@@ -246,6 +246,10 @@ function trust(prefix, all, force) {
     }
     console.log(`Trusted again: ${state.conversationId}`);
     console.log(`  was flagged for ${flagDescription(state)}`);
+    // A state file that could not be read was kept beside this one as evidence
+    // of what it said. This command is the human saying they have looked, so the
+    // copy goes with the mark it belonged to.
+    fs.rmSync(`${stateFile}.corrupt`, { force: true });
     // The mount points are released here rather than at the conversation's next
     // turn: this command IS the assertion that nothing is still running, and a
     // conversation that never gets another turn would otherwise leave empty
@@ -452,6 +456,13 @@ function status() {
   // A flagged conversation keeps its sandbox protection turned up and, while a
   // command may still be running, retains its read-only mount points. Nothing
   // clears that by itself, so it has to be visible somewhere.
+  // A state file that cannot be read is not listable, and the hook's answer to
+  // one is to stop trusting that conversation — so this is the only place the
+  // user hears about it before the reviews start.
+  for (const file of unreadableStateFiles(autoagyHome)) {
+    lines.push(`  ! ${path.basename(file)} cannot be read as state; the next tool call in that conversation will`);
+    lines.push('    quarantine it and mark the conversation untrusted. `autoagy trust <id>` clears that mark.');
+  }
   const flaggedStates = listStates(autoagyHome).filter(({ state }) => flagged(state));
   if (flaggedStates.length > 0) {
     lines.push('');

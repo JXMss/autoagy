@@ -186,3 +186,38 @@ test('a reviewer that cannot answer stops the turn, like one that says no', () =
   assert.equal(forState({ denied: true, backendError: 'timeout' }), null);
   assert.match(forState({ denied: true, backendError: 'timeout' }).message, /rejected too many/);
 });
+
+test('a state file that cannot be read is kept as evidence, and the conversation is marked', () => {
+  // Reading it as a new conversation is the same act as clearing every sticky
+  // mark it held — `untrusted` and `plantedHooks` above all — and the next write
+  // would replace the only copy of what it did say. A truncated tail on a
+  // filesystem where rename is not atomic is the ordinary way to get here.
+  const home = path.join(root, 'corrupt-state');
+  const dir = path.join(home, 'state');
+  const file = path.join(dir, 'conv-broken.json');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, '{"version":1,"untrusted":{"reason":"edit-target-changed"},"consecutiveDeni');
+
+  const state = readState(home, 'conv-broken');
+  assert.equal(state.untrusted.reason, 'state-file-unreadable');
+  assert.match(state.untrusted.detail, /conv-broken\.json/);
+  assert.equal(isUntrusted(state), true);
+
+  // A copy is kept, and the file itself stays where it is until a locked write
+  // replaces it — renaming it away would make the next read report a brand-new
+  // conversation, which is the answer this exists to avoid.
+  assert.match(fs.readFileSync(`${file}.corrupt`, 'utf8'), /edit-target-changed/, 'the evidence is kept');
+  assert.equal(fs.existsSync(file), true, 'and the file is still in place');
+  assert.equal(isUntrusted(readState(home, 'conv-broken')), true, 'reading it again gives the same answer');
+
+  // The mark survives the next write, and the state file is valid again.
+  updateState(home, 'conv-broken', (s) => {
+    s.recentEdits = [];
+  });
+  assert.equal(isUntrusted(readState(home, 'conv-broken')), true);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).untrusted.reason, 'state-file-unreadable');
+  assert.match(fs.readFileSync(`${file}.corrupt`, 'utf8'), /edit-target-changed/, 'the evidence copy is still there');
+
+  // A missing file is a new conversation, which is not a read failure.
+  assert.equal(readState(home, 'never-seen').untrusted, null);
+});

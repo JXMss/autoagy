@@ -166,3 +166,15 @@ test('a count flag with no value falls back to the default, not to one record', 
   assert.doesNotMatch(out(['log', '-n', '2']), /tool-1/, 'and a number is honoured');
   assert.match(out(['log', '-n']), /tool-0/, 'a flag with no value is not read as "one"');
 });
+
+test('status says when a conversation\'s state file cannot be read', () => {
+  // The hook's answer to an unreadable state file is to stop trusting that
+  // conversation, and `listStates` skips the file — so without a line here the
+  // user meets the reviews with nothing telling them why.
+  const dir = path.join(dirs.env.AUTOAGY_HOME, 'state');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'conv-x.json'), '{oops');
+  const out = status();
+  assert.match(out, /conv-x\.json cannot be read as state/);
+  assert.match(out, /autoagy trust/);
+});

@@ -274,12 +274,75 @@ export function withLock(file, fn) {
   }
 }
 
+/**
+ * Keeps a copy of a state file that cannot be read, once.
+ *
+ * A *copy*, not a rename: what it held is the only record of an `untrusted` mark
+ * or a planting, and it stays where it is until a locked write replaces it. The
+ * mark returned by `readState` is also what the next read has to see again —
+ * renaming the file away would make that read report a brand-new conversation,
+ * which is the very answer this is here to avoid.
+ *
+ * The name is fixed rather than timestamped so a reader that never writes (a
+ * listing, a sweep) cannot fill the directory with copies of one broken file.
+ * Best effort: the mark is the part that matters, and an unreadable copy must
+ * never become a hook failure.
+ */
+function quarantine(file) {
+  const copy = `${file}.corrupt`;
+  try {
+    if (!fs.existsSync(copy)) fs.copyFileSync(file, copy);
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * The state file that cannot be read as state, if there is one.
+ *
+ * `listStates` skips those files, which is right for a listing and wrong for the
+ * one report a user reads: nothing else says that a conversation's record is
+ * unreadable, and the hook's own answer to that is to stop trusting the
+ * conversation.
+ */
+export function unreadableStateFiles(autoagyHome) {
+  let names = [];
+  try {
+    names = fs.readdirSync(stateDir(autoagyHome)).filter((n) => n.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  return names
+    .map((name) => path.join(stateDir(autoagyHome), name))
+    .filter((file) => {
+      try {
+        JSON.parse(fs.readFileSync(file, 'utf8'));
+        return false;
+      } catch (err) {
+        return err?.code !== 'ENOENT';
+      }
+    });
+}
+
 export function readState(autoagyHome, conversationId) {
   const file = stateFile(autoagyHome, conversationId);
   try {
     return { ...freshState(conversationId), ...JSON.parse(fs.readFileSync(file, 'utf8')) };
-  } catch {
-    return freshState(conversationId);
+  } catch (err) {
+    if (err?.code === 'ENOENT') return freshState(conversationId);
+    // The file is there and is not state: a truncated write on a filesystem
+    // where rename is not atomic, a restored backup, a hand-edit. Reading it as
+    // a new conversation is the same act as clearing every sticky mark it held
+    // — `untrusted` and `plantedHooks` above all — and the next write would
+    // overwrite the only copy of what it did say. So it is kept, and the
+    // conversation is marked instead of quietly trusted again: "we cannot read
+    // the record of what happened here" is a reason to stop trusting this
+    // conversation's paths, and `autoagy trust` is how a person says otherwise.
+    quarantine(file);
+    return {
+      ...freshState(conversationId),
+      untrusted: { reason: 'state-file-unreadable', detail: `${path.basename(file)}: ${err.message}`, step: null, at: null },
+    };
   }
 }
 
