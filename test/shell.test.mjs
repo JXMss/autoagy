@@ -107,3 +107,17 @@ test('fails closed on deeply nested substitutions', () => {
   assert.ok(parsed.features.has('too-deep'));
   assert.ok(parsed.error);
 });
+
+test('records the environment variables a line would expand', () => {
+  const names = (src) => [...parseShell(src).variables].sort();
+  assert.deepEqual(names(`echo $A ${'${B:-x}'} "$C" '$D' ${'$(id -u $E)'}`), ['A', 'B', 'C', 'E']);
+  assert.deepEqual(names('echo ${#F}'), ['F']);
+  // Positional and special parameters are not environment names.
+  assert.deepEqual(names('echo $1 $@ $? $$'), []);
+  // An unquoted heredoc expands, a quoted one does not.
+  assert.deepEqual(names('cat <<EOF\n$G\nEOF\n'), ['G']);
+  assert.deepEqual(names("cat <<'EOF'\n$H\nEOF\n"), []);
+  // A nested script's references count too: the outer line never shows them.
+  assert.deepEqual(names(`bash -c 'echo $I'`), []);
+  assert.deepEqual(names('sh -c "echo $J"'), ['J']);
+});

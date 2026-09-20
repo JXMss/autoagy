@@ -10,9 +10,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, executableName } from './command-safety.mjs';
+import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, printsEnvironment, executableName } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
+import { envNameAllowed } from './confine.mjs';
 import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, findExecutable } from './paths.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
@@ -510,6 +511,51 @@ function credentialArgument(ctx, analysis, cwd, { hiddenBySandbox = false } = {}
 }
 
 /**
+ * What a command would read out of the environment agy was started with, or null.
+ *
+ * The hook inherits agy's environment, which normally holds whatever API keys
+ * the user exported before starting it, and exactly two things take that away
+ * from a command: the own sandbox's `--clearenv` and the `commandEnv: "scrub"`
+ * rewrite into `env -i`. Where neither runs — macOS, Windows, a Linux box
+ * without bubblewrap, the IDE without `ownSandbox: "on"` — a command that prints
+ * the environment hands over the whole credential list at once, and unlike every
+ * other credential read it names no path, so `credentialArgument` cannot see it.
+ *
+ * Two ways in, and the second is the reason this is not just a command list:
+ *
+ * - a command whose job is to print it (`printenv`, a bare `env`, `ps auxe`,
+ *   `jq env`) — see `printsEnvironment`;
+ * - any `$NAME` the line expands, where the sandbox allowlist would not have
+ *   passed `NAME` through and the hook's environment actually holds it. That
+ *   phrasing is the whole point: `$PATH` and `$HOME` are on the allowlist and
+ *   stay free, `$f` in a loop is not in the environment at all and stays free,
+ *   and `$OPENAI_API_KEY` is neither. `ownSandboxEnvPassThrough` widens this the
+ *   same way it widens the sandbox, so the two cannot disagree about which
+ *   variables a command is allowed to see.
+ *
+ * Best effort in the same way the rest of the command analysis is: a name built
+ * at runtime (`eval`, `base64 | sh`) is not a literal `$NAME` and is not found.
+ *
+ * @param {import('./context.mjs').HookContext} ctx
+ * @param {import('./command-safety.mjs').CommandAnalysis} analysis
+ * @returns {string | null}
+ */
+export function environmentExposure(ctx, analysis) {
+  for (const segment of analysis.segments) {
+    const what = printsEnvironment(segment.argv);
+    if (what) return what;
+  }
+  const passThrough = ctx.config.ownSandboxEnvPassThrough ?? [];
+  const env = ctx.env ?? {};
+  for (const name of analysis.variables ?? []) {
+    if (envNameAllowed(name, passThrough)) continue;
+    if (!Object.hasOwn(env, name)) continue;
+    return `$${name}, a name the sandbox environment allowlist does not pass through`;
+  }
+  return null;
+}
+
+/**
  * Antigravity's own conversation logs (…/brain/<id>/.system_generated/…) are the
  * reviewer's evidence; forging a "user" message there must be impossible.
  */
@@ -658,23 +704,34 @@ function classifyCommand(ctx, state = {}) {
   // sandbox — naming a store is enough.
   const credential = credentialArgument(ctx, analysis, ctx.args.Cwd, { hiddenBySandbox: ctx.ownSandbox.active && !bypass });
   const credentialNote = credential ? ` The command names ${credential}, a location that commonly holds credentials or secrets.` : '';
+  // Reading the environment is a credential read that names no path. It is only
+  // a question where nothing rebuilds that environment for the command: with the
+  // own sandbox's `--clearenv` or the `commandEnv: "scrub"` rewrite in force the
+  // command sees the allowlist, and reviewing it would cost a prompt for a read
+  // that cannot happen. An escalated command is judged with its environment
+  // intact, which is part of what escalation means.
+  const envExposure = ctx.envScrubbed && !bypass ? null : environmentExposure(ctx, analysis);
+  const envNote = envExposure
+    ? ` The command reads ${envExposure}: the hook inherits the environment agy was started with, which commonly holds exported API keys, and nothing rebuilds it for this command.`
+    : '';
 
   const rules = evaluateRules(analysis, ctx.config.rules);
   if (rules.decision === 'forbidden') {
     return deny('rule-forbidden', `autoagy: blocked by rule ${describeRule(rules.rule)} (matched \`${rules.argv.join(' ')}\`).`);
   }
   if (rules.decision === 'prompt') {
-    return review('rule-prompt', `Matches a rule that requires approval: ${describeRule(rules.rule)}.${selfNote}${credentialNote}`);
+    return review('rule-prompt', `Matches a rule that requires approval: ${describeRule(rules.rule)}.${selfNote}${credentialNote}${envNote}`);
   }
-  if (rules.decision === 'allow' && !selfNote && !credential) return allow('rule-allow', describeRule(rules.rule));
+  if (rules.decision === 'allow' && !selfNote && !credential && !envExposure) return allow('rule-allow', describeRule(rules.rule));
 
   if (bypass) {
-    return review('sandbox-escalation', `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}${credentialNote}`);
+    return review('sandbox-escalation', `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}${credentialNote}${envNote}`);
   }
   // The sandbox may mount the conversation's artifact directory writable, so
   // never wave through commands that touch autoagy or the conversation logs.
   if (selfNote) return review('touches-security-controls', selfNote.trim());
   if (credential) return review('credential-read', credentialNote.trim());
+  if (envExposure) return review('environment-read', envNote.trim());
   // Starting another Antigravity is never routine: whether these hooks are
   // loaded at all is decided by that instance's own configuration and
   // environment, and this call can set both. Placed after the categories above

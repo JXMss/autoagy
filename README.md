@@ -94,7 +94,7 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 
   注意两点。一是这些变量（包括 `PATH` 和 `HOME`）的值会逐字写进改写后的命令行（`--setenv NAME VALUE`），而改写后的参数是 agent 能看到的内容，所以**白名单和 `ownSandboxEnvPassThrough` 里都不要放密钥**。二是 autoagy **不会**过滤 `PATH`：沙箱内工作区是可写且可执行的，命令本来就能按路径运行工作区里的任何文件，过滤 `PATH` 买不到任何隔离，只会让 `.venv/bin`、`node_modules/.bin` 里的工具找不到或用错解释器。真正危险的是**沙箱外**的命令通过工作区里的 `PATH` 目录解析到被改过的可执行文件——那条路会送审（见「已知限制」里的 `command-from-writable-root`）。
 
-  这个沙箱不生效时（macOS、Windows、没装 bwrap），上面那句 `printenv` 就是免审的。所以 `printenv`、裸 `env`、参数里带 `$变量` 的命令，以及 `/proc/*/environ`、`/proc/*/cmdline` 现在都会送审——但白名单里其它命令仍可能间接读到环境，见「已知限制」。
+  这个沙箱不生效时（macOS、Windows、没装 bwrap），命令拿到的就是 hook 继承来的那份环境——**注意 Antigravity 自己的终端沙箱并不清环境**，所以「有沙箱」不等于读不到。判据因此不是「有没有沙箱」，而是**这条命令的环境有没有被重建**：只有 autoagy 自己的沙箱（`--clearenv`）和 `commandEnv.mode: "scrub"`（`env -i`）会重建它。两者都不生效时，读环境按凭据读取处理，送审的有：`printenv`、裸 `env`、`ps` 和 `jq` 取环境的写法，以及**命令展开的任何 `$变量`，只要这个名字不在沙箱白名单里、而继承来的环境里确实有它**。所以 `$PATH`、`$HOME` 照常免审，循环里的 `$f` 这种不在环境里的名字也照常，`$OPENAI_API_KEY` 和 `$JAVA_HOME` 送审——判据就是「沙箱会不会把这个变量传进去」，`ownSandboxEnvPassThrough` 同时放宽两边。动态拼出来的名字（`eval`、`base64 | sh`）仍然拦不住，见「已知限制」。
 
 工作区里还不存在的受保护目录（比如不是 git 仓库时的 `.git`）：`--ro-bind` 对不存在的路径会直接跳过，而工作区是可写的，沙箱里的命令本来可以把它建出来，等它被别的工具在沙箱外加载。所以这类路径会被就地挂一个只读空 tmpfs。副作用：命令执行的那一瞬间，工作区里会短暂出现一个空的 `.agents` 之类的目录（Codex 用同样的做法）。
 
@@ -182,6 +182,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | 编辑工作区外的文件，或 `.git`、`.agents`、`~/.gemini` 等 | 审核 |
 | 编辑 autoagy 自己的配置/插件目录 | 直接拒绝（防止 agent 关掉自己的监管） |
 | 沙箱内的命令 | 放行（Linux 上改写为在 autoagy 自己的沙箱里运行）；破坏性命令（强制 `rm`、`git reset --hard`、`git clean -f`、`find -delete`……）审核 |
+| 读进程环境的命令（`printenv`、裸 `env`、`ps auxe`、`jq env`，或展开一个沙箱白名单之外、而环境里确实存在的 `$变量`） | 审核——除非这条命令的环境已被重建（autoagy 自己的沙箱，或 `commandEnv.mode: "scrub"`），那时它读不到东西，不送审 |
 | `BypassSandbox: true` 的命令、`notebook_execution` | 审核 |
 | 无沙箱环境（关闭沙箱或 `--dangerously-skip-permissions`） | 已知只读命令放行，其余审核 |
 | `invoke_subagent` 启动不继承 customizations、又带工具的自定义 agent | 审核（这种 agent 的工具调用不经过 autoagy） |
@@ -213,7 +214,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 ## 已知限制
 
 - **没有启用 autoagy 自己的沙箱时**（macOS、Windows、没装 bubblewrap、IDE 没设 `ownSandbox: "on"`），沙箱内的命令仍然能写 `.git`（植入 git hook）和对话日志（伪造审核模型看到的用户消息）。autoagy 能做的只有把命令里字面出现 `.system_generated`、autoagy 自身路径或凭据位置的命令送审——这是原始命令行上的子串匹配，变量拼接或 base64 之类可以绕过，而且事后没有任何完整性校验能发现日志被改过。**这不是「和 Linux 上差不多」，而是明显更弱**，也不能靠配置补上。审核模型现在会收到一行明确的提示，知道在此配置下不能把 transcript 里的用户发言当作已确立的授权。
-- **autoagy 自己的沙箱不生效时，环境变量仍可能被读到。** hook 继承的是 agy 的环境，里面通常有你 export 的 API key。会送审的：`printenv`、裸 `env`、参数里带 `$变量` 的命令、`ps` 里取环境变量的写法（`ps auxe`、`ps eww`、`-E`、`-o env`；`ps -ef` 是「所有进程」，不受影响）、`jq` 的 `env` 与 `$ENV` 内建，以及 **PowerShell 的 `Env:` 提供程序**——后者按**参数**判定而不是按命令名（`ls`、`cat`、`type` 是那两个 cmdlet 的别名，按名字列的白名单永远列不全自己的别名），所以 `ls Env:`、`cat Env:\OPENAI_API_KEY` 一样送审。还有 `/proc/<pid>/environ`、`/proc/<pid>/cmdline` 和对 `/proc` 或其中目录做遍历的搜索（`grep_search /proc`、`grep -r /proc`）。这是一份已知写法的清单，不是证明：白名单里还没被审到的写法、或工具新版本新加的取值方式，仍可能漏过去。真正的缓解只有 autoagy 自己的沙箱（`--clearenv`，并给命令一个私有的 /proc），或者不要把密钥放在环境里，改用文件或密钥管理器。没有沙箱的平台可以打开 `commandEnv.mode: "scrub"`，把命令改写到 `env -i` 下运行、环境按同一份白名单重建——那是从"枚举写法"换成"闭合集合"，不依赖上面这份清单；它的自检失败时会自动停用并告警一次，不会假装还在 scrub。（**Windows 例外**：没有 `env` 可用，这条改写跑不起来，那里只有上面这份清单。）
+- **环境变量：判据是「这条命令的环境有没有被重建」，不是「有没有沙箱」。** hook 继承的是 agy 的环境，里面通常有你 export 的 API key，而 Antigravity 自己的终端沙箱**不清环境**——只有 autoagy 自己的沙箱（`--clearenv`）和 `commandEnv.mode: "scrub"`（`env -i`）会重建它。两者都不生效时（macOS、Windows、没装 bwrap、IDE 没设 `ownSandbox: "on"`，且 `commandEnv` 仍是默认的 `inherit`），这些会送审：`printenv`、裸 `env`、`ps` 里取环境变量的写法（`ps auxe`、`ps eww`、`-E`、`-o env`；`ps -ef` 是「所有进程」，不受影响）、`jq` 的 `env` 与 `$ENV` 内建、**PowerShell 的 `Env:` 提供程序**（按**参数**判定而不是按命令名——`ls`、`cat`、`type` 是那两个 cmdlet 的别名，按名字列的白名单永远列不全自己的别名，所以 `ls Env:`、`cat Env:\OPENAI_API_KEY` 一样送审）、`/proc/<pid>/environ` 与 `/proc/<pid>/cmdline`、对 `/proc` 或其中目录做遍历的搜索（`grep_search /proc`、`grep -r /proc`），以及**命令展开的任何 `$变量`，只要那个名字不在沙箱白名单里而环境里确实有它**（包括 `bash -c`、不带引号的 heredoc 这类外层看不见的位置）。最后这条把「读环境」从枚举命令名换成了枚举变量名，但**仍然不是证明**：运行时拼出来的名字拦不住（`eval`、`base64 | sh`、`${X}${Y}`），白名单里某个命令新版本新增的取值方式也一样。真正的缓解是 autoagy 自己的沙箱，或者在没有它的平台上打开 `commandEnv.mode: "scrub"`（把命令改写到 `env -i` 下、环境按同一份白名单重建——那才是闭合集合；自检失败时会自动停用并告警一次，不会假装还在 scrub），再或者不要把密钥放在环境里。（**Windows 例外**：没有 root 所有的 `env` 可用，这条改写跑不起来，那里只有上面这份清单。）
 - **Windows 上从设置文件推断沙箱状态已被停用**：Windows 读不到 agy 进程的参数，`--dangerously-skip-permissions` 无法识别，而 `autoagy setup` 写进设置文件的那两个值正是检查所依据的。所以那里不再声称「沙箱有效」，而是按无沙箱处理——后果是不带沙箱的普通命令（`npm test`、`ls`、`curl`）从免审变成送审。同样因为读不到启动参数，Windows 上**弹窗一律改为拒绝**：那个标志无法排除，弹窗可能被静默自动同意，宁可不问。
 - **沙箱外的已知只读命令要看它解析到哪里。** autoagy 自己的沙箱不跑的时候（macOS、Windows、没装 bwrap），命令用的是继承来的 `PATH`，很多开发环境会包含 `.venv/bin`、`node_modules/.bin` 这类目录——都在可写根内，改动免审。已知只读的白名单只比较 basename，所以 `ls` 会被当作安全的，哪怕实际执行的是 agent 刚写进 `node_modules/.bin` 的那个 `ls`。现在这条链会被送审：无沙箱时，如果命令解析到的文件落在可写根内，就不放行（`command-from-writable-root`）。代价是这类环境里从 `.venv/bin` 调工具会多一次审核——这是刻意的，因为那正是「先写后执行」成立的地方。autoagy 自己的沙箱内不问这个问题：沙箱已经限定了任何二进制能碰到什么。
 - Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问（这是为保住沙箱网络隔离做的取舍）。

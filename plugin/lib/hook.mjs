@@ -12,7 +12,7 @@ import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext, HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
-import { confinedCommandLine, scrubbedCommandLine, envScrubDisabled, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
+import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
 import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat } from './state.mjs';
@@ -143,8 +143,10 @@ export function withOwnSandbox(output, ctx) {
  * actions, and the environment is part of what that means.
  */
 function withScrubbedEnv(output, ctx) {
-  if (ctx.config.commandEnv?.mode !== 'scrub') return output;
-  if (envScrubDisabled(ctx.autoagyHome, ctx.hostBuild)) return output;
+  // The same question the policy asked before allowing the command: it decided
+  // not to review a read of the environment because this rewrite was going to
+  // take that environment away, so the two must not be able to disagree.
+  if (!ctx.envScrubbed) return output;
   const commandLine = scrubbedCommandLine(ctx, ctx.args.CommandLine);
   if (!commandLine) return output;
   if (ctx.stepIdx !== null) {

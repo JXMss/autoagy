@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { autoagyHome } from './config.mjs';
 import { toAbsolute, uniquePaths, expandHome, expandAnchoredGlob, resolveReal, findExecutable } from './paths.mjs';
-import { detectOwnSandbox, probeBwrap, hostBuildId } from './confine.mjs';
+import { detectOwnSandbox, probeBwrap, hostBuildId, envBinaryPath, envScrubDisabled } from './confine.mjs';
 
 export const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -352,6 +352,26 @@ export class HookContext {
     return this.memo('homeControlPaths', () =>
       uniquePaths([path.join(this.home, '.gemini'), path.join(this.home, '.codex'), path.join(this.home, '.claude')]),
     );
+  }
+
+  /**
+   * Whether a command that is not asking to escalate gets an environment built
+   * from the sandbox allowlist rather than the one agy was started with.
+   *
+   * Two mechanisms do it and they are the only two: the own sandbox's
+   * `--clearenv`, and the `commandEnv: "scrub"` rewrite into `env -i`. The
+   * second needs a trusted `env` to exist and its own self-check to still hold,
+   * so both are asked here rather than trusting the setting alone. Escalated
+   * commands are out of scope: they are reviewed as full-privilege actions, and
+   * the environment is part of what that means.
+   */
+  get envScrubbed() {
+    return this.memo('envScrubbed', () => {
+      if (this.ownSandbox.active) return true;
+      if (this.config.commandEnv?.mode !== 'scrub') return false;
+      if (!envBinaryPath()) return false;
+      return !envScrubDisabled(this.autoagyHome, this.hostBuild);
+    });
   }
 
   /** Protected metadata directories at the top of each workspace root. */

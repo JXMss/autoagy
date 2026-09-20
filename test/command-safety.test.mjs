@@ -7,6 +7,7 @@ import {
   executableName,
   unwrapCommand,
   shellScriptOf,
+  printsEnvironment,
 } from '../plugin/lib/command-safety.mjs';
 import { MAX_NESTING_DEPTH } from '../plugin/lib/shell.mjs';
 
@@ -231,4 +232,25 @@ test('helpers', () => {
   const argvs = analysis.segments.map((s) => s.argv.join(' '));
   assert.ok(argvs.includes('git status'));
   assert.ok(argvs.includes('rm -rf x'));
+});
+
+test('commands that hand over the process environment', () => {
+  const says = (cmd) => Boolean(printsEnvironment(analyzeCommandLine(cmd).segments[0].argv));
+  for (const cmd of ['printenv', 'printenv PATH', 'env', 'env -u FOO', 'ps auxe', 'ps eww', 'ps -E', 'ps -o pid,env', 'jq env', "jq -rn '$ENV'"]) {
+    assert.equal(says(cmd), true, cmd);
+  }
+  // Read-only uses of the same tools, and the forms that run something else or
+  // start from an empty environment, are not.
+  for (const cmd of ['env -i', 'env -i ls', 'env A=1 ls', 'ls', 'ps -ef', 'ps aux', 'jq . file.json', 'jq .environment x']) {
+    assert.equal(says(cmd), false, cmd);
+  }
+});
+
+test('the variables a command line expands are collected through every nesting', () => {
+  const names = (cmd) => [...analyzeCommandLine(cmd).variables].sort();
+  // A nested script hides the reference from the outer line; the analysis follows it.
+  assert.deepEqual(names(`bash -c 'echo $SECRET'`), ['SECRET']);
+  assert.deepEqual(names(`sudo env A=1 sh -c "printf %s ${'${SECRET}'}"`), ['SECRET']);
+  assert.deepEqual(names('cat <<EOF\n$SECRET\nEOF\n'), ['SECRET']);
+  assert.deepEqual(names('echo hello'), []);
 });

@@ -23,8 +23,11 @@ const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/;
  *   heredocs: { delimiter: string, body: string, quoted: boolean }[],
  *   background: boolean, nested: boolean, depth: number,
  * }} Command
- * @typedef {{ commands: Command[], features: Set<string>, error: string | null }} ParseResult
+ * @typedef {{ commands: Command[], features: Set<string>, variables: Set<string>, error: string | null }} ParseResult
  */
+
+/** The names a `$NAME` or `${NAME…}` reference would expand. */
+const VARIABLE_REFERENCE_RE = /(?<!\\)\$\{?#?([A-Za-z_][A-Za-z0-9_]*)/g;
 
 /**
  * Parses a shell script.
@@ -35,7 +38,7 @@ const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/;
 export function parseShell(source, depth = 0) {
   const parser = new Parser(String(source ?? ''), depth);
   parser.run();
-  return { commands: parser.commands, features: parser.features, error: parser.error };
+  return { commands: parser.commands, features: parser.features, variables: parser.variables, error: parser.error };
 }
 
 function newCommand() {
@@ -52,6 +55,10 @@ class Parser {
     this.commands = [];
     this.nestedCommands = [];
     this.features = new Set();
+    // The environment variable names the script would expand. The policy asks
+    // this because the value of a name the sandbox does not pass through is a
+    // value the command could only have got from the environment agy inherited.
+    this.variables = new Set();
     this.error = null;
     this.cur = newCommand();
     this.pendingHeredocs = [];
@@ -435,7 +442,11 @@ class Parser {
         return { text: src.slice(i), dynamic: true, end: this.n };
       }
       this.features.add('variable');
-      this.scanForSubstitutions(src.slice(i + 2, end - 1));
+      const inner = src.slice(i + 2, end - 1);
+      // `${NAME}`, `${#NAME}`, `${NAME:-default}`: the expanded name is the leading word.
+      const name = /^#?([A-Za-z_][A-Za-z0-9_]*)/.exec(inner);
+      if (name) this.variables.add(name[1]);
+      this.scanForSubstitutions(inner);
       return { text: src.slice(i, end), dynamic: true, end };
     }
     if (next === "'") {
@@ -464,6 +475,7 @@ class Parser {
       let j = i + 1;
       while (j < this.n && /[A-Za-z0-9_]/.test(src[j])) j++;
       this.features.add('variable');
+      this.variables.add(src.slice(i + 1, j));
       return { text: src.slice(i, j), dynamic: true, end: j };
     }
     if (next !== undefined && /[0-9@*#?$!-]/.test(next)) {
@@ -633,8 +645,18 @@ class Parser {
       const body = lines.join('\n');
       const owner = doc.owner.finished ?? doc.owner;
       owner.heredocs.push({ delimiter: doc.delimiter, body, quoted: doc.quoted });
-      if (!doc.quoted) this.scanForSubstitutions(body);
+      // An unquoted heredoc expands, so its body can name a variable without any
+      // command line ever showing it: `cat <<EOF` … `$OPENAI_API_KEY` … `EOF`.
+      if (!doc.quoted) {
+        this.collectVariables(body);
+        this.scanForSubstitutions(body);
+      }
     }
+  }
+
+  /** Records the variable names `text` would expand (heredoc bodies, expansion interiors). */
+  collectVariables(text) {
+    for (const match of String(text).matchAll(VARIABLE_REFERENCE_RE)) this.variables.add(match[1]);
   }
 
   /** Finds $(...) and `...` inside text that the shell will expand. */
@@ -681,6 +703,7 @@ class Parser {
     }
     const sub = parseShell(script, this.depth + 1);
     for (const feature of sub.features) this.features.add(feature);
+    for (const name of sub.variables) this.variables.add(name);
     if (sub.error) this.fail(sub.error);
     for (const command of sub.commands) {
       command.nested = true;

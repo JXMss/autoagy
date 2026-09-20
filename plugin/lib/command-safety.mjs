@@ -182,7 +182,7 @@ function findExecCommands(argv) {
  * @typedef {{ argv: string[], depth: number, via: string | null, command: import('./shell.mjs').Command | null }} Segment
  * @typedef {{
  *   source: string, parsed: import('./shell.mjs').ParseResult, segments: Segment[],
- *   features: Set<string>, error: string | null, tooDeep: boolean,
+ *   features: Set<string>, variables: Set<string>, error: string | null, tooDeep: boolean,
  * }} CommandAnalysis
  */
 
@@ -195,6 +195,9 @@ function findExecCommands(argv) {
 export function analyzeCommandLine(source) {
   const parsed = parseShell(source);
   const features = new Set(parsed.features);
+  // Every variable name the line would expand, including the ones only a nested
+  // script or an unquoted heredoc names.
+  const variables = new Set(parsed.variables);
   const segments = [];
   let tooDeep = features.has('too-deep');
   let error = parsed.error;
@@ -212,6 +215,7 @@ export function analyzeCommandLine(source) {
     if (script !== null) {
       const sub = parseShell(script);
       for (const f of sub.features) features.add(f);
+      for (const v of sub.variables) variables.add(v);
       if (sub.error) error = error ?? sub.error;
       for (const c of sub.commands) visit(c.argv, depth + 1, executableName(argv[0]), c);
     }
@@ -223,11 +227,13 @@ export function analyzeCommandLine(source) {
       for (const doc of command.heredocs) {
         const sub = parseShell(doc.body);
         for (const f of sub.features) features.add(f);
+        for (const v of sub.variables) variables.add(v);
         for (const c of sub.commands) visit(c.argv, depth + 1, executableName(argv[0]), c);
       }
       for (const redirect of command.redirects) {
         if (redirect.op === '<<<') {
           const sub = parseShell(redirect.target);
+          for (const v of sub.variables) variables.add(v);
           for (const c of sub.commands) visit(c.argv, depth + 1, executableName(argv[0]), c);
         }
       }
@@ -236,7 +242,7 @@ export function analyzeCommandLine(source) {
 
   for (const command of parsed.commands) visit(command.argv, command.depth, null, command);
   if (tooDeep) features.add('too-deep');
-  return { source, parsed, segments, features, error, tooDeep };
+  return { source, parsed, segments, features, variables, error, tooDeep };
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +452,51 @@ const SAFE_GIT_SUBCOMMANDS = new Set([
 const UNSAFE_GIT_ARGS = new Set(['--output', '-o', '--ext-diff', '--textconv', '--exec', '--upload-pack', '--open-files-in-pager', '-O']);
 
 /**
+ * Whether running `argv` hands the caller the process environment.
+ *
+ * Asked wherever nothing rebuilds that environment for the command: the hook
+ * inherits the environment agy was started with, which normally holds whatever
+ * API keys the user exported, and only autoagy's own sandbox (`--clearenv`) and
+ * the `commandEnv: "scrub"` rewrite (`env -i`) take it away. Where neither is in
+ * force, one unreviewed `printenv` is the whole credential list at once.
+ *
+ * The constraints are about the argument shape, not the tool: `ps` and `jq` are
+ * read-only and stay usable, they just must not be asked for the environment.
+ * PowerShell's `Env:` provider is judged in `credentialArgument` instead, on the
+ * argument as written — a name-based list cannot enumerate its own aliases.
+ *
+ * @param {string[]} argv
+ * @returns {string | null} a description of what it would expose, or null
+ */
+export function printsEnvironment(argv) {
+  const name = executableName(argv[0]);
+  const args = argv.slice(1);
+  if (name === 'printenv') return '`printenv`, which prints the environment';
+  if (name === 'env') {
+    // `env A=b cmd` runs cmd and is judged by what it runs, `env -S ...` by the
+    // script it carries, and `env -i` starts from an empty environment. What is
+    // left — a bare `env`, or one that only unsets a name — prints the rest.
+    if (unwrapCommand(argv) !== null || shellScriptOf(argv) !== null) return null;
+    if (args.some((a) => a === '--ignore-environment' || /^-[A-Za-z]*i/.test(a))) return null;
+    return 'a bare `env`, which prints the environment';
+  }
+  // A bare `e` (GNU: `ps auxe`, `ps eww`) or BSD `-E` shows every process's
+  // environment; an `env` keyword in an output list does the same. `-e` on its
+  // own means "every process" and is common, so `ps -ef` and `ps -eo pid,cmd`
+  // must keep working — hence matching whole words rather than the letter.
+  if (name === 'ps' && args.some((a) => /^[A-Za-z]*[eE][A-Za-z]*$/.test(a) || a === '-E' || /(?:^|,)(?:env|environ)(?:,|$)/.test(a))) {
+    return '`ps` asked for other processes\' environments';
+  }
+  // The `env` builtin is the whole environment; `$ENV` is the same thing.
+  // Case-insensitive because `$ENV` is spelled that way, and matching the word
+  // rather than the letter keeps `.environment` and `.vendor` working.
+  if (name === 'jq' && args.some((a) => /(^|[^A-Za-z0-9_])env([^A-Za-z0-9_]|$)/i.test(a))) {
+    return "jq's `env` / `$ENV` builtin, which is the environment";
+  }
+  return null;
+}
+
+/**
  * True when every command in the line is read-only and the line uses no
  * construct that could write files, hide what runs, or name a value the line
  * does not spell out — an environment variable can hold a credential, and the
@@ -494,22 +545,11 @@ export function isSafeArgv(argv) {
   if (SIMPLE_SAFE.has(name)) return true;
   switch (name) {
     // `ps` and `jq` are read-only and stay on the list, but each can print the
-    // environment as a side effect of an argument — and this list is what runs
-    // unreviewed where autoagy's own sandbox is not in force, with the hook's
-    // inherited environment in reach. The constraints are about the argument
-    // shape, not the tool.
+    // environment as a side effect of an argument. Shared with the policy's
+    // environment check (`printsEnvironment`) so the two cannot drift.
     case 'ps':
-      // A bare `e` (GNU: `ps auxe`, `ps eww`) or BSD `-E` shows every process's
-      // environment; an `env` keyword in an output list does the same. `-e` on
-      // its own means "every process" and is common, so `ps -ef` and
-      // `ps -eo pid,cmd` must keep working — hence matching whole words rather
-      // than looking for the letter.
-      return !args.some((a) => /^[A-Za-z]*[eE][A-Za-z]*$/.test(a) || a === '-E' || /(?:^|,)(?:env|environ)(?:,|$)/.test(a));
     case 'jq':
-      // The `env` builtin is the whole environment; `$ENV` is the same thing.
-      // Case-insensitive because `$ENV` is spelled that way, and matching the
-      // word rather than the letter keeps `.environment` and `.vendor` working.
-      return !args.some((a) => /(^|[^A-Za-z0-9_])env([^A-Za-z0-9_]|$)/i.test(a));
+      return !printsEnvironment(argv);
     case 'Get-ChildItem':
     case 'Get-Content':
     case 'Get-Location':
