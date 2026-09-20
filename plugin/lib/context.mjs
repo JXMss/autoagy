@@ -837,6 +837,84 @@ export class HookContext {
     return (this.config.protectedPaths ?? []).map((p) => expandHome(p, this.home));
   }
 
+  /**
+   * The `protectedPaths` entries as paths the sandbox can mount read-only.
+   *
+   * The setting is documented as "paths that need review to modify", and until
+   * now that was all it did: the edit tools refused them, and (since the round
+   * before this) a command was reviewed when it *named* one. Naming is not the
+   * only way to write a file — measured, `echo pwn > .husky/pre-commit` is
+   * reviewed while `p=.husky/pre-commit; echo pwn > $p` is `allow |
+   * sandboxed-command` — and the class this setting exists for (`.envrc`,
+   * `.husky/`, a `Makefile`, a `postinstall` script: written now, executed later
+   * outside every sandbox) is written by exactly those commands. So the entries
+   * that name a place also become read-only mounts, which is enforcement rather
+   * than recognition.
+   *
+   * Only entries that can name a mount point at all:
+   *
+   * - a leading `**\/` and a trailing `/**` are stripped, since both are how the
+   *   glob engine spells "anywhere" and "and everything under it"; what is left
+   *   is anchored at each writable root's top level — the same rule `.git` and
+   *   `.agents` already follow (`metadataControlPaths`), and the same one Codex's
+   *   `PROTECTED_METADATA_PATH_NAMES` follows;
+   * - an absolute entry names itself, and is kept only when it lies inside a
+   *   writable root: everything else is already read-only in this sandbox, so
+   *   mounting it buys nothing and only lengthens the command line;
+   * - a `**` left in the middle (`src/**\/gen*`) is skipped rather than guessed
+   *   at. `expandAnchoredGlob` stops a walk at the directory holding the
+   *   subtree, so `src/**\/gen*` would hand back `<root>/src` — mounting the
+   *   whole source tree read-only, which is not what the entry asked for and
+   *   would break every build;
+   * - a relative entry with a slash and no `**\/` (`.vscode/tasks.json`) is
+   *   skipped too, because the glob engine anchors a pattern containing `/`
+   *   against the whole absolute path, where it can never match. It names
+   *   nothing today, and mounting it would make the mount and the review
+   *   disagree in the direction that is hardest to explain.
+   *
+   * Existing paths only: `--ro-bind-try` skips what is not there, and the one
+   * mechanism that covers a path that does not exist yet is `.git`'s `--tmpfs`
+   * placeholder, which creates the mount point on the host — for `.envrc` or
+   * `Makefile` that means creating a *directory* by that name in the workspace
+   * before every command, and direnv and make would break on the spot. The
+   * asymmetry is why the boundary sits here, and it is the same boundary
+   * `nestedGitPaths` has: what exists is mounted, what a command creates is
+   * found afterwards. For this class the dangerous act is almost always editing
+   * the file that is already wired up — direnv needs `direnv allow`, husky needs
+   * `core.hooksPath` pointing at it — and a newly created one is still caught by
+   * the command-side check.
+   *
+   * No cap on the result: both factors are user-written configuration
+   * (`protectedPaths` and `writableRoots`) and the agent can change neither, so
+   * there is nothing here for a cap to become an off switch for.
+   */
+  get protectedControlPaths() {
+    return this.memo('protectedControlPaths', () => {
+      const roots = this.writableRoots;
+      if (roots.length === 0) return [];
+      const out = [];
+      for (const raw of this.config.protectedPaths ?? []) {
+        if (typeof raw !== 'string' || raw === '') continue;
+        let core = expandHome(raw, this.home).replace(/\\/g, '/');
+        const anywhere = core.startsWith('**/');
+        if (anywhere) core = core.slice(3);
+        if (core.endsWith('/**')) core = core.slice(0, -3);
+        if (core === '' || core.includes('**')) continue;
+        const absolute = path.isAbsolute(core);
+        if (!absolute && !anywhere && core.includes('/')) continue;
+        for (const root of roots) {
+          const glob = absolute ? core : path.join(root, core);
+          // `isWithin` guards the one way a relative entry could point out of the
+          // root it was joined to (`../../etc/profile`), and for an absolute
+          // entry it is the question being asked.
+          for (const p of expandAnchoredGlob(glob)) if (isWithin(p, root)) out.push(p);
+          if (absolute) break;
+        }
+      }
+      return uniquePaths(out);
+    });
+  }
+
   /** The running agy executable, which self-check results are tied to. */
   get hostBuild() {
     return this.memo('hostBuild', () => hostBuildId(this.host));

@@ -968,3 +968,78 @@ test('protectedPaths reaches commands, not only the edit tools', () => {
   // Without the setting nothing changes.
   assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: `echo pwn > ${husky}` }, { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe })).verdict, 'allow');
 });
+
+test('protectedPaths that name a place are mounted read-only, not merely recognised', () => {
+  // The command-side check reads the command line, so it sees a literal path and
+  // not one the shell assembles: measured, `echo pwn > .husky/pre-commit` is
+  // reviewed while `p=.husky/pre-commit; echo pwn > $p` is `allow |
+  // sandboxed-command`. The class this setting exists for is written by commands,
+  // so the entries that name a place become read-only mounts as well.
+  fs.mkdirSync(path.join(dirs.workspace, '.husky'), { recursive: true });
+  fs.mkdirSync(path.join(dirs.workspace, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dirs.workspace, '.envrc'), 'export A=1');
+  fs.writeFileSync(path.join(dirs.workspace, 'key.pem'), 'x');
+  fs.writeFileSync(path.join(dirs.workspace, 'Makefile'), 'all:');
+  fs.mkdirSync(path.join(dirs.home, 'secrets'), { recursive: true });
+  const mounts = (protectedPaths) =>
+    readOnlyPaths(contextFor(dirs, 'run_command', { CommandLine: 'x' }, { config: configWith({ ownSandbox: 'on', protectedPaths }), bwrapProbe: okProbe }));
+
+  assert.ok(mounts(['**/.husky/**']).includes(path.join(dirs.workspace, '.husky')), 'a basename-anchored glob names the top of each writable root');
+  assert.ok(mounts(['.envrc']).includes(path.join(dirs.workspace, '.envrc')), 'so does a bare name');
+  assert.ok(mounts(['*.pem']).includes(path.join(dirs.workspace, 'key.pem')), 'and a star is matched against the root\'s entries');
+  assert.ok(mounts([path.join(dirs.workspace, 'Makefile')]).includes(path.join(dirs.workspace, 'Makefile')), 'an absolute entry inside a writable root names itself');
+
+  // The ones that cannot name a mount point, each for its own reason.
+  const middle = mounts(['src/**/gen*']);
+  assert.ok(!middle.includes(path.join(dirs.workspace, 'src')), 'a `**` in the middle is skipped, not widened to the directory that holds the subtree');
+  assert.ok(!mounts(['.vscode/tasks.json']).includes(path.join(dirs.workspace, '.vscode', 'tasks.json')), 'a relative entry with a slash matches nothing in the glob engine either');
+  assert.ok(!mounts(['**/../escape']).some((p) => p.includes('escape')), 'and an entry cannot be joined out of the root it was anchored to');
+  // Outside every writable root the sandbox is read-only anyway, so mounting it
+  // would only lengthen the command line.
+  assert.ok(!mounts([path.join(dirs.home, 'secrets')]).includes(path.join(dirs.home, 'secrets')));
+  // Existing paths only: `--ro-bind-try` skips what is not there, and the one
+  // mechanism that covers a missing path creates the mount point on the host —
+  // which for a file name means a directory by that name in the workspace.
+  assert.ok(!mounts(['**/.absent/**']).some((p) => p.includes('.absent')));
+  assert.equal(mounts([]).includes(path.join(dirs.workspace, '.husky')), false, 'and nothing happens without the setting');
+});
+
+test('a protectedPaths entry is read-only inside the real sandbox, however the command spells it', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  // The point of the mount: the command-side check cannot see through `$p`, and
+  // this does not have to. Measured here rather than reasoned about, because the
+  // mount order (writable root bind first, read-only binds after) is what makes
+  // it hold.
+  fs.mkdirSync(path.join(dirs.workspace, '.husky'), { recursive: true });
+  fs.writeFileSync(path.join(dirs.workspace, '.husky', 'pre-commit'), '#!/bin/sh\n');
+  fs.writeFileSync(path.join(dirs.workspace, '.envrc'), 'export A=1');
+  const ctx = new HookContext(payloadFor(dirs, 'run_command', { CommandLine: 'x' }), {
+    config: configWith({ ownSandbox: 'on', protectedPaths: ['**/.husky/**', '.envrc'] }),
+    env: dirs.env,
+    home: dirs.home,
+    host: cliHost(),
+    tempRoots: [dirs.tmp],
+    bwrapProbe: () => real,
+  });
+  const script = [
+    'echo pwn > .husky/pre-commit 2>/dev/null && echo LITERAL=rw || echo LITERAL=ro',
+    'p=.husky/pre-commit; echo pwn > $p 2>/dev/null && echo ASSEMBLED=rw || echo ASSEMBLED=ro',
+    'echo pwn > .husky/new-hook 2>/dev/null && echo NEWFILE=rw || echo NEWFILE=ro',
+    'echo pwn > .envrc 2>/dev/null && echo ENVRC=rw || echo ENVRC=ro',
+    'echo ok > ordinary.txt 2>/dev/null && echo WORKSPACE=rw || echo WORKSPACE=ro',
+    'cat .husky/pre-commit > /dev/null 2>&1 && echo READ=ok || echo READ=denied',
+  ].join('; ');
+  const placeholders = [];
+  const res = spawnSync('/bin/sh', ['-c', confinedCommandLine(ctx, script, { placeholders })], { cwd: dirs.workspace, encoding: 'utf8' });
+  removeControlPlaceholders(placeholders);
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(Object.fromEntries(res.stdout.trim().split('\n').map((l) => l.split('='))), {
+    LITERAL: 'ro',
+    ASSEMBLED: 'ro',
+    NEWFILE: 'ro',
+    ENVRC: 'ro',
+    WORKSPACE: 'rw',
+    READ: 'ok',
+  });
+  assert.equal(fs.readFileSync(path.join(dirs.workspace, '.husky', 'pre-commit'), 'utf8'), '#!/bin/sh\n', 'nothing reached the host');
+  assert.equal(fs.readFileSync(path.join(dirs.workspace, '.envrc'), 'utf8'), 'export A=1');
+});

@@ -382,7 +382,12 @@ export function readOnlyPaths(ctx) {
   // host, while the same write inside the workspace got `Read-only file
   // system`. Two paths to the same decision and the weaker one was the sandbox,
   // which is the shape the fourth round already called a bug.
-  return [...ctx.metadataControlPaths, ...ctx.nestedGitPaths, ...ctx.selfPaths, ...logs].filter(Boolean);
+  // `protectedControlPaths`: the `protectedPaths` entries that name a place,
+  // which is what turns that setting from "a command naming this is reviewed"
+  // into "a command cannot write it" — the class it exists for (`.envrc`,
+  // `.husky/`, a `Makefile`) is written by commands, and a command does not have
+  // to name the path to write it. See the getter for which entries qualify.
+  return [...ctx.metadataControlPaths, ...ctx.nestedGitPaths, ...ctx.protectedControlPaths, ...ctx.selfPaths, ...logs].filter(Boolean);
 }
 
 /**
