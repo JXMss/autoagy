@@ -103,3 +103,44 @@ test('the sweep takes away what nobody redeemed, and leaves what is still live',
   assert.ok(!fs.existsSync(stale.file), 'an unredeemed token is a retry nobody granted');
   assert.ok(fs.existsSync(live.file), 'the one still inside its window survives');
 });
+
+// The turn-end sweep is scoped to one conversation, and the token directory is
+// not: it is shared by every conversation on the machine, while the hook that
+// asks for the sweep runs after every model call. Reaching across would delete
+// a token another conversation minted a moment ago and is about to run.
+test('the turn-end sweep takes only its own conversation\'s tokens', () => {
+  const mine = mintToken(home, { commandLine: 'true', conversation: 'conv-a' });
+  const theirs = mintToken(home, { commandLine: 'true', conversation: 'conv-b' });
+
+  assert.ok(sweepTokens(home, { all: true, conversation: 'conv-a' }) >= 1);
+  assert.ok(!fs.existsSync(mine.file), 'this conversation is done, so its unredeemed token is a retry nobody granted');
+  assert.ok(fs.existsSync(theirs.file), 'the other conversation is mid-call: its token is about to be redeemed');
+
+  // No conversation to attribute means no claim over anyone's token.
+  const unattributed = mintToken(home, { commandLine: 'true', conversation: 'conv-c' });
+  sweepTokens(home, { all: true });
+  assert.ok(fs.existsSync(unattributed.file), 'an unattributable sweep takes nothing');
+});
+
+test('the sweep still takes anything expired, whoever minted it', () => {
+  const expired = mintToken(home, { commandLine: 'true', conversation: 'conv-d', now: Date.now() - TOKEN_TTL_MS - 1000 });
+  sweepTokens(home, { all: true, conversation: 'conv-a' });
+  assert.ok(!fs.existsSync(expired.file), 'past its window it is spent, whatever else is true');
+});
+
+test('a claim an executor is reading right now is left alone', () => {
+  // Claiming is a rename and the read follows it, so the file existing means an
+  // executor is inside it — for milliseconds. The turn-end sweep must not take
+  // it out from under that read.
+  const { name } = mintToken(home, { commandLine: 'true', conversation: 'conv-a' });
+  const claim = path.join(tokenDir(home), `${name}.claimed.99999`);
+  fs.renameSync(path.join(tokenDir(home), `${name}.json`), claim);
+
+  sweepTokens(home, { all: true, conversation: 'conv-a' });
+  assert.ok(fs.existsSync(claim), 'a live claim is not litter');
+
+  // What a killed executor leaves behind is litter, and ages out like one.
+  fs.utimesSync(claim, new Date(Date.now() - TOKEN_TTL_MS - 1000), new Date(Date.now() - TOKEN_TTL_MS - 1000));
+  sweepTokens(home, { all: true, conversation: 'conv-a' });
+  assert.ok(!fs.existsSync(claim));
+});

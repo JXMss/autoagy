@@ -820,10 +820,12 @@ export function handlePostInvocation(payload, options = {}) {
   // one that is merely quiet. Written before the early returns below, so mode
   // "off" and a payload without a conversation id both leave a mark.
   touchHeartbeat(home, 'post-invocation');
-  // A token nobody redeemed is a retry nobody granted. The turn ending is the
-  // point at which none of this turn's calls can still be on their way, so this
-  // one takes them all rather than only the expired ones.
-  sweepTokens(home, { all: true });
+  // A token nobody redeemed is a retry nobody granted, and the end of a turn is
+  // the point at which none of THIS conversation's calls can still be on their
+  // way. Scoped to the conversation on purpose: the token directory is shared,
+  // and another conversation's call can be between its mint and its execution
+  // right now — this hook runs after every model call, not at the end of a turn.
+  sweepTokens(home, { all: true, conversation: conversationId });
   if (!conversationId) return {};
   const state = readState(home, conversationId);
   // Sweep the mount points PostToolUse did not see (a backgrounded command, or

@@ -88,16 +88,42 @@ export function mintToken(autoagyHome, { commandLine, cwd = null, conversation =
   return { name, file, commandLine: `${quote(executorPath(autoagyHome))} ${name}` };
 }
 
+/** A token as written, or null when it cannot be read. */
+function readToken(file) {
+  try {
+    const token = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return token && typeof token === 'object' ? token : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Removes tokens nobody redeemed, and the claim files a killed executor left.
  *
  * A token that outlives its call is a retry the user never granted, which is
- * the same thing `autoagy approve` is deliberately one-shot about. Called when
- * a token is minted (expired ones only) and again when the turn ends (`all`),
- * so neither a crashed hook nor a refused call leaves one lying around.
+ * the same thing `autoagy approve` is deliberately one-shot about. What counts
+ * as outliving it has two answers, and they are not the same:
+ *
+ * - past its expiry, a token is spent whatever else is true, so it goes
+ *   whoever asked and whatever conversation minted it;
+ * - `all` — this conversation's turn is over — takes that conversation's
+ *   unredeemed tokens. It is emphatically not "everything in the directory":
+ *   the directory is shared by every conversation on the machine, and
+ *   `handlePostInvocation` fires after every *model call*, not at the end of a
+ *   turn, so a sweep that reached across conversations would delete a token
+ *   another conversation minted moments ago and is about to run — the executor
+ *   would refuse it as "already used, expired, or never issued", which is the
+ *   wrong reason and a failure nobody could explain. Called with no
+ *   conversation to attribute, `all` removes nothing.
+ *
+ * A `.claimed.<pid>` file belongs to an executor that is reading it right now:
+ * claiming is a rename and the read follows it. It ages out by mtime like a
+ * `.tmp`, never on sight.
+ *
  * @returns {number} how many files were removed
  */
-export function sweepTokens(autoagyHome, { now = Date.now(), all = false } = {}) {
+export function sweepTokens(autoagyHome, { now = Date.now(), all = false, conversation = null } = {}) {
   const dir = tokenDir(autoagyHome);
   let names = [];
   try {
@@ -108,27 +134,21 @@ export function sweepTokens(autoagyHome, { now = Date.now(), all = false } = {})
   let removed = 0;
   for (const name of names) {
     const file = path.join(dir, name);
-    let expired = all;
-    if (all) {
-      // Called when the turn ends, where a surviving token can only be one
-      // nothing redeemed: a call that was refused, or one agy never made. The
-      // command a token carries is run during its own tool call, never later,
-      // so there is nothing in flight for this to take away.
-    } else if (name.endsWith('.json')) {
-      try {
-        expired = now > (JSON.parse(fs.readFileSync(file, 'utf8')).expiresAt ?? 0);
-      } catch {
-        expired = true; // unreadable: nothing can redeem it anyway
-      }
+    let gone = false;
+    if (name.endsWith('.json')) {
+      const token = readToken(file);
+      if (token === null) gone = true; // unreadable: nothing can redeem it anyway
+      else if (now > (token.expiresAt ?? 0)) gone = true;
+      else if (all && conversation !== null && token.conversation === conversation) gone = true;
     } else {
       // A `.claimed.<pid>` or a `.tmp` from a process that died mid-write.
       try {
-        expired = now - fs.statSync(file).mtimeMs > TOKEN_TTL_MS;
+        gone = now - fs.statSync(file).mtimeMs > TOKEN_TTL_MS;
       } catch {
         continue;
       }
     }
-    if (!expired) continue;
+    if (!gone) continue;
     try {
       fs.rmSync(file, { force: true });
       removed++;
