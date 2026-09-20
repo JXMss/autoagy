@@ -467,17 +467,41 @@ export class HookContext {
         this.artifactDir,
         this.appDataDir ? path.join(this.appDataDir, 'scratch') : null,
         ...this.tempRoots,
-        ...(this.config.writableRoots ?? []).map((p) => toAbsolute(p, null, this.home)),
+        // Through `resolveConfigPath`, like every other reader of a
+        // config-supplied path: `loadConfig` has already resolved these, and a
+        // hand-built config (a test, `autoagy review`) gets the same rule rather
+        // than a second one.
+        ...(this.config.writableRoots ?? []).map((p) => resolveConfigPath(p, { home: this.home })),
       ];
       return uniquePaths([...this.workspaceRoots, ...extra]);
     });
   }
 
-  /** Antigravity-managed writable locations outside the workspace (artifacts, scratch, temp). */
+  /**
+   * Antigravity-managed writable locations outside the workspace (artifacts,
+   * scratch, temp).
+   *
+   * Only those: the docstring always said so, but the list used to carry
+   * `config.writableRoots` as well, and the two are answered at different
+   * points. Antigravity's own artifact directory lives *inside* `~/.gemini`, so
+   * it has to be recognised before the home control paths or the agent cannot
+   * write the artifacts it is expected to write. A directory the user declared
+   * is the opposite case: it must not reach in front of those paths, or naming
+   * `~` would switch the protection off for everything under it.
+   */
   get managedWritableRoots() {
     return this.memo('managedWritableRoots', () => {
       const roots = new Set(this.workspaceRoots);
-      return this.writableRoots.filter((p) => !roots.has(p));
+      const declared = new Set(this.declaredWritableRoots);
+      return this.writableRoots.filter((p) => !roots.has(p) && !declared.has(p));
+    });
+  }
+
+  /** The directories `config.writableRoots` names, outside the workspace. */
+  get declaredWritableRoots() {
+    return this.memo('declaredWritableRoots', () => {
+      const roots = new Set(this.workspaceRoots);
+      return uniquePaths((this.config.writableRoots ?? []).map((p) => resolveConfigPath(p, { home: this.home }))).filter((p) => !roots.has(p));
     });
   }
 
@@ -638,6 +662,38 @@ export class HookContext {
       if (this.config.commandEnv?.mode !== 'scrub') return false;
       if (!envBinaryPath()) return false;
       return !envScrubDisabled(this.autoagyHome, this.hostBuild);
+    });
+  }
+
+  /**
+   * Protected metadata directories at the top of every root that holds content
+   * the user or the agent put there: the workspace roots and the ones
+   * `writableRoots` declares.
+   *
+   * Codex applies `.git`/`.agents`/`.codex` to each of its writable roots, not
+   * only to the workspace (§1.1), while autoagy built the same list from the
+   * workspace roots alone — so declaring a directory handed the agent the agent
+   * metadata inside it. Measured with `writableRoots: ["~"]`: `~/.agents` and
+   * `~/.codex` were `allow | write-workspace`.
+   *
+   * Antigravity's own scratch areas (the artifact directory, `scratch/`, the
+   * temp roots) are deliberately not in here. Nothing loads agent configuration
+   * out of them, and the artifact directory lives *inside* `~/.gemini`, so
+   * covering it would protect the one place Antigravity expects the agent to
+   * write.
+   *
+   * Kept apart from `workspaceControlPaths`, which is the sandbox's mount list
+   * (`confine.mjs`): widening that would stage placeholder mounts in a
+   * declared root on every command. This one only answers "may an edit land
+   * here".
+   */
+  get metadataControlPaths() {
+    return this.memo('metadataControlPaths', () => {
+      const paths = [];
+      for (const root of [...this.workspaceRoots, ...this.declaredWritableRoots]) {
+        for (const dir of PROTECTED_WORKSPACE_DIRS) paths.push(path.join(root, dir));
+      }
+      return uniquePaths(paths);
     });
   }
 

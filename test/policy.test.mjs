@@ -768,3 +768,40 @@ test('a command reaching autoagy\'s own files is flagged in all three spellings 
     assert.match(verdict('run_command', { CommandLine: cmd, BypassSandbox: true }, { config }).reason, /security controls/, cmd);
   }
 });
+
+test('a declared writable root does not switch off the protections inside it', () => {
+  // `writableRoots` is a statement about the ordinary files in a directory. It
+  // used to be answered before the home control paths, so naming `~` did not
+  // widen that directory — it turned the protection off for everything under
+  // it, `~/.gemini/antigravity-cli/settings.json` included. That file is where
+  // `detectOwnSandbox` reads the `command(*)` grant, so an edit to it drops
+  // autoagy back to Antigravity's sandbox, where `.git` and the conversation
+  // log are writable.
+  const config = configWith({ writableRoots: [dirs.home, path.join(dirs.root, 'srv')] });
+  const at = (...p) => verdict('write_to_file', { TargetFile: path.join(...p) }, { config });
+  assert.equal(at(dirs.appData, 'settings.json').category, 'write-protected');
+  assert.equal(at(dirs.home, '.codex', 'config.toml').category, 'write-protected');
+  // Codex applies `.git`/`.agents`/`.codex` to every writable root, not only to
+  // the workspace, so a declared root gets them too.
+  assert.equal(at(dirs.home, '.agents', 'x.md').category, 'write-protected');
+  assert.equal(at(dirs.root, 'srv', '.agents', 'y.md').category, 'write-protected');
+  // What the setting is actually for still works, and so does the artifact
+  // directory Antigravity itself expects to be written — it lives inside
+  // `~/.gemini`, so it has to be answered before the home control paths.
+  assert.equal(at(dirs.root, 'srv', 'build', 'out.js').verdict, 'allow');
+  assert.equal(at(dirs.home, 'notes.md').verdict, 'allow');
+  assert.equal(at(dirs.brain, 'task.md').verdict, 'allow');
+});
+
+test('an mcp.allow glob reads like every other glob in the config', () => {
+  // It had its own dialect: `*` crossed `/` and `{a,b}` was matched literally,
+  // so a pattern copied from `credentialPaths` silently matched nothing.
+  const brace = configWith({ mcp: { allow: ['github/{get,list}_*'] } });
+  assert.equal(verdict('call_mcp_tool', { ServerName: 'github', ToolName: 'get_issue' }, { config: brace }).verdict, 'allow');
+  assert.equal(verdict('call_mcp_tool', { ServerName: 'github', ToolName: 'list_prs' }, { config: brace }).verdict, 'allow');
+  assert.equal(verdict('call_mcp_tool', { ServerName: 'github', ToolName: 'create_issue' }, { config: brace }).category, 'mcp');
+  // The forms that already worked keep working.
+  const star = configWith({ mcp: { allow: ['github/get_*'] } });
+  assert.equal(verdict('call_mcp_tool', { ServerName: 'github', ToolName: 'get_issue' }, { config: star }).verdict, 'allow');
+  assert.equal(verdict('call_mcp_tool', { ServerName: 'gitlab', ToolName: 'get_issue' }, { config: star }).category, 'mcp');
+});

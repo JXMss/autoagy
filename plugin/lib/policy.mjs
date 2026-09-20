@@ -14,7 +14,7 @@ import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, print
 import { evaluateRules, describeRule } from './exec-rules.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { envNameAllowed } from './confine.mjs';
-import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, findExecutable } from './paths.mjs';
+import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, globToRegExp, findExecutable } from './paths.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
   'view_file',
@@ -578,12 +578,42 @@ export function classifyWriteTarget(ctx, abs) {
   if (either(ctx.selfPaths)) return 'self';
   if (isConversationLog(ctx, abs) || isConversationLog(ctx, real)) return 'evidence';
   if (matchesAnyGlob(abs, ctx.protectedGlobs, ctx.home) || matchesAnyGlob(real, ctx.protectedGlobs, ctx.home)) return 'protected';
-  // Like Codex's read-only subpaths, .git and agent metadata stay protected in every writable root.
-  if (either(ctx.workspaceControlPaths) || abs.split(/[\\/]/).includes('.git') || real.split(/[\\/]/).includes('.git')) return 'protected';
-  if (ctx.managedWritableRoots.some((root) => isWithin(real, root))) return 'managed';
+  // A `.git` anywhere in the path, before anything else can answer: it is the
+  // one name that is never legitimate inside a scratch area, so keeping it
+  // first means no ordering below can lose it.
+  if (abs.split(/[\\/]/).includes('.git') || real.split(/[\\/]/).includes('.git')) return 'protected';
+  // Roots nest, in both directions, so the innermost one decides. A checkout
+  // under `/tmp` is a workspace inside a managed root, and its `.agents` has to
+  // stay protected; Antigravity's artifact directory is a managed directory
+  // inside `~/.gemini`, and it has to stay writable even when `~` was declared.
+  // Both roots contain the path, so only which one is deeper tells them apart —
+  // and since both contain it, one is a prefix of the other, which makes the
+  // longer string the deeper root.
+  // Membership is judged by where the path really lands, never by how it was
+  // spelled: a symlink inside the workspace that points out of it is outside.
+  // (The protected answers above use `either`, because either spelling
+  // reaching a control surface is enough to protect it.)
+  const deepest = (roots) => roots.filter((root) => isWithin(real, root)).sort((a, b) => b.length - a.length)[0] ?? null;
+  const managedRoot = deepest(ctx.managedWritableRoots);
+  const contentRoot = deepest([...ctx.workspaceRoots, ...ctx.declaredWritableRoots]);
+  // Antigravity owns this directory and expects the agent to write in it.
+  if (managedRoot && (!contentRoot || managedRoot.length > contentRoot.length)) return 'managed';
+  // Like Codex's read-only subpaths, agent metadata stays protected at the top
+  // of every root that holds content — the workspace, and the ones
+  // `writableRoots` declares.
+  if (either(ctx.metadataControlPaths)) return 'protected';
+  // `~/.gemini`, `~/.codex`, `~/.claude`. A declared writable root used to be
+  // answered *before* this, and that did not widen the directory — it switched
+  // the protection off for everything inside it. Measured with
+  // `writableRoots: ["~"]`: `~/.gemini/antigravity-cli/settings.json` was
+  // `allow | write-workspace`, and that file is where `detectOwnSandbox` reads
+  // the `command(*)` grant, so an edit to it drops autoagy back to
+  // Antigravity's sandbox, where `.git` and the conversation log are writable.
+  // A declared writable root is a statement about the ordinary files in a
+  // directory, never about the control surfaces that happen to sit inside it.
   if (either(ctx.homeControlPaths)) return 'protected';
-  if (ctx.workspaceRoots.some((root) => isWithin(real, root))) return 'workspace';
-  return 'outside';
+  if (!contentRoot) return 'outside';
+  return ctx.workspaceRoots.includes(contentRoot) ? 'workspace' : 'managed';
 }
 
 function classifyFileEdit(ctx, state = {}) {
@@ -999,8 +1029,12 @@ export function mcpTarget(ctx) {
 function classifyMcp(ctx) {
   const { server, tool } = mcpTarget(ctx);
   const id = server ? `${server}/${tool}` : tool;
+  // The same glob engine every other path-shaped setting uses. It had its own
+  // dialect here — `*` crossed `/`, and `{a,b}` was matched literally, so
+  // `github/{get,list}_*` silently matched nothing while looking like the
+  // `credentialPaths` patterns it was copied from.
   const allowed = (ctx.config.mcp?.allow ?? []).some((glob) => {
-    const re = new RegExp(`^${String(glob).replace(/[.+^$()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
+    const re = globToRegExp(String(glob));
     return re.test(id) || re.test(ctx.toolName);
   });
   if (allowed) return allow('mcp-allowed', id);
