@@ -792,14 +792,20 @@ function classifyCommand(ctx, state = {}) {
     return deny('rule-forbidden', `autoagy: blocked by rule ${describeRule(rules.rule)} (matched \`${rules.argv.join(' ')}\`).`);
   }
   if (rules.decision === 'prompt') {
-    return review('rule-prompt', `Matches a rule that requires approval: ${describeRule(rules.rule)}.${selfNote}${credentialNote}${envNote}`);
+    return review('rule-prompt', `Matches a rule that requires approval: ${describeRule(rules.rule)}.${selfNote}${credentialNote}${envNote}${plantedNote}`);
   }
   // An operator wrote those rules before there was a plant; the allow is not
   // evidence that anyone looked at this.
   if (rules.decision === 'allow' && !selfNote && !credential && !envExposure && !planted) return allow('rule-allow', describeRule(rules.rule));
 
   if (bypass) {
-    return review('sandbox-escalation', `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}${credentialNote}${envNote}`);
+    // `plantedNote` belongs here most of all: leaving the sandbox is how a hook
+    // planted in a nested repository gets to run at all, and `git commit` with a
+    // `Cwd` inside it names nothing the reviewer could connect on its own.
+    return review(
+      'sandbox-escalation',
+      `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}${credentialNote}${envNote}${plantedNote}`,
+    );
   }
   // The sandbox may mount the conversation's artifact directory writable, so
   // never wave through commands that touch autoagy or the conversation logs.

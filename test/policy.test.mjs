@@ -642,3 +642,21 @@ test('a builtin that prints one variable is judged by the name it prints', () =>
     assert.equal(verdict('run_command', { CommandLine: cmd }, options).verdict, 'allow', cmd);
   }
 });
+
+test('an escalation into a planted repository says so in its reason', () => {
+  const repo = path.join(dirs.workspace, 'planted-sub');
+  fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+  const state = {
+    plantedHooks: [{ path: path.join(repo, '.git'), dir: repo, hooks: [{ name: 'pre-commit', bytes: 20, head: '#!/bin/sh' }], config: [] }],
+  };
+  const escalated = classify(
+    contextFor(dirs, 'run_command', { CommandLine: 'git commit -m x', Cwd: repo, BypassSandbox: true }, { config: configWith({ ownSandbox: 'off' }) }),
+    state,
+  );
+  // Leaving the sandbox is how the hook gets to run at all, and this command
+  // names nothing but `git` — the reviewer cannot make the connection alone.
+  assert.equal(escalated.category, 'sandbox-escalation');
+  assert.match(escalated.reason, /appeared while a sandboxed command ran/);
+  assert.ok(escalated.reason.includes(repo));
+  fs.rmSync(repo, { recursive: true, force: true });
+});
