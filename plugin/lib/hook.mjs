@@ -9,7 +9,7 @@
 //   {} / invalid JSON / non-zero exit / timeout -> the tool call fails
 
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
-import { HookContext, HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
+import { HookContext, HOST_INSPECTABLE_PLATFORMS, newNestedGitPlantings } from './context.mjs';
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
@@ -114,6 +114,19 @@ export function withOwnSandbox(output, ctx) {
       // fail outright, which would break a command that was already approved.
       // Whatever is left over is swept when the turn ends.
       s.pendingConfined[ctx.stepIdx] = commandHash(commandLine);
+      // What the mount list above could not cover. `--ro-bind-try` silently
+      // skips a `.git` that does not exist yet, and the placeholders only ever
+      // cover the top-level protected directories, so a nested repository THIS
+      // command creates is writable inside the sandbox and lands on the host.
+      // Recorded for PostToolUse to compare against; the getter is memoized and
+      // readOnlyPaths walked it a moment ago, so this costs nothing.
+      delete s.pendingNestedGit[ctx.stepIdx];
+      const nested = ctx.nestedGitPaths;
+      // Over the cap, record nothing: a truncated list would make a repository
+      // that was already there look newly created, and the record names that
+      // path on stderr. Skipping the step only returns it to the state before
+      // this check existed.
+      if (nested.length <= MAX_TRACKED_NESTED_GIT) s.pendingNestedGit[ctx.stepIdx] = nested;
       if (placeholders.length) {
         s.pendingPlaceholders[ctx.stepIdx] = placeholders;
         // Recorded rather than recomputed: if the workspace roots this hook
@@ -123,8 +136,13 @@ export function withOwnSandbox(output, ctx) {
         // not be wrong.
         s.pendingLock = workspaceLockFile(ctx);
       }
+      // The two are written together and deleted together: the reader relies on
+      // "no pendingConfined" meaning "no before-set to compare either".
       const steps = Object.keys(s.pendingConfined);
-      for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_CONFINED))) delete s.pendingConfined[step];
+      for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_CONFINED))) {
+        delete s.pendingConfined[step];
+        delete s.pendingNestedGit[step];
+      }
     });
   } else {
     // Nothing to key the cleanup on: do not leave the mount points behind.
@@ -214,7 +232,52 @@ function removePlaceholders(home, conversationId, paths, { attribute = false } =
   updateState(home, conversationId, (s) => markUntrusted(s, { reason: 'protected-path-written', detail }));
 }
 
+/**
+ * Records the `.git` directories a sandboxed command created that hold something
+ * git will run, so later commands touching that repository are reviewed. Deduped
+ * by path: the same repository is one fact, however many commands touch it.
+ */
+function recordPlantedHooks(state, findings, step) {
+  for (const finding of findings) {
+    if ((state.plantedHooks ?? []).some((p) => p.path === finding.path)) continue;
+    state.plantedHooks = [...(state.plantedHooks ?? []), step === null ? finding : { ...finding, step }].slice(-MAX_PLANTED_HOOKS);
+  }
+}
+
+/**
+ * Says so, on the two channels PostToolUse has: the decision log and stderr.
+ *
+ * "Appeared while a sandboxed command ran", not "a sandboxed command created":
+ * a backgrounded command plus a concurrently approved edit can be confused for
+ * one moment, and placeholder-dirty already taught that attribution is the
+ * fragile part. The record is about a fact on disk, and the consequence does not
+ * depend on which writer made it.
+ */
+function reportPlantedHooks(home, ctx, findings) {
+  const first = findings[0];
+  const names = first.hooks.map((h) => h.name).slice(0, 3).join(', ') || first.config.join(', ');
+  const more = findings.length > 1 ? ` (and ${findings.length - 1} more)` : '';
+  appendDecision(home, {
+    conversation: ctx.conversationId,
+    step: ctx.stepIdx,
+    tool: ctx.toolName,
+    verdict: 'planted-git-hook',
+    path: first.path,
+    hooks: first.hooks.map((h) => h.name),
+    config: first.config,
+    error: `${first.path} appeared while a sandboxed command ran and holds content git will execute (${names}); commands touching ${first.dir} are reviewed until \`autoagy trust\``,
+  });
+  process.stderr.write(
+    `autoagy: ${first.path} appeared while a sandboxed command ran and holds content git will execute (${names})${more}. ` +
+      `A command touching ${first.dir} runs it outside every sandbox, so those are now reviewed; check it and run \`autoagy trust\`.\n`,
+  );
+}
+
 const MAX_PENDING_CONFINED = 50;
+// A workspace with more nested repositories than this is not tracked at all; see
+// the recording site for why the list is not truncated instead.
+const MAX_TRACKED_NESTED_GIT = 100;
+const MAX_PLANTED_HOOKS = 20;
 
 /**
  * PostToolUse: the two checks that only the arguments which actually ran can
@@ -269,10 +332,25 @@ function checkConfinedRun(ctx, state = {}) {
   const reclaiming = (state.pendingPlaceholders?.[ctx.stepIdx]?.length ?? 0) > 0;
   const quiet = reclaiming ? lockQuiescent(ctx, { lockFile: state.pendingLock ?? null }) : null;
   const keepPlaceholders = reclaiming && !reclaimAllowed(state, quiet);
+  // A before-set exists only for a command autoagy actually rewrote into its own
+  // sandbox — the same gate as `pendingConfined`, and the only case where a
+  // `.git` could have been created behind a mount. The walk and the file reads
+  // happen outside the lock: they are the slow part, and the lock guards a small
+  // file.
+  const before = state.pendingConfined?.[ctx.stepIdx] ? state.pendingNestedGit?.[ctx.stepIdx] : undefined;
+  const findings = before === undefined ? [] : newNestedGitPlantings(ctx, before);
+  // A command that may still be running is the one case where the workspace is
+  // not yet settled: the walk above can have caught a half-made `.git`, or
+  // missed one the command has not reached yet. Keep the before-set then and let
+  // the turn-end sweep look again. Same rule and same answer as the mount points
+  // follow, so this asks no lock of its own.
+  const keepTracked = before !== undefined && !reclaimAllowed(state, quiet);
   const recorded = updateState(home, ctx.conversationId, (s) => {
     const entry = s.pendingConfined[ctx.stepIdx] ? { hash: s.pendingConfined[ctx.stepIdx], placeholders: s.pendingPlaceholders[ctx.stepIdx] ?? [] } : null;
     delete s.pendingConfined[ctx.stepIdx];
+    if (!keepTracked) delete s.pendingNestedGit[ctx.stepIdx];
     if (!keepPlaceholders) delete s.pendingPlaceholders[ctx.stepIdx];
+    if (findings.length > 0) recordPlantedHooks(s, findings, ctx.stepIdx);
     return entry;
   });
   if (reclaiming && !keepPlaceholders) {
@@ -286,6 +364,7 @@ function checkConfinedRun(ctx, state = {}) {
   }
   if (!keepPlaceholders && recorded) removePlaceholders(home, ctx.conversationId, recorded.placeholders, { attribute: true });
   if (!recorded) return {};
+  if (findings.length > 0) reportPlantedHooks(home, ctx, findings);
   let problem = null;
   if (commandHash(ctx.args.CommandLine) !== recorded.hash) problem = 'agy ran the original command instead of the one autoagy rewrote';
   else if (ctx.args.BypassSandbox !== true) problem = "agy ran the rewritten command without BypassSandbox, inside its own sandbox";
@@ -470,6 +549,9 @@ export async function handlePreToolUse(payload, options = {}) {
   const classification = classify(ctx, {
     escalatedCommandApproved: state.escalatedCommandApproved,
     untrusted: isUntrusted(state),
+    // The .git directories a sandboxed command created with something runnable
+    // in them; a command that touches one is reviewed rather than judged alone.
+    plantedHooks: state.plantedHooks,
   });
   const summary = summarizeAction(ctx.toolName, ctx.args);
   const base = {
@@ -524,7 +606,12 @@ export async function handlePreToolUse(payload, options = {}) {
   let prompt = null;
   try {
     evidence = gatherEvidence(ctx, { rootConversationId: state.rootConversationId });
-    prompt = buildReviewPrompt(ctx, classification, evidence, { approvals, untrusted: state.untrusted, recentEdits: state.recentEdits });
+    prompt = buildReviewPrompt(ctx, classification, evidence, {
+      approvals,
+      untrusted: state.untrusted,
+      recentEdits: state.recentEdits,
+      plantedHooks: state.plantedHooks,
+    });
   } catch (err) {
     result = { status: 'failed', error: `could not build the review request: ${err.message}`, attempts: 0, latencyMs: 0 };
   }
@@ -595,16 +682,25 @@ function sweepPlaceholders(home, conversationId, state, ctx) {
   // backgrounded one — so this is the first moment it is safe.
   if (!reclaimAllowed(state, ctx ? lockQuiescent(ctx, { lockFile: state.pendingLock ?? null }) : null)) return;
   const pending = Object.values(state.pendingPlaceholders ?? {});
-  if (pending.length === 0) return;
+  const tracked = Object.entries(state.pendingNestedGit ?? {});
+  if (pending.length === 0 && tracked.length === 0) return;
+  // The before-sets checkConfinedRun kept because a command might still have
+  // been running. The union is enough for the question asked here — which nested
+  // `.git` are there now that were not there when those commands started — and
+  // it is one walk instead of one per step.
+  const findings = tracked.length > 0 && ctx ? newNestedGitPlantings(ctx, tracked.flatMap(([, before]) => before ?? [])) : [];
   const paths = pending.flatMap((list) => list ?? []);
   updateState(home, conversationId, (s) => {
     s.pendingPlaceholders = {};
+    s.pendingNestedGit = {};
     s.pendingLock = null;
     // The mount points are gone, so the fallback signal that produced them is
     // stale; leaving it set would keep status reporting a conversation as
     // holding mount points it no longer has.
     s.backgroundSuspected = false;
+    if (findings.length > 0) recordPlantedHooks(s, findings, null);
   });
+  if (findings.length > 0) reportPlantedHooks(home, ctx, findings);
   removePlaceholders(home, conversationId, paths);
 }
 

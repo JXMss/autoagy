@@ -10,6 +10,7 @@ import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../pl
 import { parseShell } from '../plugin/lib/shell.mjs';
 import { classify } from '../plugin/lib/policy.mjs';
 import { readState, updateState } from '../plugin/lib/state.mjs';
+import { readDecisions } from '../plugin/lib/log.mjs';
 import { makeSandboxDirs, configWith, payloadFor } from './helpers.mjs';
 
 const dirs = makeSandboxDirs();
@@ -542,5 +543,180 @@ test('a repository nested in the workspace keeps its .git read-only too', () => 
     for (const dir of [nested, path.join(dirs.workspace, 'packages'), path.join(dirs.workspace, 'node_modules')]) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// A nested `.git` the command creates itself (see newNestedGitPlantings).
+//
+// `--ro-bind-try` skips a path that does not exist when the command line is
+// built, and the placeholders only ever cover the top-level protected
+// directories, so the write lands on the host. Nothing can mount the directory
+// in advance — the set of paths that might become repositories is unbounded —
+// so what is checked is the filesystem, after the fact.
+// ---------------------------------------------------------------------------
+
+const plantedConfig = (capture) => ({
+  ownSandbox: 'on',
+  reviewer: { backend: 'mock', mock: { response: 'allow', capture } },
+});
+
+test('a nested .git the command created is found afterwards, and commands touching it are reviewed', async () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  const capture = path.join(dirs.root, 'planted-prompt.jsonl');
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(plantedConfig(capture)));
+  const conversationId = '99999999-0000-4000-8000-p1a17ed00001';
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  const repo = path.join(dirs.workspace, 'sub');
+  const gitDir = path.join(repo, '.git');
+  fs.rmSync(repo, { recursive: true, force: true });
+  fs.rmSync(capture, { force: true });
+  fs.mkdirSync(repo, { recursive: true });
+  try {
+    const args = { CommandLine: `mkdir -p ${gitDir}/hooks` };
+    const started = await handlePreToolUse(payloadFor(dirs, 'run_command', args, { conversationId, stepIdx: 70 }), opts);
+    assert.equal(started.decision, 'allow');
+    // The before-set is what makes "this command created it" answerable, and an
+    // empty list is the hole itself: there was no nested repository yet.
+    assert.deepEqual(readState(home, conversationId).pendingNestedGit[70], []);
+
+    // The effect this test stands in for: the mount skipped the path that did
+    // not exist, so the write reached the host.
+    fs.mkdirSync(path.join(gitDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(gitDir, 'hooks', 'pre-commit'), '#!/bin/sh\necho pwned\n');
+
+    assert.deepEqual(handlePostToolUse(payloadFor(dirs, 'run_command', started.overwrite, { conversationId, stepIdx: 70 }), opts), {});
+    const state = readState(home, conversationId);
+    assert.equal(state.plantedHooks.length, 1);
+    assert.equal(state.plantedHooks[0].path, gitDir);
+    assert.equal(state.plantedHooks[0].dir, repo, 'the repository is what a later git command runs in');
+    assert.equal(state.pendingNestedGit[70], undefined, 'consumed with the rewrite record it was written beside');
+    assert.equal(state.untrusted, null, 'one plant is not grounds for distrusting the whole conversation');
+    assert.ok(
+      readDecisions(home, 10).some((r) => r.verdict === 'planted-git-hook' && r.path === gitDir),
+      'the decision log names the path',
+    );
+
+    // The consequence: the command names the repository, never the hook, and the
+    // reviewer is handed what is in it.
+    const commit = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'git commit -m x', Cwd: repo }, { conversationId, stepIdx: 71 }), opts);
+    assert.equal(commit.decision, 'allow', 'the reviewer allowed it — the point is that it was asked');
+    const prompts = fs.readFileSync(capture, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const prompt = JSON.stringify(prompts[prompts.length - 1]);
+    assert.match(prompt, />>> PLANTED GIT HOOKS START/);
+    assert.ok(prompt.includes(gitDir), 'the reviewer is told which directory');
+    assert.match(prompt, /pre-commit/, 'and what is in it');
+
+    // The control: the rest of the workspace is not dragged along with it. The
+    // walk is by repository, not by "the workspace has a plant in it".
+    const other = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'npm test', Cwd: dirs.workspace }, { conversationId, stepIdx: 72 }), opts);
+    assert.equal(other.decision, 'allow');
+    // Scoped to this repository: the decision log is shared by every test in
+    // this file, and it is the record for THIS path that must not multiply.
+    assert.equal(readDecisions(home, 10).filter((r) => r.verdict === 'planted-git-hook' && r.path === gitDir).length, 1, 'one record, not one per command');
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(path.join(home, 'config.json'), { force: true });
+  }
+});
+
+test('an ordinary repository the command creates is not a planting', async () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(plantedConfig(null)));
+  const conversationId = '99999999-0000-4000-8000-p1a17ed00002';
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  const repo = path.join(dirs.workspace, 'fresh');
+  fs.rmSync(repo, { recursive: true, force: true });
+  fs.mkdirSync(repo, { recursive: true });
+  try {
+    const started = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: `git init ${repo}` }, { conversationId, stepIdx: 73 }), opts);
+    // What `git init` leaves: samples and a plain config, plus a hooks entry
+    // that is a directory rather than a file.
+    fs.mkdirSync(path.join(repo, '.git', 'hooks', 'pre-commit'), { recursive: true });
+    fs.writeFileSync(path.join(repo, '.git', 'hooks', 'pre-commit.sample'), '#!/bin/sh\n');
+    fs.writeFileSync(path.join(repo, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n');
+    handlePostToolUse(payloadFor(dirs, 'run_command', started.overwrite, { conversationId, stepIdx: 73 }), opts);
+    assert.deepEqual(readState(home, conversationId).plantedHooks, []);
+    assert.equal(
+      readDecisions(home, 20).some((r) => r.verdict === 'planted-git-hook' && r.path === path.join(repo, '.git')),
+      false,
+      'creating a repository is routine and must not accuse anyone of anything',
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(path.join(home, 'config.json'), { force: true });
+  }
+});
+
+test('a command that may still be running is looked at again at the end of the turn', async () => {
+  // The walk at PostToolUse races a command agy backgrounded: the `.git` may not
+  // be on disk yet when the tool call returns. The before-set is kept for the
+  // turn-end sweep, which is the same rule the mount points follow.
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(plantedConfig(null)));
+  const conversationId = '99999999-0000-4000-8000-p1a17ed00003';
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  const repo = path.join(dirs.workspace, 'late');
+  const gitDir = path.join(repo, '.git');
+  fs.rmSync(repo, { recursive: true, force: true });
+  fs.mkdirSync(repo, { recursive: true });
+  try {
+    const nested = [gitDir];
+    updateState(home, conversationId, (s) => {
+      s.pendingNestedGit[74] = [];
+      s.backgroundSuspected = false;
+    });
+    // Nothing on disk yet: the sweep finds nothing and says nothing.
+    handlePostInvocation({ conversationId }, opts);
+    assert.deepEqual(readState(home, conversationId).plantedHooks, []);
+
+    // Now the command gets there, after the tool call already returned.
+    updateState(home, conversationId, (s) => {
+      s.pendingNestedGit[74] = [];
+    });
+    fs.mkdirSync(path.join(gitDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(gitDir, 'hooks', 'pre-commit'), '#!/bin/sh\necho pwned\n');
+    handlePostInvocation({ conversationId }, opts);
+    const state = readState(home, conversationId);
+    assert.equal(state.plantedHooks.length, 1);
+    assert.equal(state.plantedHooks[0].path, nested[0]);
+    assert.deepEqual(state.pendingNestedGit, {}, 'the sweep clears what it looked at');
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(path.join(home, 'config.json'), { force: true });
+  }
+});
+
+test('a nested .git is protected once it exists, and not while it is being created', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  // The premise the whole after-the-fact check rests on, and the reason it is a
+  // check rather than a mount: an existing nested `.git` is bound read-only,
+  // while one the command creates itself is not covered by anything.
+  const repo = path.join(dirs.workspace, 'nested-repo');
+  const gitDir = path.join(repo, '.git');
+  const hook = path.join(gitDir, 'hooks', 'pre-commit');
+  const run = (script) => {
+    const ctx = ctxFor({ CommandLine: 'x' }, { probe: () => real });
+    const res = spawnSync('/bin/sh', ['-c', confinedCommandLine(ctx, script)], { cwd: dirs.workspace, encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    return res.stdout.trim();
+  };
+  try {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.mkdirSync(path.join(gitDir, 'hooks'), { recursive: true });
+    const held = run(`printf x > ${JSON.stringify(hook)} 2>/dev/null && echo WROTE=yes || echo WROTE=no`);
+    assert.equal(held, 'WROTE=no', 'an existing nested .git is read-only inside the sandbox');
+    assert.equal(fs.existsSync(hook), false, 'and the write did not reach the host');
+
+    // A fresh context: nestedGitPaths is memoized per HookContext, and this
+    // second command has to be built as if the directory were not there.
+    fs.rmSync(gitDir, { recursive: true, force: true });
+    const made = run(`mkdir -p ${JSON.stringify(path.dirname(hook))} && printf x > ${JSON.stringify(hook)} && echo WROTE=yes`);
+    assert.equal(made, 'WROTE=yes', 'the one the command creates is not covered by a mount');
+    assert.equal(fs.existsSync(hook), true, 'it reached the host — which is why the after-the-fact check exists');
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
   }
 });

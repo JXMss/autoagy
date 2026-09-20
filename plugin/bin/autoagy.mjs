@@ -213,12 +213,24 @@ const flagDescription = (state) => {
   const parts = [];
   if (state.untrusted) parts.push(`untrusted: ${state.untrusted.reason}${state.untrusted.detail ? ` (${state.untrusted.detail})` : ''}`);
   if (state.backgroundSuspected) parts.push('a backgrounded command may still be running, so read-only mount points are retained');
+  const planted = state.plantedHooks ?? [];
+  if (planted.length > 0) {
+    const named = planted.slice(0, 3).map((p) => p.path).join(', ');
+    parts.push(`${planted.length} planted git hook${planted.length === 1 ? '' : 's'} (${named}${planted.length > 3 ? ', …' : ''})`);
+  }
   return parts.join('; ');
 };
 
+/**
+ * A conversation something has to look at by hand. `trust` is the looking: it
+ * releases the mount points, the untrusted mark and the planted-hook records in
+ * one gesture, because all three are claims about the same thing — what is on the
+ * filesystem right now.
+ */
+const flagged = (state) => isUntrusted(state) || state.backgroundSuspected === true || (state.plantedHooks ?? []).length > 0;
+
 function trust(prefix, all, force) {
   const { autoagyHome: home } = managementContext();
-  const flagged = (state) => isUntrusted(state) || state.backgroundSuspected === true;
   const states = listStates(home).filter(({ state }) => flagged(state));
   if (states.length === 0) return console.log('No conversation is flagged.');
   // A bare `autoagy trust` lists rather than clearing: releasing every
@@ -270,6 +282,11 @@ function trust(prefix, all, force) {
       s.untrusted = null;
       s.backgroundSuspected = false;
       s.pendingPlaceholders = {};
+      // Dropped without being inspected: this command has no hook payload, so it
+      // has no workspace to walk. That is the same premise as the mount points —
+      // the user is asserting they have looked at what changed on disk.
+      s.pendingNestedGit = {};
+      s.plantedHooks = [];
     });
     const { removed, dirty } = removeControlPlaceholders(paths);
     if (removed.length) console.log(`  released ${removed.length} read-only mount point(s)`);
@@ -424,11 +441,11 @@ function status() {
   // A flagged conversation keeps its sandbox protection turned up and, while a
   // command may still be running, retains its read-only mount points. Nothing
   // clears that by itself, so it has to be visible somewhere.
-  const flagged = listStates(autoagyHome).filter(({ state }) => isUntrusted(state) || state.backgroundSuspected === true);
-  if (flagged.length > 0) {
+  const flaggedStates = listStates(autoagyHome).filter(({ state }) => flagged(state));
+  if (flaggedStates.length > 0) {
     lines.push('');
     lines.push(`Flagged conversations (\`autoagy trust <id>\` to release):`);
-    for (const { state } of flagged) lines.push(`  ${state.conversationId}  ${flagDescription(state)}`);
+    for (const { state } of flaggedStates) lines.push(`  ${state.conversationId}  ${flagDescription(state)}`);
   }
   console.log(lines.join('\n'));
 }

@@ -547,3 +547,55 @@ test('a prefix-rule allow does not cover reading the environment', () => {
   const config = configWith({ ownSandbox: 'off', rules: [{ pattern: ['printenv'], decision: 'allow' }] });
   assert.equal(verdict('run_command', { CommandLine: 'printenv' }, { config, env: secretEnv }).category, 'environment-read');
 });
+
+// A `.git` a sandboxed command created that holds something runnable. A hook
+// planted there runs outside every sandbox the next time git runs in that
+// repository — a writing git command has to `BypassSandbox` to work at all — so
+// the review is the only lever left. See newNestedGitPlantings.
+const plantedRepo = path.join(dirs.workspace, 'sub');
+const plantedRecord = {
+  path: path.join(plantedRepo, '.git'),
+  dir: plantedRepo,
+  step: 4,
+  hooks: [{ name: 'pre-commit', bytes: 21, head: '#!/bin/sh\necho x\n' }],
+  config: [],
+};
+
+test('a command touching a planted repository is reviewed, whatever the command is', () => {
+  const state = { plantedHooks: [plantedRecord] };
+  const planted = (args, options) => classify(contextFor(dirs, 'run_command', args, options), state);
+
+  // The two allowlist exits are the ways to dodge it, and both are closed. The
+  // known-safe one is inside the `!ctx.sandbox.active` branch, which is why the
+  // check sits above that branch rather than beside the other categories.
+  const noSandbox = { config: configWith({ ownSandbox: 'off', sandbox: 'off' }) };
+  assert.equal(planted({ CommandLine: 'git status' }, noSandbox).verdict, 'allow', 'the same command is known-safe without a plant');
+  assert.equal(planted({ CommandLine: 'ls sub' }, noSandbox).category, 'planted-hook');
+  assert.equal(planted({ CommandLine: 'ls sub' }, noSandbox).verdict, 'review');
+  assert.equal(
+    planted({ CommandLine: 'ls sub' }, { config: configWith({ ownSandbox: 'off', sandbox: 'off', rules: [{ pattern: ['ls'], decision: 'allow' }] }) }).category,
+    'planted-hook',
+    'a prefix rule an operator wrote before the plant is not evidence that anyone looked',
+  );
+
+  // The shape that names nothing at all: the repository is the Cwd.
+  assert.equal(planted({ CommandLine: 'git commit -m x', Cwd: plantedRepo }).category, 'planted-hook');
+  assert.equal(planted({ CommandLine: `cat ${path.join(plantedRepo, '.git', 'hooks', 'pre-commit')}` }).category, 'planted-hook');
+  assert.equal(planted({ CommandLine: `git -C ${plantedRepo} log` }).category, 'planted-hook');
+
+  // The consequence is per repository, not per workspace.
+  assert.equal(planted({ CommandLine: 'npm test', Cwd: dirs.workspace }).verdict, 'allow');
+  assert.equal(planted({ CommandLine: 'ls elsewhere' }).verdict, 'allow');
+
+  // A state file written before this existed has no such field, and nothing
+  // changes for it.
+  assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls sub' }, noSandbox), {}).verdict, 'allow');
+  assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls sub' }, noSandbox), { plantedHooks: [] }).verdict, 'allow');
+});
+
+test('the reason names the repository and says what is in it', () => {
+  const state = { plantedHooks: [plantedRecord] };
+  const out = classify(contextFor(dirs, 'run_command', { CommandLine: 'git commit -m x', Cwd: plantedRepo }, {}), state);
+  assert.match(out.reason, /sub/, 'the repository a command would run in');
+  assert.match(out.reason, /outside every sandbox/);
+});

@@ -44,6 +44,12 @@ function freshState(conversationId) {
     pendingEnvScrub: {},
     // stepIdx -> mount points created for protected directories that were missing, removed after the command.
     pendingPlaceholders: {},
+    // stepIdx -> the nested `.git` directories that existed when the command line
+    // was built, so PostToolUse can tell which of them the command created.
+    // Recorded in the same breath as pendingConfined and deleted with it; a step
+    // with no key is simply not checked, and an empty list is the hole itself —
+    // "there was no nested repository before this command ran".
+    pendingNestedGit: {},
     // The lock file those mount points were protected under, recorded when the
     // command was built so a later reclamation probes the same one.
     pendingLock: null,
@@ -63,6 +69,16 @@ function freshState(conversationId) {
     // gets these because an edit made long ago can fall out of the trimmed
     // transcript, and it cannot otherwise see that a path already moved.
     recentEdits: [],
+    // `.git` directories that appeared while a sandboxed command ran and hold
+    // something git will execute (a hook file, or a config key pointing git at
+    // hooks elsewhere). Deliberately not `untrusted`: husky, pre-commit and
+    // lefthook installs produce exactly this shape in a freshly made nested
+    // repository, and untrusted is session-wide, sticky and only a human can
+    // clear it. The consequence is narrower — commands touching the repository
+    // are reviewed, with the hook content in the review material — and
+    // `autoagy trust` clears it, since that command is the human saying they
+    // have looked at the disk.
+    plantedHooks: [],
     rootConversationId: undefined,
     denials: [],
     approvals: [],

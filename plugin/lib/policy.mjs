@@ -655,6 +655,61 @@ function mentionsSelf(ctx, commandLine) {
 }
 
 /**
+ * The planted-hook record a command would run into, or null.
+ *
+ * A hook planted in a nested `.git` runs outside every sandbox the next time git
+ * runs in that repository — a writing git command has to `BypassSandbox` to work
+ * at all — and a review is the only lever left, because the sandbox cannot mount
+ * a `.git` it had no way to know would exist. That is why the repository is what
+ * gets matched rather than a command name: `{CommandLine: "git commit", Cwd:
+ * "<repo>"}` executes the hook while the line itself names nothing but `git`.
+ *
+ * Two ways in, for that reason. The command line is scanned for the paths as
+ * text (the `mentionsSelf` habit, which is what catches the `~`/`$HOME`
+ * spellings), and every literal argument, redirect target and the call's `Cwd` is
+ * resolved and tested against the repository (the `credentialArgument` habit,
+ * which is what catches a `Cwd` the line never spells out).
+ *
+ * Best effort in the same way the rest of the command analysis is: `cd $d && git
+ * commit` builds the path at runtime and is not found.
+ *
+ * @param {import('./context.mjs').HookContext} ctx
+ * @param {import('./command-safety.mjs').CommandAnalysis} analysis
+ * @param {string|undefined} cwd the call's Cwd
+ * @param {object[]|undefined} planted state.plantedHooks, absent in an old state file
+ * @returns {object | null} the record that matched, so the reason can name it
+ */
+function plantedHookTarget(ctx, analysis, cwd, planted) {
+  if (!Array.isArray(planted) || planted.length === 0) return null;
+  const commandLine = typeof ctx.args.CommandLine === 'string' ? ctx.args.CommandLine : '';
+  const base = typeof cwd === 'string' && cwd ? toAbsolute(cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
+  const words = analysis.segments.flatMap((s) => s.argv.slice(1));
+  for (const command of analysis.parsed.commands) {
+    for (const r of command.redirects) if (!r.op.startsWith('<<')) words.push(r.target);
+  }
+  for (const entry of planted) {
+    if (typeof entry?.path !== 'string' || typeof entry?.dir !== 'string') continue;
+    const needles = new Set([entry.path, entry.dir]);
+    if (entry.dir.startsWith(ctx.home)) {
+      needles.add(`~${entry.dir.slice(ctx.home.length)}`);
+      needles.add(`$HOME${entry.dir.slice(ctx.home.length)}`);
+    }
+    if ([...needles].some((n) => n.length > 3 && commandLine.includes(n))) return entry;
+    // The repository itself is covered by one test: `isWithin` is true for the
+    // equal path, so a command whose Cwd *is* the repository matches too, and so
+    // does one that names a file under its `.git`.
+    if (base && isWithin(base, entry.dir)) return entry;
+    for (const word of words) {
+      const value = word.replace(/^~(?=$|\/)/, ctx.home).replace(/\$\{HOME\}|\$HOME\b/g, ctx.home);
+      if (/[$`]/.test(value)) continue;
+      const abs = toAbsolute(value, base, ctx.home);
+      if (abs && isWithin(abs, entry.dir)) return entry;
+    }
+  }
+  return null;
+}
+
+/**
  * The path a known-safe command would actually run, when it lands inside a
  * writable root.
  *
@@ -715,6 +770,15 @@ function classifyCommand(ctx, state = {}) {
     ? ` The command reads ${envExposure}: the hook inherits the environment agy was started with, which commonly holds exported API keys, and nothing rebuilds it for this command.`
     : '';
 
+  // A planted hook runs outside every sandbox — the writing git command that
+  // reaches it has to `BypassSandbox` to work at all — and nothing can mount a
+  // `.git` that did not exist when the command line was built. So the repository
+  // is handed to the reviewer instead of the command being judged on its own.
+  const planted = plantedHookTarget(ctx, analysis, ctx.args.Cwd, state.plantedHooks);
+  const plantedNote = planted
+    ? ` The command touches ${planted.dir}, where ${planted.path} appeared while a sandboxed command ran. Whatever git will execute from there runs outside every sandbox, and the reviewer has been given what is in it.`
+    : '';
+
   const rules = evaluateRules(analysis, ctx.config.rules);
   if (rules.decision === 'forbidden') {
     return deny('rule-forbidden', `autoagy: blocked by rule ${describeRule(rules.rule)} (matched \`${rules.argv.join(' ')}\`).`);
@@ -722,7 +786,9 @@ function classifyCommand(ctx, state = {}) {
   if (rules.decision === 'prompt') {
     return review('rule-prompt', `Matches a rule that requires approval: ${describeRule(rules.rule)}.${selfNote}${credentialNote}${envNote}`);
   }
-  if (rules.decision === 'allow' && !selfNote && !credential && !envExposure) return allow('rule-allow', describeRule(rules.rule));
+  // An operator wrote those rules before there was a plant; the allow is not
+  // evidence that anyone looked at this.
+  if (rules.decision === 'allow' && !selfNote && !credential && !envExposure && !planted) return allow('rule-allow', describeRule(rules.rule));
 
   if (bypass) {
     return review('sandbox-escalation', `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}${credentialNote}${envNote}`);
@@ -740,6 +806,11 @@ function classifyCommand(ctx, state = {}) {
   if (started) {
     return review('starts-antigravity', `Starts another Antigravity instance (\`${started.argv.join(' ')}\`). Whether autoagy reviews that session depends on configuration and environment this call can choose.`);
   }
+  // Placed above the sandbox branches on purpose, so neither allowlist can wave
+  // it through: `ls sub` is `known-safe-command` where no sandbox confines it,
+  // and that exit is inside the block below. After the categories above, so no
+  // existing verdict changes.
+  if (planted) return review('planted-hook', plantedNote.trim());
   if (!ctx.sandbox.active) {
     if (isKnownSafeCommandLine(analysis)) {
       const shadowed = executableFromWritableRoot(ctx, analysis);

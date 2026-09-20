@@ -70,6 +70,141 @@ export function findNestedGitPaths(root) {
   return out;
 }
 
+// Bounds for judging a `.git` an agent just wrote (see plantedGitContent). The
+// files are agent-controlled, so nothing here may be sized by them: a planted
+// "hook" can be a 1 GB file, and a config can be a device.
+const GIT_HOOK_LIST_MAX = 5;
+const GIT_HOOK_HEAD_BYTES = 400;
+const GIT_CONFIG_MAX_BYTES = 64 * 1024;
+// Matched as *config keys and sections*, not as substrings. `[remote] url =
+// https://host/hooksPath` is not a trigger, and a record that names an innocent
+// repository is a false accusation: it puts the path on stderr and costs the
+// user a review on every command that touches it from then on.
+const GIT_CONFIG_TRIGGERS = [
+  [/^[ \t]*(hooksPath|fsmonitor)[ \t]*=/im, 'hooksPath/fsmonitor'],
+  [/^[ \t]*\[alias([ \t"\]]|$)/im, '[alias]'],
+];
+
+/** The size and the first bytes of a file an agent wrote; never throws. */
+function hookSummary(file) {
+  let fd = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buffer = Buffer.alloc(GIT_HOOK_HEAD_BYTES);
+    const read = fs.readSync(fd, buffer, 0, GIT_HOOK_HEAD_BYTES, 0);
+    return { bytes: fs.fstatSync(fd).size, head: buffer.subarray(0, read).toString('utf8') };
+  } catch {
+    // Raced away, unreadable, or not a file after all.
+    return { bytes: 0, head: '' };
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // already gone
+      }
+    }
+  }
+}
+
+/**
+ * What a `.git` directory holds that would run outside every sandbox the next
+ * time git runs in its repository: a hook file `git init` did not put there (its
+ * own are `*.sample`), or a config key that points git at hooks elsewhere.
+ *
+ * The criterion stops there on purpose. Creating a repository is a routine agent
+ * action and an empty or freshly initialised `.git` must stay unflagged; what
+ * cannot is a file in it that a later git command executes. Where the hook would
+ * be run from — this sandbox or the host — is the caller's question, not this
+ * one's.
+ *
+ * Best effort on a directory an agent wrote: what is named here may be gone by
+ * the time it is read, so nothing throws and a missing `hooks`/`config` is the
+ * normal case.
+ *
+ * @param {string} gitDir
+ * @returns {{ hooks: { name: string, bytes: number, head: string }[], config: string[], hooksMore?: number } | null}
+ *   null when there is nothing runnable in it
+ */
+export function plantedGitContent(gitDir) {
+  const hooks = [];
+  let hooksMore = 0;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(path.join(gitDir, 'hooks'), { withFileTypes: true });
+  } catch {
+    // No hooks directory at all, which is what a bare `git init` leaves when it
+    // does not install the samples either.
+  }
+  for (const entry of entries) {
+    // `isFile()` is false for a symlink and git runs a symlinked hook, so a
+    // plain file check would miss `hooks/pre-commit -> ../../evil.sh` — the
+    // shape a planted hook most likely takes, since the target can live anywhere
+    // the agent can write. Directories are not hooks.
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    if (entry.name.endsWith('.sample')) continue;
+    if (hooks.length >= GIT_HOOK_LIST_MAX) {
+      hooksMore += 1;
+      continue;
+    }
+    hooks.push({ name: entry.name, ...hookSummary(path.join(gitDir, 'hooks', entry.name)) });
+  }
+
+  const config = [];
+  try {
+    const file = path.join(gitDir, 'config');
+    const stat = fs.statSync(file);
+    // Only a small regular file is read; a config that is a symlink to /dev/zero
+    // or a 2 GB file is not this check's problem.
+    if (stat.isFile() && stat.size <= GIT_CONFIG_MAX_BYTES) {
+      const text = fs.readFileSync(file, 'utf8');
+      for (const [pattern, label] of GIT_CONFIG_TRIGGERS) {
+        if (pattern.test(text)) config.push(label);
+      }
+    }
+  } catch {
+    // No config, or not a readable regular file: nothing to judge.
+  }
+
+  if (hooks.length === 0 && config.length === 0) return null;
+  return hooksMore > 0 ? { hooks, config, hooksMore } : { hooks, config };
+}
+
+// Findings per call, so one command that scatters repositories cannot fill the
+// state file with them; the caller does not need the overflow.
+const MAX_PLANTINGS_PER_CALL = 8;
+
+/**
+ * The nested `.git` directories that appeared while a rewritten command ran and
+ * hold something runnable.
+ *
+ * `--ro-bind-try` silently skips a path that does not exist when the command
+ * line is built, and the placeholder mechanism only ever covers the top-level
+ * protected directories — so a `.git` the command creates itself is writable
+ * inside the sandbox and lands on the host. Nothing can mount it in advance (the
+ * set of directories that might become repositories is unbounded), so this is
+ * the after-the-fact half: what the walk found now that the recorded set did not
+ * have.
+ *
+ * @param {import('./context.mjs').HookContext} ctx
+ * @param {string[]} before the nested set recorded when the command was built
+ * @returns {{ path: string, dir: string, hooks: object[], config: string[], hooksMore?: number }[]}
+ */
+export function newNestedGitPlantings(ctx, before) {
+  const known = new Set(before ?? []);
+  const out = [];
+  for (const gitDir of ctx.nestedGitPaths) {
+    if (known.has(gitDir)) continue;
+    const content = plantedGitContent(gitDir);
+    if (!content) continue;
+    // `dir` is the repository a later git command would run in, which is what
+    // the review consequence is keyed on.
+    out.push({ path: gitDir, dir: path.dirname(gitDir), ...content });
+    if (out.length >= MAX_PLANTINGS_PER_CALL) break;
+  }
+  return out;
+}
+
 /** Derives the product app-data dir (e.g. ~/.gemini/antigravity-cli) from hook paths. */
 export function appDataDirFromPayload(payload) {
   for (const candidate of [payload?.artifactDirectoryPath, payload?.transcriptPath]) {
