@@ -198,7 +198,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | MCP（含 `read_resource` / `list_resources` 这类 MCP 资源读取）、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核 |
 | **会话被标记为不可信之后**（见下）的文件编辑和读取文件内容 | 审核；触及监管文件的命令改为直接拒绝 |
 
-被审核的删除命令会附带 autoagy 预先检查的目标事实（是否存在、类型、条目数、是否在工作区内、是否是 git 仓库；路径经过符号链接时，按 `rm` 实际会删除的位置判断，并给出 `resolves_to`），弥补审核模型没有工具、无法像 Codex 那样自己去看的问题。
+被审核的删除命令（`rm`/`rmdir`/`shred`/`unlink`、`git clean`、`git rm -f`、`find -delete`、`truncate`、`dd of=`）会附带 autoagy 预先检查的目标事实（是否存在、类型、条目数、是否在工作区内、是否是 git 仓库；路径经过符号链接时，按 `rm` 实际会删除的位置判断，并给出 `resolves_to`），弥补审核模型没有工具、无法像 Codex 那样自己去看的问题。
 
 ## 会话信任
 

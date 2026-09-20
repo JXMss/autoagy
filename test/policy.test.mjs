@@ -805,3 +805,38 @@ test('an mcp.allow glob reads like every other glob in the config', () => {
   assert.equal(verdict('call_mcp_tool', { ServerName: 'github', ToolName: 'get_issue' }, { config: star }).verdict, 'allow');
   assert.equal(verdict('call_mcp_tool', { ServerName: 'gitlab', ToolName: 'get_issue' }, { config: star }).category, 'mcp');
 });
+
+test('every destructive command the table flags arrives with its targets inspected', () => {
+  // The facts exist because the reviewer has no tools, and the policy tells it
+  // to stay conservative when it cannot establish the scope. `rm` and friends
+  // were inspected; `git clean`, `find -delete` and `git rm -f` were in the
+  // dangerous table but reached the reviewer with nothing to look at — and
+  // those are the routine ones, a clean before a build or a sweep of stale
+  // output, so "conservative because I cannot see" was expensive there.
+  fs.mkdirSync(path.join(dirs.workspace, 'build'), { recursive: true });
+  fs.writeFileSync(path.join(dirs.workspace, 'build', 'a.o'), '');
+  fs.writeFileSync(path.join(dirs.workspace, 'keep.txt'), 'x');
+  const targets = (cmd) => plannedAction(contextFor(dirs, 'run_command', { CommandLine: cmd, Cwd: dirs.workspace })).deletion_targets;
+
+  // A pathspec and a search root are scopes, not files, and the reviewer cannot
+  // tell which it is from the path — so each says so.
+  const [clean] = targets('git clean -xdf');
+  assert.equal(clean.path, dirs.workspace);
+  assert.match(clean.role, /git clean/);
+  assert.equal(clean.type, 'directory');
+  const [found] = targets('find build -name "*.o" -delete');
+  assert.equal(found.path, path.join(dirs.workspace, 'build'));
+  assert.match(found.role, /search root/);
+  // A bare `find -delete` still names the directory it would walk.
+  assert.equal(targets('find -delete')[0].path, dirs.workspace);
+
+  // Plain targets keep the shape they always had, with no role to explain.
+  const [removed] = targets('git rm -f keep.txt');
+  assert.equal(removed.path, path.join(dirs.workspace, 'keep.txt'));
+  assert.equal(removed.type, 'file');
+  assert.equal(removed.role, undefined);
+  assert.equal(targets('truncate -s 0 keep.txt')[0].type, 'file');
+  assert.equal(targets('dd if=/dev/zero of=keep.txt')[0].path, path.join(dirs.workspace, 'keep.txt'));
+  // A git subcommand that removes no path still has nothing to inspect.
+  assert.equal(plannedAction(contextFor(dirs, 'run_command', { CommandLine: 'git reset --hard' })).deletion_targets, undefined);
+});

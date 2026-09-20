@@ -10,7 +10,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, printsEnvironment, printedVariableNames, executableName } from './command-safety.mjs';
+import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, printsEnvironment, printedVariableNames, executableName, gitSubcommand } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { envNameAllowed } from './confine.mjs';
@@ -1076,6 +1076,76 @@ function truncateDeep(value) {
 }
 
 const DELETING_COMMANDS = new Set(['rm', 'rmdir', 'shred', 'unlink']);
+const WINDOWS_REMOVE = new Set(['del', 'erase', 'rd', 'rmdir.exe']);
+
+/** The positional arguments of `argv.slice(1)`, honouring `--`. */
+function positionalArgs(rest, withValue = new Set()) {
+  const out = [];
+  let options = true;
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (options && arg === '--') {
+      options = false;
+      continue;
+    }
+    if (options && arg.startsWith('-') && arg !== '-') {
+      if (withValue.has(arg)) i++;
+      continue;
+    }
+    out.push(arg);
+  }
+  return out;
+}
+
+/**
+ * The paths a destructive command would act on, and what each one is to it.
+ *
+ * The facts exist because the reviewer has no tools: Codex's guardian inspects
+ * a deletion target with read-only calls, so autoagy looks first and hands the
+ * answers over. The list used to be `rm`/`rmdir`/`shred`/`unlink` alone, while
+ * the dangerous-command table has always been wider — so `git clean -xdf`,
+ * `find . -delete` and `git rm -f` reached the reviewer with nothing but their
+ * command line, against a policy that says to stay conservative when the scope
+ * cannot be established. Those three are routine (a clean before a build, a
+ * sweep of stale files), and "conservative because I cannot see" is the most
+ * expensive way to be wrong about them.
+ *
+ * `role` says what the path is when it is not simply the thing being removed —
+ * a search root or a repository is a very different scope, and the reviewer
+ * cannot tell from the path alone.
+ *
+ * @returns {{ arg: string, role?: string }[] | null} null when this command deletes nothing by path
+ */
+function deletionTargetArgs(argv) {
+  const name = executableName(argv[0]);
+  const rest = argv.slice(1);
+  const plain = (args) => args.map((arg) => ({ arg }));
+  if (DELETING_COMMANDS.has(name) || WINDOWS_REMOVE.has(name)) return plain(positionalArgs(rest));
+  // `truncate -s 0 file` discards the contents without removing the file.
+  if (name === 'truncate') return plain(positionalArgs(rest, new Set(['-s', '--size', '-r', '--reference', '-o', '--io-blocks'])));
+  if (name === 'dd') return plain(rest.filter((a) => a.startsWith('of=')).map((a) => a.slice(3)));
+  if (name === 'find') {
+    // The roots are the leading words before the first expression; `-delete`
+    // removes what matches *below* them, so the scope is the subtree.
+    if (!rest.includes('-delete')) return null;
+    const roots = [];
+    for (const arg of rest) {
+      if (arg.startsWith('-') || arg === '(' || arg === '!') break;
+      roots.push(arg);
+    }
+    return (roots.length > 0 ? roots : ['.']).map((arg) => ({ arg, role: 'search root; `-delete` removes matching entries below it' }));
+  }
+  if (name === 'git') {
+    const { subcommand, args } = gitSubcommand(argv);
+    if (subcommand === 'rm') return plain(positionalArgs(args));
+    if (subcommand === 'clean') {
+      const paths = positionalArgs(args);
+      return (paths.length > 0 ? paths : ['.']).map((arg) => ({ arg, role: 'pathspec; `git clean` removes untracked files below it' }));
+    }
+    return null;
+  }
+  return null;
+}
 const MAX_INSPECTED_TARGETS = 10;
 
 /** Expands `~`, `$HOME` and `${HOME}`; returns null when other expansions remain. */
@@ -1095,23 +1165,18 @@ export function inspectDeletionTargets(ctx, commandLine, cwd) {
   const base = typeof cwd === 'string' && cwd ? toAbsolute(cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
   const facts = [];
   for (const segment of analysis.segments) {
-    if (!DELETING_COMMANDS.has(executableName(segment.argv[0]))) continue;
-    let options = true;
-    for (const arg of segment.argv.slice(1)) {
-      if (options && arg === '--') {
-        options = false;
-        continue;
-      }
-      if (options && arg.startsWith('-')) continue;
+    const targets = deletionTargetArgs(segment.argv);
+    if (!targets) continue;
+    for (const { arg, role } of targets) {
       if (facts.length >= MAX_INSPECTED_TARGETS) break;
       const expanded = expandPathArgument(arg, ctx.home);
       if (expanded === null) {
-        facts.push({ argument: arg, note: 'contains variables or globs that autoagy cannot resolve' });
+        facts.push({ argument: arg, ...(role ? { role } : {}), note: 'contains variables or globs that autoagy cannot resolve' });
         continue;
       }
       const abs = toAbsolute(expanded, base, ctx.home);
       if (!abs) {
-        facts.push({ argument: arg, note: 'relative path with unknown working directory' });
+        facts.push({ argument: arg, ...(role ? { role } : {}), note: 'relative path with unknown working directory' });
         continue;
       }
       // What the command actually deletes: symlinks in parent directories are
@@ -1120,7 +1185,7 @@ export function inspectDeletionTargets(ctx, commandLine, cwd) {
       const lexical = abs.length > 1 ? abs.replace(/[\\/]+$/, '') : abs;
       const effective = /[\\/]\.?$/.test(expanded) ? resolveReal(lexical) : path.join(resolveReal(path.dirname(lexical)), path.basename(lexical));
       const roots = ctx.workspaceRoots.flatMap((root) => [root, resolveReal(root)]);
-      const fact = { argument: arg, path: abs, inside_workspace: roots.some((root) => isWithin(effective, root)) };
+      const fact = { argument: arg, ...(role ? { role } : {}), path: abs, inside_workspace: roots.some((root) => isWithin(effective, root)) };
       if (effective !== lexical) fact.resolves_to = effective;
       try {
         const stat = fs.lstatSync(effective);
