@@ -208,6 +208,10 @@ test('mode "ask" prompts the user, mode "off" only asks for what the setup grant
   assert.match(off.reason, /autoagy is off/);
   assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'call_mcp_tool', { ServerName: 'github', ToolName: 'create_issue' }, ws())).decision, 'force_ask');
   assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'browser_click_element', { Index: 3 }, ws())).decision, 'force_ask');
+  // Navigating and the browser subagent are covered by the same execute_url(*)
+  // grant, so mode "off" has to hand them back as well.
+  assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'open_browser_url', { Url: 'https://example.test' }, ws())).decision, 'force_ask');
+  assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'browser_subagent', { Task: 'buy a thing' }, ws())).decision, 'force_ask');
   assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'run_command', { CommandLine: 'rm -rf build' }, ws())), null);
   assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: '/etc/hosts' }, ws())), null);
   assert.deepEqual(runHook('post-invocation', { conversationId: dirs.conversationId }), {});

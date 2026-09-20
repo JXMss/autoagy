@@ -74,7 +74,11 @@ export function offModeOutput(ctx, state = {}) {
     else if (!ctx.sandbox.active && !isKnownSafeCommandLine(String(ctx.args.CommandLine ?? ''))) what = 'a command the terminal sandbox does not confine';
   } else if (name === 'call_mcp_tool' || name.startsWith('mcp_')) {
     what = 'an MCP tool call';
-  } else if (BROWSER_ACTION_TOOLS.has(name)) {
+  } else if (BROWSER_ACTION_TOOLS.has(name) || name === 'open_browser_url' || name === 'browser_subagent') {
+    // Navigating and the browser subagent belong here for the same reason the
+    // clicks do: `execute_url(*)` is one of the grants setup added, and a
+    // subagent driving the browser does its own navigating and clicking, none of
+    // which passes through this hook again.
     what = 'a browser action';
   } else if (state.untrusted && (FILE_EDIT_TOOLS.has(name) || CONTENT_READ_TOOLS.has(name))) {
     // Mode "off" normally has no opinion here, which would leave the setup
