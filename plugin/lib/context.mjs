@@ -669,7 +669,13 @@ export class HookContext {
    * leaves that `.git` as writable as it was before this existed.
    */
   get nestedGitPaths() {
-    return this.memo('nestedGitPaths', () => uniquePaths(this.workspaceRoots.flatMap((root) => findNestedGitPaths(root))));
+    // The declared roots too, for the same reason the mount list now covers
+    // their metadata: a hook planted in a repository under one of them runs on
+    // the next git command there, and a writing git command has to leave this
+    // sandbox to work at all — so it runs outside it.
+    return this.memo('nestedGitPaths', () =>
+      uniquePaths([...this.workspaceRoots, ...this.declaredWritableRoots].flatMap((root) => findNestedGitPaths(root))),
+    );
   }
 
   /**

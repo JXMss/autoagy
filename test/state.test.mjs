@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, touchHeartbeat, readHeartbeat } from '../plugin/lib/state.mjs';
+import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings } from '../plugin/lib/state.mjs';
 import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
 import { appendDecision } from '../plugin/lib/log.mjs';
 import { PLUGIN_DIR } from '../plugin/lib/context.mjs';
@@ -94,4 +94,21 @@ test("autoagy's own directories are not readable by other users on the machine",
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('a configuration warning is reported once per distinct set', () => {
+  // `loadConfig` drops a setting that cannot work, and until this existed that
+  // only reached the decision log and `autoagy status` — so in a session the
+  // setting looked accepted and the whole symptom was a directory that kept
+  // being reviewed for no visible reason. Once per set, not once per tool call:
+  // a line on every command teaches people to stop reading stderr.
+  const home = path.join(root, 'config-warnings');
+  const first = ['writableRoots[0] ("rel/dir") is not an absolute path'];
+  assert.deepEqual(takeConfigWarnings(home, first), first);
+  assert.deepEqual(takeConfigWarnings(home, first), []);
+  assert.deepEqual(takeConfigWarnings(home, [...first]), [], 'the same set by value, not by identity');
+  const second = ['protectedPaths[0] (".husky/**") is relative'];
+  assert.deepEqual(takeConfigWarnings(home, second), second, 'a changed config reports again');
+  assert.deepEqual(takeConfigWarnings(home, second), []);
+  assert.deepEqual(takeConfigWarnings(home, []), [], 'nothing to say stays silent');
 });

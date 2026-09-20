@@ -15,7 +15,7 @@ import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
-import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat } from './state.mjs';
+import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat, takeConfigWarnings } from './state.mjs';
 import { appendDecision, writeReviewRecord } from './log.mjs';
 import { readTranscriptRows } from './transcript.mjs';
 import { mintToken, sweepTokens } from './tokens.mjs';
@@ -664,7 +664,12 @@ export async function handlePreToolUse(payload, options = {}) {
     summary,
     category: classification.category,
   };
-  if (warnings.length > 0) base.configWarnings = warnings;
+  if (warnings.length > 0) {
+    base.configWarnings = warnings;
+    // The decision log is not a channel anyone watches during a session, and a
+    // setting that was silently dropped is exactly what the user needs told.
+    for (const warning of takeConfigWarnings(home, warnings)) process.stderr.write(`autoagy: ${warning}\n`);
+  }
 
   // After the circuit breaker trips, only harmless tools may run for the rest of the turn.
   if (state.interrupt && classification.category !== 'read' && classification.category !== 'agent-coordination') {

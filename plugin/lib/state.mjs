@@ -201,6 +201,42 @@ export function updateState(autoagyHome, conversationId, mutate) {
  * all look the same from the outside: no hook runs. So the hook leaves a mark
  * instead, and `status` can say how long ago the last one was.
  */
+/**
+ * The configuration warnings, the first time this exact set is seen.
+ *
+ * `loadConfig` catches a setting that cannot work — a relative `writableRoots`
+ * entry, a glob that can never match — and drops it. Until now that only
+ * reached the decision log and `autoagy status`, so in a session nobody saw it:
+ * the setting looked accepted, and the whole symptom was a directory that kept
+ * being reviewed for no visible reason. That is the failure the validation was
+ * added to end, so it has to reach a channel someone is looking at.
+ *
+ * Once per distinct set, not once per tool call: the warnings only change when
+ * the config file does, and a line on every command is noise that teaches
+ * people to stop reading stderr.
+ *
+ * @returns {string[]} the warnings to print, or an empty array
+ */
+export function takeConfigWarnings(autoagyHome, warnings) {
+  if (!Array.isArray(warnings) || warnings.length === 0) return [];
+  const seen = crypto.createHash('sha1').update(warnings.join('\n')).digest('hex').slice(0, 16);
+  const file = path.join(stateDir(autoagyHome), 'config-warning.json');
+  try {
+    if (JSON.parse(fs.readFileSync(file, 'utf8')).seen === seen) return [];
+  } catch {
+    // Never reported, or unreadable: report it.
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ seen, at: new Date().toISOString() }));
+    fs.renameSync(tmp, file);
+  } catch {
+    // If the marker cannot be written the warning repeats, which is the safe direction.
+  }
+  return warnings;
+}
+
 export function touchHeartbeat(autoagyHome, event = 'unknown') {
   const file = path.join(stateDir(autoagyHome), 'last-hook-run.json');
   try {

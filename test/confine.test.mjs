@@ -797,3 +797,32 @@ test('executor mode hands agy a token instead of the command, and will not fall 
     fs.rmSync(path.join(home, 'config.json'), { force: true });
   }
 });
+
+test('a declared writable root gets the same read-only metadata as the workspace', () => {
+  // Measured before this existed: with `writableRoots: [<declared>]`, a
+  // sandboxed `echo > <declared>/.git/hooks/pre-commit` reached the host, while
+  // the same write inside the workspace got `Read-only file system`. The edit
+  // tools already refused it (`classifyWriteTarget` covers the declared roots),
+  // so the two paths to one decision disagreed and the weaker one was the
+  // sandbox — which is the shape the fourth round called a bug, and the reason
+  // the own sandbox exists at all.
+  const declared = path.join(dirs.root, 'declared');
+  fs.mkdirSync(path.join(declared, '.git'), { recursive: true });
+  fs.mkdirSync(path.join(declared, 'sub', '.git'), { recursive: true });
+  const ctx = new HookContext(payloadFor(dirs, 'run_command', { CommandLine: 'true' }), {
+    config: configWith({ ownSandbox: 'on', writableRoots: [declared] }),
+    env: dirs.env,
+    home: dirs.home,
+    host: cliHost(),
+    tempRoots: [dirs.tmp],
+    bwrapProbe: okProbe,
+  });
+  const ro = readOnlyPaths(ctx);
+  assert.ok(ro.includes(path.join(declared, '.git')), 'the declared root keeps its own .git read-only');
+  assert.ok(ro.includes(path.join(declared, '.agents')), 'and the rest of the agent metadata');
+  assert.ok(ro.includes(path.join(declared, 'sub', '.git')), 'a repository nested under it too');
+  // The workspace is unchanged, and the root itself is still writable — that is
+  // what declaring it was for.
+  assert.ok(ro.includes(path.join(dirs.workspace, '.git')));
+  assert.ok(!ro.includes(declared), 'the declared root itself stays writable');
+});

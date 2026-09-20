@@ -371,8 +371,16 @@ export function readOnlyPaths(ctx) {
   // `nestedGitPaths`: a submodule or vendored checkout keeps its own `.git`, and
   // a hook planted there runs on the next git command in that directory — which
   // has to leave this sandbox to write anything, so it runs outside it. Only the
-  // top-level one is in `workspaceControlPaths`.
-  return [...ctx.workspaceControlPaths, ...ctx.nestedGitPaths, ...ctx.selfPaths, ...logs].filter(Boolean);
+  // top-level one is in the metadata list.
+  //
+  // `metadataControlPaths`, not `workspaceControlPaths`: it covers the roots
+  // `writableRoots` declares as well, and the edit tools already refuse those
+  // (`classifyWriteTarget`). Measured before this line said so: with a declared
+  // root, a sandboxed `echo > <declared>/.git/hooks/pre-commit` reached the
+  // host, while the same write inside the workspace got `Read-only file
+  // system`. Two paths to the same decision and the weaker one was the sandbox,
+  // which is the shape the fourth round already called a bug.
+  return [...ctx.metadataControlPaths, ...ctx.nestedGitPaths, ...ctx.selfPaths, ...logs].filter(Boolean);
 }
 
 /**
@@ -387,12 +395,12 @@ export function readOnlyPaths(ctx) {
  */
 /** The protected workspace directories this command could create, given its writable roots. */
 export function writableControlPaths(ctx) {
-  return ctx.workspaceControlPaths.filter((p) => ctx.writableRoots.some((root) => isWithin(p, root)));
+  return ctx.metadataControlPaths.filter((p) => ctx.writableRoots.some((root) => isWithin(p, root)));
 }
 
 function missingControlPaths(ctx) {
   const out = [];
-  for (const p of ctx.workspaceControlPaths) {
+  for (const p of ctx.metadataControlPaths) {
     // Only a directory the command could create: one inside a writable root,
     // whose parent is there already.
     if (fs.existsSync(p) || !fs.existsSync(path.dirname(p))) continue;
