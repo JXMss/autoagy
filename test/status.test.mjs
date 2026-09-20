@@ -146,3 +146,23 @@ test('`stats` counts the decisions, and says what the log cannot show', () => {
   assert.match(withAllows, /allowed free\s+1 action/);
   assert.doesNotMatch(withAllows, /log\.allowed/, 'once one is recorded, the caveat is gone');
 });
+
+test('a count flag with no value falls back to the default, not to one record', () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  const logs = path.join(home, 'logs');
+  fs.mkdirSync(logs, { recursive: true });
+  const rows = Array.from({ length: 5 }, (_, i) =>
+    JSON.stringify({ time: new Date().toISOString(), conversation: 'c1', tool: `tool-${i}`, verdict: 'deny', reason: `r${i}` }),
+  );
+  fs.writeFileSync(path.join(logs, 'decisions.jsonl'), `${rows.join('\n')}\n`);
+
+  const out = (args) => {
+    const res = spawnSync(process.execPath, [BIN, ...args], { env: dirs.env, encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    return res.stdout;
+  };
+  assert.equal((out(['log']).match(/^[A-Z0-9-]/gm) ?? []).length, 5, 'no flag means the default, which is the whole tail here');
+  assert.match(out(['log', '-n', '2']), /tool-4/);
+  assert.doesNotMatch(out(['log', '-n', '2']), /tool-1/, 'and a number is honoured');
+  assert.match(out(['log', '-n']), /tool-0/, 'a flag with no value is not read as "one"');
+});

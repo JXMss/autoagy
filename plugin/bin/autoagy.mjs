@@ -462,7 +462,10 @@ function status() {
 }
 
 function printLog(flags) {
-  const limit = Number(flags.n ?? 20);
+  // `-n` with nothing after it parses as `true`, and `Number(true)` is 1: a
+  // mistyped flag would go from "the last 20" to "the last one" without a word.
+  const requested = Number(flags.n);
+  const limit = Number.isFinite(requested) && requested > 0 ? requested : 20;
   const records = readDecisions(managementContext().autoagyHome, limit);
   if (records.length === 0) return console.log('No decisions logged yet.');
   for (const r of records) {
