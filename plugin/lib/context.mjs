@@ -76,14 +76,34 @@ export function findNestedGitPaths(root) {
 const GIT_HOOK_LIST_MAX = 5;
 const GIT_HOOK_HEAD_BYTES = 400;
 const GIT_CONFIG_MAX_BYTES = 64 * 1024;
-// Matched as *config keys and sections*, not as substrings. `[remote] url =
-// https://host/hooksPath` is not a trigger, and a record that names an innocent
-// repository is a false accusation: it puts the path on stderr and costs the
+const GIT_CONFIG_LIST_MAX = 5;
+// Config keys that make git run a command the repository chose. The test is
+// what git executes, not what reads as suspicious: `hooksPath` and `fsmonitor`
+// were the first two, and the rest reach the same place through another door —
+// `sshCommand` on a fetch or a push, `helper` on authentication, `clean` and
+// `smudge` on a checkout, `pager`, `editor` and `askPass` on ordinary porcelain,
+// `templateDir` on the next repository created from it.
+//
+// Matched as *config keys and sections*, not as substrings: the key has to be at
+// the start of its line and followed by `=`, so `[remote] url =
+// https://host/hooksPath` is not a trigger. A record that names an innocent
+// repository is a false accusation — it puts the path on stderr and costs the
 // user a review on every command that touches it from then on.
-const GIT_CONFIG_TRIGGERS = [
-  [/^[ \t]*(hooksPath|fsmonitor)[ \t]*=/im, 'hooksPath/fsmonitor'],
-  [/^[ \t]*\[alias([ \t"\]]|$)/im, '[alias]'],
+//
+// The section a key sits in is deliberately not tracked. In a `.git/config`
+// there is one `pager` and it is `core.pager`; carrying the open section across
+// the file would buy nothing, and erring towards a review is the right
+// direction for a `.git` that appeared during a single sandboxed command.
+const GIT_CONFIG_EXEC_KEYS = [
+  'hooksPath', 'fsmonitor', 'sshCommand', 'gitProxy', 'alternateRefsCommand',
+  'pager', 'editor', 'askPass', 'helper', 'program', 'templateDir',
+  'clean', 'smudge', 'process', 'textconv', 'command', 'external', 'driver', 'cmd',
+  'packObjectsHook',
 ];
+// `[alias]` is a section rather than a key: every name under it is a command.
+const GIT_CONFIG_SECTION_RE = /^[ \t]*\[alias([ \t"\]]|$)/im;
+/** Fresh each call: a `g` regex carries state, and this one is used with matchAll. */
+const gitConfigKeyRe = () => new RegExp(`^[ \\t]*(${GIT_CONFIG_EXEC_KEYS.join('|')})[ \\t]*=`, 'gim');
 
 /** The size and the first bytes of a file an agent wrote; never throws. */
 function hookSummary(file) {
@@ -158,9 +178,12 @@ export function plantedGitContent(gitDir) {
     // or a 2 GB file is not this check's problem.
     if (stat.isFile() && stat.size <= GIT_CONFIG_MAX_BYTES) {
       const text = fs.readFileSync(file, 'utf8');
-      for (const [pattern, label] of GIT_CONFIG_TRIGGERS) {
-        if (pattern.test(text)) config.push(label);
-      }
+      const keys = new Set();
+      // The key as written is what the record names, so the user and the
+      // reviewer see which door was opened rather than a category.
+      for (const match of text.matchAll(gitConfigKeyRe())) keys.add(match[1]);
+      for (const key of [...keys].slice(0, GIT_CONFIG_LIST_MAX)) config.push(key);
+      if (GIT_CONFIG_SECTION_RE.test(text)) config.push('[alias]');
     }
   } catch {
     // No config, or not a readable regular file: nothing to judge.

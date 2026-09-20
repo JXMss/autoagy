@@ -101,10 +101,37 @@ test('config is judged by key, not by the word appearing somewhere', () => {
   // A remote URL that happens to contain the word is not a trigger. Matching it
   // as a substring would accuse a repository that never set a hook path.
   assert.equal(config('[remote "origin"]\n\turl = https://host/hooksPath\n'), null);
-  assert.deepEqual(config('[core]\n\thooksPath = .husky\n').config, ['hooksPath/fsmonitor']);
-  assert.deepEqual(config('[core]\n\tfsmonitor = /usr/bin/fsmon\n').config, ['hooksPath/fsmonitor']);
+  assert.deepEqual(config('[core]\n\thooksPath = .husky\n').config, ['hooksPath']);
+  assert.deepEqual(config('[core]\n\tfsmonitor = /usr/bin/fsmon\n').config, ['fsmonitor']);
   assert.deepEqual(config('[alias]\n\tco = checkout\n').config, ['[alias]']);
   assert.deepEqual(config('[alias "st"]\n\tst = status\n').config, ['[alias]']);
+  // A real .git/config, including a remote whose URL carries one of the words.
+  assert.equal(
+    config('[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n[remote "origin"]\n\turl = https://host/sshCommand\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch "main"]\n\tremote = origin\n'),
+    null,
+  );
+});
+
+test('every config key that makes git run a command is a trigger, not only the hook ones', () => {
+  const config = (text) => withGitDir((d) => fs.writeFileSync(path.join(d, 'config'), text));
+  // Each of these reaches the same place `hooksPath` does, by a different door:
+  // a fetch or push, authentication, a checkout, ordinary porcelain.
+  const doors = {
+    sshCommand: '[core]\n\tsshCommand = ./evil.sh\n',
+    pager: '[core]\n\tpager = ./evil.sh\n',
+    editor: '[core]\n\teditor = ./evil.sh\n',
+    askPass: '[core]\n\taskPass = ./evil.sh\n',
+    helper: '[credential]\n\thelper = !./evil.sh\n',
+    clean: '[filter "f"]\n\tclean = ./evil.sh\n',
+    textconv: '[diff "d"]\n\ttextconv = ./evil.sh\n',
+    driver: '[merge "m"]\n\tdriver = ./evil.sh %O %A %B\n',
+    packObjectsHook: '[uploadpack]\n\tpackObjectsHook = ./evil.sh\n',
+    templateDir: '[init]\n\ttemplateDir = ../t\n',
+    program: '[gpg]\n\tprogram = ./evil.sh\n',
+  };
+  for (const [key, text] of Object.entries(doors)) {
+    assert.deepEqual(config(text)?.config, [key], key);
+  }
 });
 
 test('the hook list is capped and the head is read, not loaded', () => {
