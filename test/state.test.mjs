@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, LOCK_WAIT_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings } from '../plugin/lib/state.mjs';
+import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, LOCK_WAIT_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings, recordReviewOutcome } from '../plugin/lib/state.mjs';
 import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
 import { appendDecision } from '../plugin/lib/log.mjs';
 import { PLUGIN_DIR } from '../plugin/lib/context.mjs';
@@ -159,4 +159,30 @@ test('a configuration warning is reported once per distinct set', () => {
   assert.deepEqual(takeConfigWarnings(home, second), second, 'a changed config reports again');
   assert.deepEqual(takeConfigWarnings(home, second), []);
   assert.deepEqual(takeConfigWarnings(home, []), [], 'nothing to say stays silent');
+});
+
+test('a reviewer that cannot answer stops the turn, like one that says no', () => {
+  // The rejection breaker counted only `denied`, so a backend that was down —
+  // logged out, out of quota, unreachable — denied every risky action for the
+  // rest of the session while the agent retried into the same wall and nothing
+  // ever ended the turn.
+  const circuitBreaker = { maxConsecutiveDenials: 3, maxRecentDenials: 10, window: 50 };
+  const state = {};
+  const outcome = (extra) => recordReviewOutcome(state, { denied: false, turnKey: 1, circuitBreaker, ...extra });
+  const error = { backendError: 'failed: reviewer unreachable' };
+  assert.equal(outcome(error), null);
+  assert.equal(outcome(error), null);
+  const trip = outcome(error);
+  assert.match(trip.message, /could not answer 3 times in a row/);
+  assert.match(trip.message, /reviewer unreachable/);
+  assert.equal(trip.pending, true);
+  // An answer — either way — clears the streak, and a denial still counts as
+  // one: the two are tracked apart.
+  const fresh = {};
+  const forState = (extra) => recordReviewOutcome(fresh, { turnKey: 1, circuitBreaker, ...extra });
+  forState({ denied: false, backendError: 'timeout' });
+  forState({ denied: false, backendError: 'timeout' });
+  assert.equal(forState({ denied: true }), null, 'a real answer resets the error streak');
+  assert.equal(forState({ denied: true, backendError: 'timeout' }), null);
+  assert.match(forState({ denied: true, backendError: 'timeout' }).message, /rejected too many/);
 });

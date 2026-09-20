@@ -544,3 +544,25 @@ test('resolving the target first stops a re-pointed symlink from looking like a 
     for (const dir of [real, other]) fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an action the user is asked about still gets the path checks', async () => {
+  // `mode: ask` (and `reviewer.backend: "none"`) returned the prompt directly,
+  // without resolving the target or recording it — so an edit the user approved
+  // by hand ran with neither the pre-resolution nor the PostToolUse comparison,
+  // while `withCanonicalTarget`'s guard accepts `force_ask` and the reviewed
+  // path applies both. A person answering instead of the reviewer does not
+  // change the fact that agy performs the write itself, outside every sandbox.
+  const real = path.join(dirs.workspace, 'real');
+  const linked = path.join(dirs.workspace, 'linked');
+  fs.mkdirSync(path.join(real, '.git'), { recursive: true });
+  fs.rmSync(linked, { recursive: true, force: true });
+  fs.symlinkSync(real, linked, 'dir');
+  const target = path.join(linked, '.git', 'config');
+  writeConfig({ mode: 'ask' });
+  const host = { kind: 'cli', cwd: dirs.workspace, argv: ['agy'], flags: { skipPermissions: false, sandbox: false, addDirs: [] } };
+  const out = await handlePreToolUse(payloadFor(dirs, 'write_to_file', { TargetFile: target, Content: 'x' }, ws()), { env: dirs.env, home: dirs.home, host });
+  assert.equal(out.decision, 'force_ask', 'the user is the one answering in this mode');
+  assert.equal(out.overwrite?.TargetFile, path.join(real, '.git', 'config'), 'the target is resolved before the call');
+  assert.ok(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).pendingEdits?.[3], 'and recorded, so PostToolUse compares where it landed');
+  fs.rmSync(linked, { force: true });
+});

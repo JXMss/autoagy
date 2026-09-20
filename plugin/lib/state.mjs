@@ -388,14 +388,18 @@ export function newId() {
  * Codex's GuardianRejectionCircuitBreaker, per conversation turn.
  * @returns {{ turnKey: number, message: string, pending: boolean } | null} the interrupt, when it trips
  */
-export function recordReviewOutcome(state, { denied, turnKey, circuitBreaker }) {
+export function recordReviewOutcome(state, { denied, backendError = null, turnKey, circuitBreaker }) {
   if (state.turnKey !== turnKey) {
     state.turnKey = turnKey;
     state.consecutiveDenials = 0;
+    state.consecutiveReviewErrors = 0;
     state.recent = [];
     state.interrupt = null;
   }
   state.consecutiveDenials = denied ? state.consecutiveDenials + 1 : 0;
+  // A reviewer that cannot answer is not a reviewer that answered "no": the two
+  // are counted apart, and only a real answer (either way) clears the streak.
+  state.consecutiveReviewErrors = backendError ? (state.consecutiveReviewErrors ?? 0) + 1 : 0;
   state.recent.push(Boolean(denied));
   while (state.recent.length > circuitBreaker.window) state.recent.shift();
   const recentDenials = state.recent.filter(Boolean).length;
@@ -410,6 +414,21 @@ export function recordReviewOutcome(state, { denied, turnKey, circuitBreaker }) 
       message:
         `Automatic approval review rejected too many approval requests for this turn ` +
         `(${state.consecutiveDenials} consecutive, ${recentDenials} in the last ${circuitBreaker.window} reviews); interrupting the turn.`,
+    };
+    return state.interrupt;
+  }
+  // Nothing risky can be judged while the backend is down, so every action past
+  // this point fails closed and the agent can only retry into the same wall. The
+  // threshold is the operator's consecutive-denial one, because it answers the
+  // same question — how many failures in a row mean this turn cannot proceed.
+  if (!state.interrupt && state.consecutiveReviewErrors >= circuitBreaker.maxConsecutiveDenials) {
+    state.interrupt = {
+      turnKey,
+      pending: true,
+      message:
+        `The approval reviewer could not answer ${state.consecutiveReviewErrors} times in a row (${backendError}); ` +
+        'without it nothing risky can be approved, so this turn is stopping. Tell the user, and suggest `autoagy status` ' +
+        '(the reviewer may be logged out, out of quota, or unreachable).',
     };
     return state.interrupt;
   }

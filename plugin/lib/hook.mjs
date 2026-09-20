@@ -705,7 +705,17 @@ export async function handlePreToolUse(payload, options = {}) {
   if (!reviewer) {
     const output = withoutUnanswerablePrompt({ decision: 'force_ask', reason: `autoagy: ${classification.reason}` }, ctx);
     appendDecision(home, { ...base, verdict: output.decision === 'force_ask' ? 'ask' : 'deny', reason: classification.reason });
-    return withOwnSandbox(output, ctx);
+    // The same two steps the reviewed path takes below, and for the same reason:
+    // a person answering the prompt instead of the reviewer does not change the
+    // fact that agy performs the edit itself, outside every sandbox. Resolving
+    // the target before the call and comparing it after is the only protection
+    // against a path swapped in between — and `withCanonicalTarget`'s own
+    // `force_ask` guard says it was meant to cover this path. In `mode: ask`
+    // (and with `reviewer.backend: "none"`) every reviewed action went without
+    // either of them.
+    const asked = withCanonicalTarget(output, ctx);
+    if (asked.decision !== 'deny') rememberTargets(ctx, { ...ctx.args, ...(asked.overwrite ?? {}) });
+    return withOwnSandbox(asked, ctx);
   }
 
   const key = actionKey(ctx.toolName, ctx.args);
@@ -748,6 +758,11 @@ export async function handlePreToolUse(payload, options = {}) {
     }
     return recordReviewOutcome(s, {
       denied: result.status === 'denied',
+      // An answer that never came is not a judgement, and the rejection breaker
+      // below counts only judgements — so a reviewer that is down (quota, auth,
+      // network) denied every risky action for the rest of the session while the
+      // agent retried into the same wall, with nothing ever stopping the turn.
+      backendError: result.status === 'failed' || result.status === 'timed_out' ? `${result.status}: ${result.error ?? 'no reason given'}` : null,
       turnKey: evidence.userMessageCount,
       circuitBreaker: config.circuitBreaker,
     });
