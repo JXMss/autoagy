@@ -395,7 +395,40 @@ export function readOnlyPaths(ctx) {
  */
 /** The protected workspace directories this command could create, given its writable roots. */
 export function writableControlPaths(ctx) {
-  return ctx.metadataControlPaths.filter((p) => ctx.writableRoots.some((root) => isWithin(p, root)));
+  return ctx.metadataControlPaths.filter((p) => ctx.writableRoots.some((root) => isWithin(p, root)) && tmpfsMountable(p));
+}
+
+/**
+ * Whether the empty read-only `--tmpfs` mount can be put at this path.
+ *
+ * It needs a directory to mount on, and bwrap will not make one out of a file:
+ * measured, `bwrap: Can't mkdir <ws>/.git: Not a directory`, exit 1 — for every
+ * command, in every workspace where one of the protected names is a regular
+ * file. That is not exotic: `git worktree add` and a checked-out submodule both
+ * leave `.git` as a *file* holding `gitdir: …`. The command failed while the
+ * self-check still recorded `verified`, because agy did run the line autoagy
+ * rewrote — so `status` reported a working sandbox over a repository where
+ * nothing ran.
+ *
+ * Skipping the mount costs nothing here: the read-only bind further down is
+ * emitted for the same path and binds the file, and a sandboxed command cannot
+ * remove the file through it to put a directory in its place.
+ */
+function tmpfsMountable(p) {
+  let stat;
+  try {
+    stat = fs.statSync(p); // follows a symlink to wherever it points
+  } catch {
+    try {
+      fs.lstatSync(p);
+      // Something is there and it does not resolve to anything — nothing to mount on.
+      return false;
+    } catch {
+      // Absent: bwrap creates the mount point, which is the case this exists for.
+      return true;
+    }
+  }
+  return stat.isDirectory();
 }
 
 function missingControlPaths(ctx) {

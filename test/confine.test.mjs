@@ -886,3 +886,38 @@ test('a declared writable root gets the same read-only metadata as the workspace
   assert.ok(ro.includes(path.join(dirs.workspace, '.git')));
   assert.ok(!ro.includes(declared), 'the declared root itself stays writable');
 });
+
+test('a protected name that is a file does not fail every command in the workspace', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  // `git worktree add` and a checked-out submodule leave `.git` as a *file*
+  // holding `gitdir: …`, and `--tmpfs` cannot mount on a file: measured, bwrap
+  // exits 1 with "Can't mkdir <ws>/.git: Not a directory" — so every command in
+  // such a repository failed, while the self-check recorded `verified` (agy did
+  // run the line autoagy rewrote) and `status` reported a working sandbox.
+  const worktree = path.join(dirs.root, 'linked-worktree');
+  fs.mkdirSync(worktree, { recursive: true });
+  const gitFile = path.join(worktree, '.git');
+  fs.writeFileSync(gitFile, 'gitdir: /elsewhere/.git/worktrees/linked\n');
+  const ctx = new HookContext(payloadFor(dirs, 'run_command', { CommandLine: 'x' }, { workspacePaths: [worktree] }), {
+    config: configWith({ ownSandbox: 'on' }),
+    env: dirs.env,
+    home: dirs.home,
+    host: cliHost(),
+    tempRoots: [dirs.tmp],
+    bwrapProbe: () => real,
+  });
+  const placeholders = [];
+  const line = confinedCommandLine(ctx, 'echo WORKTREE-OK', { placeholders });
+  assert.ok(!line.includes(`'--tmpfs' '${gitFile}'`), 'no mount point is staged on a file');
+  assert.ok(line.includes(`'--ro-bind-try' '${gitFile}' '${gitFile}'`), 'the file itself is still bound read-only');
+
+  const res = spawnSync('/bin/sh', ['-c', line], { cwd: worktree, encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(res.stdout.trim(), 'WORKTREE-OK');
+
+  // And the protection that is left is the one that matters: the file is
+  // readable as before and cannot be replaced from inside.
+  const write = spawnSync('/bin/sh', ['-c', confinedCommandLine(ctx, `printf x > ${JSON.stringify(gitFile)}`)], { cwd: worktree, encoding: 'utf8' });
+  assert.notEqual(write.status, 0, 'the gitfile is read-only in the sandbox');
+  assert.equal(fs.readFileSync(gitFile, 'utf8'), 'gitdir: /elsewhere/.git/worktrees/linked\n');
+  removeControlPlaceholders(placeholders);
+});
