@@ -28,6 +28,63 @@ export function stateFile(autoagyHome, conversationId) {
   return path.join(stateDir(autoagyHome), `${safe}.json`);
 }
 
+/**
+ * The `.json` files under `state/` that are not any conversation's state.
+ *
+ * The directory holds two kinds of file and the only thing telling them apart is
+ * the name: a conversation's state is named after its id — and that sanitized id
+ * can be any word, `bwrap-probe` included — while these are named after what
+ * they hold. So the list lives here, where the directory is defined, and the
+ * readers ask it rather than each inventing a rule.
+ *
+ * Before this, both readers treated every `.json` as a conversation:
+ * `unreadableStateFiles` reported a truncated `bwrap-probe.json` as "the next
+ * tool call in that conversation will quarantine it and mark the conversation
+ * untrusted", which is false in every clause — no conversation has that id,
+ * nothing quarantines it, and no `autoagy trust <id>` applies — and `listStates`
+ * handed all of them to its callers as states that merely happened to have no
+ * fields.
+ */
+const RESERVED_STATE_FILES = new Set(['bwrap-probe.json', 'own-sandbox-check.json', 'command-env-check.json', 'config-warning.json', 'last-hook-run.json']);
+
+/**
+ * The path of one of those files.
+ *
+ * Going through here is what keeps the set above from drifting: a new file under
+ * `state/` that nobody registered throws on its first use, in development,
+ * instead of quietly becoming a conversation that `status` reports and `trust`
+ * cannot clear.
+ */
+export function reservedStateFile(autoagyHome, name) {
+  if (!RESERVED_STATE_FILES.has(name)) throw new Error(`state/${name} is not a registered non-conversation state file`);
+  return path.join(stateDir(autoagyHome), name);
+}
+
+/** Whether a name in `stateDir` is some conversation's state file. */
+export function isConversationStateFile(name) {
+  return name.endsWith('.json') && !RESERVED_STATE_FILES.has(name);
+}
+
+/**
+ * Writes JSON so that a crash cannot leave a half-written file behind: into a
+ * pid-unique temporary name, then one rename.
+ *
+ * Shared because the failure is shared. `writeState` did this from the start,
+ * while `bwrap-probe.json` and the two self-check files were written in place —
+ * which made them the files in this directory most likely to be *found*
+ * truncated, and a truncated file here is read as "no record", the answer every
+ * sticky mark in it exists to prevent.
+ *
+ * The temporary name ends in `.tmp`, so one left behind by a process that died
+ * between the write and the rename is not mistaken for a state file.
+ */
+export function writeJsonFile(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+  fs.renameSync(tmp, file);
+}
+
 function freshState(conversationId) {
   return {
     version: 1,
@@ -304,11 +361,17 @@ function quarantine(file) {
  * one report a user reads: nothing else says that a conversation's record is
  * unreadable, and the hook's own answer to that is to stop trusting the
  * conversation.
+ *
+ * Conversation files only (`isConversationStateFile`). What this report says
+ * about a file — that the next tool call in that conversation will quarantine it
+ * and distrust the conversation — is only true of a conversation's own state, and
+ * the reserved files are the ones most likely to be here, since a truncated
+ * write is what puts a file in this list at all.
  */
 export function unreadableStateFiles(autoagyHome) {
   let names = [];
   try {
-    names = fs.readdirSync(stateDir(autoagyHome)).filter((n) => n.endsWith('.json'));
+    names = fs.readdirSync(stateDir(autoagyHome)).filter(isConversationStateFile);
   } catch {
     return [];
   }
@@ -348,9 +411,7 @@ export function readState(autoagyHome, conversationId) {
 
 function writeState(file, state) {
   state.updatedAt = new Date().toISOString();
-  const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, file);
+  writeJsonFile(file, state);
 }
 
 /** Read-modify-write under the lock; returns whatever `mutate` returns. */
@@ -392,17 +453,14 @@ export function updateState(autoagyHome, conversationId, mutate) {
 export function takeConfigWarnings(autoagyHome, warnings) {
   if (!Array.isArray(warnings) || warnings.length === 0) return [];
   const seen = crypto.createHash('sha1').update(warnings.join('\n')).digest('hex').slice(0, 16);
-  const file = path.join(stateDir(autoagyHome), 'config-warning.json');
+  const file = reservedStateFile(autoagyHome, 'config-warning.json');
   try {
     if (JSON.parse(fs.readFileSync(file, 'utf8')).seen === seen) return [];
   } catch {
     // Never reported, or unreadable: report it.
   }
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ seen, at: new Date().toISOString() }));
-    fs.renameSync(tmp, file);
+    writeJsonFile(file, { seen, at: new Date().toISOString() });
   } catch {
     // If the marker cannot be written the warning repeats, which is the safe direction.
   }
@@ -410,12 +468,9 @@ export function takeConfigWarnings(autoagyHome, warnings) {
 }
 
 export function touchHeartbeat(autoagyHome, event = 'unknown') {
-  const file = path.join(stateDir(autoagyHome), 'last-hook-run.json');
+  const file = reservedStateFile(autoagyHome, 'last-hook-run.json');
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ at: new Date().toISOString(), event }));
-    fs.renameSync(tmp, file);
+    writeJsonFile(file, { at: new Date().toISOString(), event });
   } catch {
     // A heartbeat that cannot be written must never fail a hook.
   }
@@ -424,7 +479,7 @@ export function touchHeartbeat(autoagyHome, event = 'unknown') {
 /** When the last hook ran, or null when there is no record. */
 export function readHeartbeat(autoagyHome) {
   try {
-    return JSON.parse(fs.readFileSync(path.join(stateDir(autoagyHome), 'last-hook-run.json'), 'utf8'));
+    return JSON.parse(fs.readFileSync(reservedStateFile(autoagyHome, 'last-hook-run.json'), 'utf8'));
   } catch {
     return null;
   }
@@ -510,12 +565,16 @@ export function takeApprovals(state, key) {
   return matching;
 }
 
-/** Lists state files, newest first. */
+/** Lists the conversations' state files, newest first. */
 export function listStates(autoagyHome) {
   const dir = stateDir(autoagyHome);
   let names = [];
   try {
-    names = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+    // Conversations only: the reserved files parse fine and would come back as
+    // states with none of the fields any caller looks at, which is why nothing
+    // has gone visibly wrong with them — `trust` filters on a flag, `status` on
+    // the same. That is luck, not a rule.
+    names = fs.readdirSync(dir).filter(isConversationStateFile);
   } catch {
     return [];
   }

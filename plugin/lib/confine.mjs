@@ -17,7 +17,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { resolveReal, uniquePaths, isWithin } from './paths.mjs';
-import { withLock } from './state.mjs';
+import { withLock, reservedStateFile, writeJsonFile } from './state.mjs';
 import { seccompProgramFile, seccompSupported } from './seccomp.mjs';
 import { executorPath, executorInstalled } from './tokens.mjs';
 
@@ -165,7 +165,7 @@ export function probeBwrap(autoagyHome) {
   // reachable, so it is not offered at all and commands are reviewed instead.
   if (!seccompSupported()) return { ok: false, detail: `autoagy has no seccomp filter for ${process.arch}, so its sandbox is unavailable` };
   const key = `${bin.file}:${bin.stat.mtimeMs}:${os.release()}`;
-  const cacheFile = path.join(autoagyHome, 'state', 'bwrap-probe.json');
+  const cacheFile = reservedStateFile(autoagyHome, 'bwrap-probe.json');
   try {
     const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
     // Only the verdict is cached; the binary path is always the one found above.
@@ -191,8 +191,7 @@ export function probeBwrap(autoagyHome) {
   const ok = res.status === 0;
   const detail = ok ? `bubblewrap at ${bin.file}` : `${bin.file} cannot create a sandbox here: ${(res.stderr || res.error?.message || `exit ${res.status}`).trim()}`;
   try {
-    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-    fs.writeFileSync(cacheFile, JSON.stringify({ key, time: Date.now(), ok, detail }));
+    writeJsonFile(cacheFile, { key, time: Date.now(), ok, detail });
   } catch {
     // caching is best effort
   }
@@ -208,7 +207,7 @@ export function probeBwrap(autoagyHome) {
 // own record: the two fail independently.
 
 const CHECK_FILES = { sandbox: 'own-sandbox-check.json', envScrub: 'command-env-check.json' };
-const checkFile = (autoagyHome, kind = 'sandbox') => path.join(autoagyHome, 'state', CHECK_FILES[kind] ?? CHECK_FILES.sandbox);
+const checkFile = (autoagyHome, kind = 'sandbox') => reservedStateFile(autoagyHome, CHECK_FILES[kind] ?? CHECK_FILES.sandbox);
 
 /** Identity of the running agy executable, so a self-check result applies to one build. */
 export function hostBuildId(host) {
@@ -235,7 +234,10 @@ function updateSandboxCheck(autoagyHome, mutate, kind = 'sandbox') {
   const file = checkFile(autoagyHome, kind);
   return withLock(file, () => {
     const next = mutate(readSandboxCheck(autoagyHome, kind));
-    if (next) fs.writeFileSync(file, JSON.stringify(next, null, 2));
+    // Written the way the conversation states are: this file decides whether
+    // autoagy's own sandbox runs at all, and a truncated one reads as "no
+    // record of a broken build".
+    if (next) writeJsonFile(file, next);
     return next;
   });
 }

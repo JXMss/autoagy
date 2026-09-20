@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, LOCK_WAIT_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings, recordReviewOutcome } from '../plugin/lib/state.mjs';
+import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, LOCK_WAIT_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings, recordReviewOutcome, listStates, unreadableStateFiles, reservedStateFile, isConversationStateFile } from '../plugin/lib/state.mjs';
 import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
 import { appendDecision } from '../plugin/lib/log.mjs';
 import { PLUGIN_DIR } from '../plugin/lib/context.mjs';
@@ -220,4 +220,53 @@ test('a state file that cannot be read is kept as evidence, and the conversation
 
   // A missing file is a new conversation, which is not a read failure.
   assert.equal(readState(home, 'never-seen').untrusted, null);
+});
+
+test('the files under state/ that are not conversations are not read as conversations', () => {
+  // `stateDir` holds both kinds, and the sanitized conversation id can be any
+  // word — `bwrap-probe` included — so the name alone tells them apart only if
+  // the list of the other kind is written down. Without it, `unreadableStateFiles`
+  // said of a truncated probe cache that "the next tool call in that conversation
+  // will quarantine it and mark the conversation untrusted": no conversation has
+  // that id, nothing quarantines it, and no `autoagy trust <id>` clears it.
+  //
+  // These are also the likeliest files here to be *found* truncated, because
+  // until now they were the ones written in place rather than through a rename.
+  const home = path.join(root, 'reserved-state');
+  const dir = path.join(home, 'state');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'bwrap-probe.json'), '{"key":"x","time":17');
+  fs.writeFileSync(path.join(dir, 'own-sandbox-check.json'), '{"build":"x","status":"verif');
+  fs.writeFileSync(path.join(dir, 'command-env-check.json'), '');
+  fs.writeFileSync(path.join(dir, 'config-warning.json'), 'not json');
+  // The heartbeat's own test makes this a directory, which readFileSync answers
+  // with EISDIR — the same unreadable shape from the outside.
+  fs.mkdirSync(path.join(dir, 'last-hook-run.json'));
+  // A temporary file left behind by a process that died between the write and
+  // the rename is not a state file either.
+  fs.writeFileSync(path.join(dir, 'conv-ok.json.4242.tmp'), '{"half":');
+  fs.writeFileSync(path.join(dir, 'conv-ok.json'), JSON.stringify({ version: 1, conversationId: 'conv-ok' }));
+
+  assert.deepEqual(unreadableStateFiles(home), [], 'none of them is a conversation whose record is unreadable');
+  assert.deepEqual(
+    listStates(home).map(({ state }) => state.conversationId),
+    ['conv-ok'],
+    'and none of them is listed as a conversation',
+  );
+
+  // The real thing still reports, beside all of that.
+  fs.writeFileSync(path.join(dir, 'conv-broken2.json'), '{"version":1,"untrusted":{');
+  assert.deepEqual(
+    unreadableStateFiles(home).map((f) => path.basename(f)),
+    ['conv-broken2.json'],
+  );
+
+  assert.equal(isConversationStateFile('bwrap-probe.json'), false);
+  assert.equal(isConversationStateFile('11111111-2222-4333-8444-555555555555.json'), true);
+  assert.equal(isConversationStateFile('conv-x.json.corrupt'), false, 'an evidence copy is not a state file');
+  // The registry is the drift guard: a new file under state/ that nobody
+  // registered fails here, in development, rather than becoming a conversation
+  // that `status` reports and `trust` cannot clear.
+  assert.equal(reservedStateFile(home, 'bwrap-probe.json'), path.join(dir, 'bwrap-probe.json'));
+  assert.throws(() => reservedStateFile(home, 'something-new.json'), /not a registered/);
 });

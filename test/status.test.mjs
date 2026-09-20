@@ -178,3 +178,17 @@ test('status says when a conversation\'s state file cannot be read', () => {
   assert.match(out, /conv-x\.json cannot be read as state/);
   assert.match(out, /autoagy trust/);
 });
+
+test('status does not call a truncated probe cache an untrusted conversation', () => {
+  // The same directory holds the probe cache and the two self-check records, and
+  // they are the files here most likely to be found truncated. Reported as
+  // conversations, every clause of that line is false — and it is the line a user
+  // reads exactly when they are trying to find out why something feels wrong.
+  const dir = path.join(dirs.env.AUTOAGY_HOME, 'state');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'bwrap-probe.json'), '{"key":"x","time":17');
+  fs.writeFileSync(path.join(dir, 'own-sandbox-check.json'), '{"build":"x","stat');
+  const out = status();
+  assert.doesNotMatch(out, /cannot be read as state/);
+  assert.doesNotMatch(out, /bwrap-probe/);
+});
