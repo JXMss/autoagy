@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { classify, plannedAction, canonicalPathArgs } from '../plugin/lib/policy.mjs';
 import { makeSandboxDirs, contextFor, configWith, okProbe } from './helpers.mjs';
-import { PROTECTED_WORKSPACE_DIRS } from '../plugin/lib/context.mjs';
+import { PROTECTED_WORKSPACE_DIRS, parseHostFlags } from '../plugin/lib/context.mjs';
 
 const dirs = makeSandboxDirs();
 after(() => dirs.cleanup());
@@ -839,4 +839,32 @@ test('every destructive command the table flags arrives with its targets inspect
   assert.equal(targets('dd if=/dev/zero of=keep.txt')[0].path, path.join(dirs.workspace, 'keep.txt'));
   // A git subcommand that removes no path still has nothing to inspect.
   assert.equal(plannedAction(contextFor(dirs, 'run_command', { CommandLine: 'git reset --hard' })).deletion_targets, undefined);
+});
+
+test('an outside-workspace edit is only refused early where agy has already decided', () => {
+  // Measured on agy 1.2.7. Interactively, `allowNonWorkspaceAccess: false` makes
+  // agy ask ("Reason: outside workspace") and the write can still succeed, so
+  // the review is a real gate and stays — Codex reviews a patch outside its
+  // writable roots too. In print mode there is nobody to ask and agy auto-denies,
+  // so a review can only spend its seconds reaching the same answer.
+  const outside = path.join(dirs.root, 'elsewhere', 'b.txt');
+  const settings = path.join(dirs.appData, 'settings.json');
+  const write = (s) => fs.writeFileSync(settings, JSON.stringify(s));
+  const headless = { kind: 'cli', cwd: dirs.workspace, argv: ['agy', '-p', 'x'], flags: parseHostFlags(['agy', '-p', 'x']) };
+  const interactive = { kind: 'cli', cwd: dirs.workspace, argv: ['agy'], flags: parseHostFlags(['agy']) };
+  const at = (host) => verdict('write_to_file', { TargetFile: outside }, { host });
+
+  write({ enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox', allowNonWorkspaceAccess: false });
+  assert.equal(at(headless).verdict, 'deny');
+  assert.match(at(headless).reason, /writableRoots/, 'and says what would make it work');
+  assert.equal(at(interactive).verdict, 'review', 'interactively the user is asked, so the review is a real gate');
+
+  // A grant the operator wrote by hand covers the target: agy will write it,
+  // so there is nothing settled to refuse early.
+  write({ allowNonWorkspaceAccess: false, permissions: { allow: [`write_file(${path.join(dirs.root, 'elsewhere')})`] } });
+  assert.equal(at(headless).verdict, 'review');
+  // And without the setting, agy writes outside the workspace on its own.
+  write({ allowNonWorkspaceAccess: true });
+  assert.equal(at(headless).verdict, 'review');
+  write({ enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox' });
 });

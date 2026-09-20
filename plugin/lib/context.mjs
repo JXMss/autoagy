@@ -10,7 +10,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { autoagyHome, resolveConfigPath } from './config.mjs';
-import { toAbsolute, uniquePaths, expandHome, expandAnchoredGlob, resolveReal, findExecutable } from './paths.mjs';
+import { toAbsolute, uniquePaths, expandHome, expandAnchoredGlob, resolveReal, findExecutable, isWithin } from './paths.mjs';
 import { detectOwnSandbox, probeBwrap, hostBuildId, envBinaryPath, envScrubDisabled } from './confine.mjs';
 import { userHooksPath } from './tripwire.mjs';
 
@@ -324,7 +324,7 @@ export function processExecutable(info) {
 
 /** Extracts the permission-relevant flags of an `agy` invocation. */
 export function parseHostFlags(argv) {
-  const flags = { skipPermissions: false, sandbox: false, addDirs: [], mode: null, agent: null };
+  const flags = { skipPermissions: false, sandbox: false, addDirs: [], mode: null, agent: null, headless: false };
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i].replace(/^-{1,2}/, '--');
     const [name, inline] = arg.includes('=') ? [arg.slice(0, arg.indexOf('=')), arg.slice(arg.indexOf('=') + 1)] : [arg, undefined];
@@ -346,6 +346,16 @@ export function parseHostFlags(argv) {
         break;
       case '--agent':
         flags.agent = value() ?? null;
+        break;
+      // Print mode. Measured on agy 1.2.7: a tool that needs a permission it
+      // cannot prompt for is auto-denied there, with its own instruction to add
+      // an allow-rule — so an action that will need one has its answer already,
+      // whatever a reviewer would have said. `-i` / `--prompt-interactive` runs
+      // an initial prompt and *stays* interactive, so it is not this.
+      case '--p':
+      case '--print':
+      case '--prompt':
+        flags.headless = true;
         break;
       default:
         break;
@@ -645,6 +655,35 @@ export class HookContext {
         untrustedRoots: this.writableRoots,
       }),
     );
+  }
+
+  /** The Antigravity CLI settings, as agy read them at startup. */
+  get cliSettings() {
+    return this.memo('cliSettings', () => (this.appDataDir ? readJson(path.join(this.appDataDir, 'settings.json')) : null) ?? {});
+  }
+
+  /**
+   * True when agy itself will refuse to write `abs`, whatever autoagy decides.
+   *
+   * Measured on agy 1.2.7 with `allowNonWorkspaceAccess: false`: a write whose
+   * resolved target is outside the workspace needs a `write_file(...)`
+   * permission. Interactively the user is asked ("Reason: outside workspace");
+   * in print mode there is nobody to ask, so it is auto-denied with an
+   * instruction to add an allow-rule. `autoagy setup` writes that setting and a
+   * grant for every `writableRoots` entry, so this is the state an ordinary
+   * install is in.
+   *
+   * Only the grants decide, not `writableRoots`: an operator may have written a
+   * `write_file(...)` by hand, and a target it covers is one agy will write.
+   */
+  outsideWriteNeedsGrant(abs) {
+    if (this.cliSettings.allowNonWorkspaceAccess !== false) return false;
+    const allow = Array.isArray(this.cliSettings.permissions?.allow) ? this.cliSettings.permissions.allow : [];
+    const granted = allow.flatMap((rule) => {
+      const match = /^write_file\((.+)\)$/.exec(String(rule).trim());
+      return match ? [match[1]] : [];
+    });
+    return !granted.some((dir) => isWithin(abs, dir) || isWithin(resolveReal(abs), dir));
   }
 
   /** Agent configuration in the user's home; Antigravity's own artifact dirs live inside ~/.gemini. */

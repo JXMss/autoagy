@@ -649,6 +649,20 @@ function classifyFileEdit(ctx, state = {}) {
     return review('write-protected', `Edits protected metadata or agent configuration (${sawProtected}), e.g. .git, .agents, or ~/.gemini.`);
   }
   if (sawOutside) {
+    // In print mode agy auto-denies a write that needs a permission it cannot
+    // prompt for, so the answer is already settled and a review can only spend
+    // its 4-12 seconds arriving at it. Interactively the user *is* asked and the
+    // write can still succeed, which is why this is narrowed to the one case
+    // where the outcome is fixed — and why the review stays everywhere else, as
+    // it does in Codex, whose `assess_patch_safety` sends a patch outside the
+    // writable roots to the guardian too.
+    if (ctx.host?.flags?.headless && ctx.outsideWriteNeedsGrant(sawOutside)) {
+      return deny(
+        'write-outside-workspace',
+        `autoagy: ${sawOutside} is outside the workspace, and agy refuses such a write in print mode because it cannot ask — no review changes that. ` +
+          'Either work inside the workspace, or ask the user to add that directory to `writableRoots` in ~/.gemini/autoagy/config.json and re-run `autoagy setup`, which grants it.',
+      );
+    }
     if (ctx.workspaceRoots.length === 0) {
       return review('write-outside-workspace', `Edits ${sawOutside}; the workspace root could not be determined.`);
     }
