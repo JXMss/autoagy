@@ -15,9 +15,48 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { autoagyHome as resolveAutoagyHome, defaultConfigFileText, configPath } from './config.mjs';
+import { expandHome } from './paths.mjs';
+import { executorPath } from './tokens.mjs';
 
 export const RECOMMENDED_GRANTS = ['command(*)', 'mcp(*)', 'execute_url(*)'];
-export const RECOMMENDED_SETTINGS = { enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox', allowNonWorkspaceAccess: true };
+// `allowNonWorkspaceAccess: false` is the one check that happens at the moment
+// of the write rather than before it, and it follows symlinks to decide
+// (measured): a path swapped between autoagy's check and agy's write cannot
+// land outside the workspace. autoagy already reviews every edit that names a
+// place outside the workspace, so what setting this to true bought was only
+// "an approved one runs without a second prompt" — and what it sold was the
+// only cap problem 2 has. The directories `writableRoots` names get their own
+// narrow grants instead; see `writableRootGrants`.
+export const RECOMMENDED_SETTINGS = { enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox', allowNonWorkspaceAccess: false };
+
+/**
+ * A `write_file(...)` grant for each directory `writableRoots` names.
+ *
+ * With `allowNonWorkspaceAccess: false` agy refuses a write whose resolved
+ * target is outside the workspace, and `writableRoots` exists precisely to let
+ * a few outside directories be edited without review — so without these the
+ * option would be a dead letter. Measured: the grant covers the whole subtree,
+ * does not reach a sibling directory, and resolves symlinks, so a link planted
+ * inside a granted directory cannot write out of it.
+ *
+ * agy's own scratch directory and the temp directories need nothing here: it
+ * does not count those as outside the workspace (measured).
+ */
+export function writableRootGrants(config, home = os.homedir()) {
+  return (config?.writableRoots ?? [])
+    .filter((p) => typeof p === 'string' && p.trim() !== '')
+    .map((p) => `write_file(${path.resolve(expandHome(p.trim(), home))})`);
+}
+
+/**
+ * Every grant a configuration needs, in the order `autoagy setup` writes them.
+ * @param {object} config
+ * @param {{ autoagyHome: string, home?: string }} where
+ */
+export function grantsFor(config, { autoagyHome, home = os.homedir() }) {
+  const command = config?.commandGrant === 'executor' ? `command(${executorPath(autoagyHome)})` : 'command(*)';
+  return [command, 'mcp(*)', 'execute_url(*)', ...writableRootGrants(config, home)];
+}
 
 export function cliSettingsPath(home = os.homedir()) {
   return path.join(home, '.gemini', 'antigravity-cli', 'settings.json');

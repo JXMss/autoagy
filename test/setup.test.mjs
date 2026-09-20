@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath } from '../plugin/lib/setup.mjs';
+import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, RECOMMENDED_SETTINGS } from '../plugin/lib/setup.mjs';
+import { executorPath } from '../plugin/lib/tokens.mjs';
 import { configPath } from '../plugin/lib/config.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-setup-'));
@@ -32,7 +33,9 @@ test('setup adds grants and sandbox settings, teardown restores them', () => {
   assert.deepEqual(after1.permissions.deny, ['command(rm -rf /)']);
   assert.equal(after1.enableTerminalSandbox, true);
   assert.equal(after1.toolPermission, 'proceed-in-sandbox');
-  assert.equal(after1.allowNonWorkspaceAccess, true);
+  // The one check that happens at the moment of the write, and follows
+  // symlinks to decide where that write lands.
+  assert.equal(after1.allowNonWorkspaceAccess, false);
   assert.ok(fs.existsSync(report.backup));
   assert.ok(!after1.permissions.allow.includes('read_url(*)'));
 
@@ -82,4 +85,36 @@ test('pinHookCommands pins the configuration directory and home', () => {
   assert.match(command, /--home \/home\/someone$/);
   // Running setup again must not append the flags a second time.
   assert.equal(pinHookCommands(dir, { nodePath: '/usr/bin/node', configHome, home: '/home/someone' }).changed, 0);
+});
+
+test('the grants follow the configuration: the command shape, and one per writable root', () => {
+  const home = path.join(root, 'grants-home');
+  const autoagyHome = path.join(home, '.gemini', 'autoagy');
+  assert.deepEqual(grantsFor({}, { autoagyHome, home }), ['command(*)', 'mcp(*)', 'execute_url(*)']);
+
+  // The executor shape names one program in place of the wildcard.
+  assert.deepEqual(grantsFor({ commandGrant: 'executor' }, { autoagyHome, home })[0], `command(${executorPath(autoagyHome)})`);
+
+  // `allowNonWorkspaceAccess: false` would otherwise make writableRoots a dead
+  // letter: agy refuses the write whatever autoagy says about it.
+  const config = { writableRoots: ['~/shared-lib', '/srv/build ', '', 42] };
+  assert.deepEqual(writableRootGrants(config, home), [`write_file(${path.join(home, 'shared-lib')})`, 'write_file(/srv/build)']);
+  assert.deepEqual(grantsFor(config, { autoagyHome, home }).slice(3), writableRootGrants(config, home));
+});
+
+test('setup writes a write_file grant for each writable root', () => {
+  const home = path.join(root, 'roots-home');
+  const env = { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy') };
+  const file = cliSettingsPath(home);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{}');
+  const grants = grantsFor({ writableRoots: ['~/shared-lib'] }, { autoagyHome: env.AUTOAGY_HOME, home });
+  applySetup({ home, env, grants });
+  const written = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(written.permissions.allow.includes(`write_file(${path.join(home, 'shared-lib')})`));
+  assert.equal(written.allowNonWorkspaceAccess, false);
+  assert.equal(RECOMMENDED_SETTINGS.allowNonWorkspaceAccess, false);
+  // Teardown puts the setting back where it found it rather than at the default.
+  applyTeardown({ home, env });
+  assert.equal('allowNonWorkspaceAccess' in JSON.parse(fs.readFileSync(file, 'utf8')), false);
 });

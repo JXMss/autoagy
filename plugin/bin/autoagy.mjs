@@ -21,7 +21,7 @@ import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INST
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
 import { listStates, updateState, readState, isUntrusted, readHeartbeat } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, RECOMMENDED_GRANTS, readSetupRecord } from '../lib/setup.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, readSetupRecord } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
 
 /**
@@ -303,16 +303,6 @@ function trust(prefix, all, force) {
   console.log('Only do this once you have checked what changed on disk AND know that no backgrounded command is still running.');
 }
 
-/**
- * The grants this configuration needs. `commandGrant: "executor"` replaces the
- * wildcard with the one program that redeems tokens, which is the whole point:
- * a grant that is worth nothing once the hook stops writing tokens.
- */
-function grantsFor(config, autoagyHome) {
-  const command = config.commandGrant === 'executor' ? `command(${executorPath(autoagyHome)})` : 'command(*)';
-  return [command, ...RECOMMENDED_GRANTS.filter((g) => g !== 'command(*)')];
-}
-
 function readJsonQuiet(file) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -423,8 +413,16 @@ function status() {
     lines.push(`  toolPermission          ${settings.toolPermission}`);
     lines.push(`  allowNonWorkspaceAccess ${settings.allowNonWorkspaceAccess}`);
     lines.push(`  permissions.allow       ${JSON.stringify(allow)}`);
-    const missing = grantsFor(config, autoagyHome).filter((g) => !allow.includes(g));
+    const wanted = grantsFor(config, { autoagyHome, home: userHome });
+    const missing = wanted.filter((g) => !allow.includes(g));
     if (missing.length) lines.push(`  ! missing grants ${missing.join(', ')} — approved actions may still prompt; run \`autoagy setup\``);
+    // The grants are read once when agy starts (measured), so a writableRoots
+    // entry added after the last setup has no grant and simply will not work.
+    const rootsMissing = writableRootGrants(config, userHome).filter((g) => !allow.includes(g));
+    if (rootsMissing.length) {
+      lines.push(`  ! writableRoots changed since the last \`autoagy setup\`: ${rootsMissing.length} of them have no write_file grant,`);
+      lines.push('    so edits there are refused however autoagy classifies them. Re-run `autoagy setup`.');
+    }
     if (config.commandGrant === 'executor' && allow.includes('command(*)')) {
       lines.push('  ! command(*) is still granted, which makes the narrow executor grant pointless — remove it');
     }
@@ -588,7 +586,7 @@ function setup(flags) {
     console.log('Skipping Antigravity settings (--no-settings). Approved actions may still show Antigravity prompts.');
     return;
   }
-  const report = applySetup({ dryRun, grants: grantsFor(config, home) });
+  const report = applySetup({ dryRun, grants: grantsFor(config, { autoagyHome: home, home: accountHome() }) });
   console.log(`\nAntigravity CLI settings: ${report.settingsFile}`);
   if (report.addGrants.length === 0 && report.changes.length === 0) console.log('  already configured');
   for (const g of report.addGrants) console.log(`  ${dryRun ? 'would add' : 'added'} permissions.allow ${g}`);
