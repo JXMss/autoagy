@@ -120,13 +120,19 @@ export function withOwnSandbox(output, ctx) {
       // command creates is writable inside the sandbox and lands on the host.
       // Recorded for PostToolUse to compare against; the getter is memoized and
       // readOnlyPaths walked it a moment ago, so this costs nothing.
-      delete s.pendingNestedGit[ctx.stepIdx];
-      const nested = ctx.nestedGitPaths;
-      // Over the cap, record nothing: a truncated list would make a repository
-      // that was already there look newly created, and the record names that
-      // path on stderr. Skipping the step only returns it to the state before
-      // this check existed.
-      if (nested.length <= MAX_TRACKED_NESTED_GIT) s.pendingNestedGit[ctx.stepIdx] = nested;
+      // The whole set, never a truncated one — a missing entry would make a
+      // repository that was already there look newly created, and the record
+      // names that path on stderr.
+      //
+      // There was a count cap here and it was the wrong shape: going over it
+      // recorded nothing, so the check went silent, and going over it cost one
+      // unreviewed command. An empty `.git` holds nothing runnable and is never
+      // a finding, so `mkdir -p d1/.git … d101/.git` was a legal move that
+      // turned the check off for the rest of the conversation. The array needs
+      // no cap of its own: `findNestedGitPaths` visits a bounded number of
+      // directories and each one yields at most one `.git`, so its own budget
+      // is the bound.
+      s.pendingNestedGit[ctx.stepIdx] = ctx.nestedGitPaths;
       if (placeholders.length) {
         s.pendingPlaceholders[ctx.stepIdx] = placeholders;
         // Recorded rather than recomputed: if the workspace roots this hook
@@ -274,9 +280,6 @@ function reportPlantedHooks(home, ctx, findings) {
 }
 
 const MAX_PENDING_CONFINED = 50;
-// A workspace with more nested repositories than this is not tracked at all; see
-// the recording site for why the list is not truncated instead.
-const MAX_TRACKED_NESTED_GIT = 100;
 const MAX_PLANTED_HOOKS = 20;
 
 /**

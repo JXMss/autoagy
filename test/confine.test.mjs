@@ -720,3 +720,39 @@ test('a nested .git is protected once it exists, and not while it is being creat
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test('a workspace full of nested repositories does not turn the check off', async () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on' }));
+  const conversationId = '99999999-0000-4000-8000-p1a17ed00004';
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  // An empty `.git` holds nothing runnable, so creating one is never a finding.
+  // Making a lot of them used to be a legal move that put the workspace over a
+  // count cap, and going over the cap recorded no before-set at all — one
+  // unreviewed command silenced the check for the rest of the conversation.
+  const decoys = path.join(dirs.workspace, 'many');
+  // Not `target`, `build` or another name on the scan's skip list: those are
+  // not walked at all, which is the documented cost of the budget.
+  const repo = path.join(decoys, 'app');
+  const gitDir = path.join(repo, '.git');
+  fs.rmSync(decoys, { recursive: true, force: true });
+  try {
+    for (let i = 0; i < 120; i++) fs.mkdirSync(path.join(decoys, `d${i}`, '.git'), { recursive: true });
+    const args = { CommandLine: `mkdir -p ${gitDir}/hooks` };
+    const started = await handlePreToolUse(payloadFor(dirs, 'run_command', args, { conversationId, stepIdx: 90 }), opts);
+    assert.equal(started.decision, 'allow');
+    assert.ok(readState(home, conversationId).pendingNestedGit[90].length >= 120, 'the whole set is recorded, never a truncated one');
+
+    fs.mkdirSync(path.join(gitDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(gitDir, 'hooks', 'pre-commit'), '#!/bin/sh\necho pwned\n');
+    handlePostToolUse(payloadFor(dirs, 'run_command', started.overwrite, { conversationId, stepIdx: 90 }), opts);
+    const planted = readState(home, conversationId).plantedHooks ?? [];
+    assert.ok(planted.some((entry) => entry.path === gitDir), 'the plant is still found among 120 decoys');
+    // And the decoys themselves are not accused: they hold nothing runnable.
+    assert.equal(planted.length, 1);
+  } finally {
+    fs.rmSync(decoys, { recursive: true, force: true });
+    fs.rmSync(path.join(home, 'config.json'), { force: true });
+  }
+});
