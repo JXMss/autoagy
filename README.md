@@ -27,11 +27,7 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 
 ## 安装
 
-> **装它之前要知道的一件事。** autoagy 要向 Antigravity 申请 `command(*)`、`mcp(*)`、`execute_url(*)` 三条授权，之后 hook 就是唯一的闸门。hook 自己失败是 fail-closed（工具调用报错），而**插件没加载**曾经是 fail-open：`agy plugin disable`、`agy plugin install` 用未钉住的 `hooks.json` 覆盖、或钉住的解释器失效——这三种情况下授权都还在，闸门没了，而且悄无声息。
->
-> **现在有个哨兵挡着这件事。** `autoagy setup` 会往 `~/.gemini/config/hooks.json` 注册一个独立的 hook（实测：这个位置由 agy 加载，且**不受 `agy plugin disable` 和 `agy plugin install` 影响**）。它每次工具调用只问一句「插件还在不在、还启用着没有」，答案是「在」就什么都不说；答案是「不在」就**拒绝这次工具调用**，并告诉 agent 去看 `autoagy status`。第三种失效（解释器坏了）不用检查——hook 跑不起来时 agy 会让工具调用失败，那本身就是 fail-closed。所以这三条路现在都不再是静默放行。
->
-> 代价是：**`agy plugin disable autoagy` 之后所有工具调用都会被拒**，而不是悄悄回到无人审核。要暂停用 `autoagy mode off`，要卸载用 `autoagy teardown`（会把哨兵一并撤掉）。
+> **装它之前要知道的一件事。** autoagy 要向 Antigravity 申请 `command(*)`、`mcp(*)`、`execute_url(*)` 三条授权，之后 hook 就是唯一的闸门。hook 自己失败是 fail-closed（工具调用报错），但**插件没加载是 fail-open**：`agy plugin disable`、`agy plugin install` 用未钉住的 `hooks.json` 覆盖、或钉住的解释器失效——这三种情况下授权都还在，闸门没了。
 >
 > **命令这一类可以收窄。** 把 `commandGrant` 设成 `"executor"` 之后，授权从 `command(*)` 变成 `command(<~/.gemini/autoagy/bin/exec-confined.mjs>)`——一个只会兑换 hook 写下的一次性令牌的程序。hook 不跑了就没人写令牌，那条授权拿在手里也没用，**命令这一类因此是 fail-closed 的**。详见下文配置表。`mcp(*)` 和 `execute_url(*)` 没有对应的收窄办法（它们不是命令），所以那两类仍然是上面说的形状。
 >
@@ -62,7 +58,7 @@ node scripts/install.mjs            # 先看会改什么：node scripts/install.
 node scripts/install.mjs --uninstall          # 加 --purge 同时删除 ~/.gemini/autoagy
 ```
 
-> 注意：`agy plugin disable autoagy` **不是**停用它的办法——上面的授权仍然存在，而哨兵会因此拒绝所有工具调用。要暂停请用 `autoagy mode off`（此时绕过沙箱的命令、MCP、浏览器操作改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
+> 注意：如果只用 `agy plugin disable autoagy` 停用插件，上面的授权仍然存在，绕过沙箱的命令、MCP 调用和浏览器操作会不经审核、也不弹窗直接执行。请用 `autoagy mode off` 暂停（此时这三类操作会改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
 
 **Antigravity IDE / Antigravity 2.0**：插件格式相同，但权限在设置界面里（Settings → Permission Grants）。请手动加上同样三条授权并保持终端沙箱开启，然后在 `config.json` 里设 `"sandbox": "on"`（autoagy 只能自动识别 CLI 的沙箱设置）。
 
@@ -76,7 +72,7 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 
 | 命令 | 作用 |
 | --- | --- |
-| `autoagy status` | 查看模式、审核后端、Antigravity 设置与授权是否就绪、**哨兵装没装**，以及 **hook 最后一次运行的时间**——插件被 disable、钉子被覆盖、解释器失效，三种失效都只表现为"hooks 不再运行"，这个时间戳是唯一能从内部看到的痕迹（超过一天会明确告警） |
+| `autoagy status` | 查看模式、审核后端、Antigravity 设置与授权是否就绪，以及 **hook 最后一次运行的时间**——插件被 disable、钉子被覆盖、解释器失效，三种失效都只表现为"hooks 不再运行"，这个时间戳是唯一能从内部看到的痕迹（超过一天会明确告警） |
 | `autoagy log [-n 20]` | 最近的决策（被审核的操作、结论、风险、耗时） |
 | `autoagy denials` | 最近被拒绝的操作及理由 |
 | `autoagy approve <id>` | 对某次拒绝放行**一次重试**（审核模型会看到你的批准；critical 风险仍会拒绝） |
@@ -188,7 +184,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | 读文件、列目录、搜索、查看终端/任务状态、`search_web` | 放行（读取凭据类文件、搜索包含凭据位置的目录需审核；`webSearch: "review"` 时 `search_web` 送审） |
 | 编辑工作区、会话 artifact 目录、临时目录内的文件 | 放行 |
 | 编辑工作区外的文件，或 `.git`、`.agents`、`~/.gemini` 等 | 审核 |
-| 编辑 autoagy 自己的配置/插件目录 | 直接拒绝（防止 agent 关掉自己的监管） |
+| 编辑 autoagy 自己的配置/插件目录，或**任何能注册 hook 的位置**（`~/.gemini/config/hooks.json`、`~/.gemini/config/plugins/` 下的任何目录） | 直接拒绝。写进这些位置的文件会成为 agy 在**每次工具调用前执行的命令，且在所有沙箱之外**——等于 agent 给自己装监管者。这个问题只该问人，不该由模型判一次然后一直生效 |
 | 沙箱内的命令 | 放行（Linux 上改写为在 autoagy 自己的沙箱里运行）；破坏性命令（强制 `rm`、`git reset --hard`、`git clean -f`、`find -delete`……）审核 |
 | 读进程环境的命令（`printenv`、裸 `env`、`ps auxe`、`jq env`、打印变量的 shell 内建（`export -p`、`declare -x`、裸 `set`、`compgen -e`）、`busybox <applet>` 形式的同一个命令、解释器内联代码里的 `process.env`／`os.environ`／`ENV`／`$ENV`／`ENVIRON`，或展开一个沙箱白名单之外、而环境里确实存在的 `$变量`） | 审核——除非这条命令的环境已被重建（autoagy 自己的沙箱，或 `commandEnv.mode: "scrub"`），那时它读不到东西，不送审 |
 | `BypassSandbox: true` 的命令、`notebook_execution` | 审核 |
@@ -233,7 +229,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 - Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问（这是为保住沙箱网络隔离做的取舍）。
 - hook 负载里没有可信的用户消息（`lastUserInput` 等字段存在但未填），autoagy 只能从 transcript 里识别用户说的话，而 transcript 的完整性依赖上面的沙箱。
 - 审核模型没有工具（Codex 的 guardian 可以做只读检查）；autoagy 用确定性的目标检查部分弥补。
-- **文件编辑本身不在任何沙箱里执行**：写文件的是 agy 自己（Codex 的 `apply_patch` 在文件系统沙箱里跑），autoagy 只能在写入前检查一次目标路径。如果一条后台的沙箱命令在这中间把路径换成了符号链接，写入就会落到别处（检查时刻和使用时刻不一致）。PostToolUse 会在写入后重新解析目标并比对：对不上就记一条 `edit-target-changed`、熔断本轮，并把整个会话标记为不可信（见「会话信任」）。这些都只能事后发现，不能阻止那一次写入。**读取走的是同一条路，也有同样的事后核对**：agy 同样是自己去读、不经过任何沙箱，所以返回文件内容的工具（`view_file`、`read_file`、`grep_search` 等，`grep_search` 按它的 `SearchPath` 判）在执行后会重新解析一次目标，对不上就记 `read-target-changed`、同样熔断并标记会话不可信。**但性质比编辑更不可逆**：写错地方还能清理，读错地方的内容已经进了模型上下文，收不回来——所以那条提示直接告诉你哪个文件可能被读走了、该去轮换什么。根治仍然要等 Antigravity 把编辑和读取都放进沙箱。
+- **文件编辑本身不在任何沙箱里执行**：写文件的是 agy 自己（Codex 的 `apply_patch` 在文件系统沙箱里跑），autoagy 只能在写入前检查一次目标路径。如果一条后台的沙箱命令在这中间把路径换成了符号链接，写入就会落到别处（检查时刻和使用时刻不一致）。**批准前 autoagy 会把路径解析好再交给 agy**（实测 `overwrite` 对编辑和读取工具都生效），所以路径里**原本就有的符号链接**事后被改指向不再能移动那次写入——这同时也是日常最常见的误报来源（pnpm、构建缓存会在后台不停重建符号链接）。**没覆盖的是另一种**：路径里一个真实目录在检查之后被换成符号链接，因为写入无论如何都要经过那个目录项，这一种只有 agy 自己在打开文件时才拦得住。PostToolUse 会在写入后重新解析目标并比对：对不上就记一条 `edit-target-changed`、熔断本轮，并把整个会话标记为不可信（见「会话信任」）。事后发现，不能阻止那一次写入。**读取走的是同一条路，也有同样的事后核对**：agy 同样是自己去读、不经过任何沙箱，所以返回文件内容的工具（`view_file`、`read_file`、`grep_search` 等，`grep_search` 按它的 `SearchPath` 判）在执行后会重新解析一次目标，对不上就记 `read-target-changed`、同样熔断并标记会话不可信。**但性质比编辑更不可逆**：写错地方还能清理，读错地方的内容已经进了模型上下文，收不回来——所以那条提示直接告诉你哪个文件可能被读走了、该去轮换什么。根治仍然要等 Antigravity 把编辑和读取都放进沙箱。
 - 子 agent 的授权以根会话里用户的话为准（通过父会话的 `invoke_subagent` 记录回溯），找不到父会话时按不可信处理。
 - Windows 上命令解析是尽力而为（PowerShell 语法与 POSIX shell 不同，但会偏向保守）。
 - 用 `--dangerously-skip-permissions` 启动 agy 时 Antigravity 的沙箱实际不生效：启用了 autoagy 自己的沙箱时命令仍在其中运行（实测 `overwrite` 在该模式下照样生效）；否则 autoagy 按无沙箱处理，审核会变多；`force_ask` 在该模式下会被自动同意，所以 autoagy 在此模式下只使用 allow/deny——这条现在也覆盖 `mode: off` 的弹窗路径。

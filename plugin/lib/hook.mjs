@@ -10,7 +10,7 @@
 
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext, HOST_INSPECTABLE_PLATFORMS, newNestedGitPlantings } from './context.mjs';
-import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets, readTargets } from './policy.mjs';
+import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets, readTargets, canonicalPathArgs } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
@@ -183,6 +183,26 @@ function issueToken(ctx, commandLine) {
     conversation: ctx.conversationId,
     step: ctx.stepIdx,
   }).commandLine;
+}
+
+/**
+ * Hands agy the target with its parent directories already resolved.
+ *
+ * agy performs edits and reads itself, outside every sandbox, so the only
+ * protection available is to narrow what can still change between the check and
+ * the call. Resolving the path first removes one way it changes — a symlink
+ * already in the path being re-pointed — and leaves the other, a real directory
+ * turned into a symlink, which nothing here can reach.
+ *
+ * Applied only when something actually resolves elsewhere, so the ordinary call
+ * carries no `overwrite` and the agent sees no note about one.
+ */
+function withCanonicalTarget(output, ctx) {
+  if (output?.decision !== 'allow' && output?.decision !== 'force_ask') return output;
+  if (!targetCheckKind(ctx.toolName)) return output;
+  const overwrite = canonicalPathArgs(ctx);
+  if (!overwrite) return output;
+  return { ...output, overwrite: { ...(output.overwrite ?? {}), ...overwrite } };
 }
 
 /**
@@ -450,12 +470,19 @@ function targetCheckKind(toolName) {
   return null;
 }
 
-/** Records where a tool's targets resolved when it was approved, for checkTargets. */
-function rememberTargets(ctx) {
+/**
+ * Records where a tool's targets resolved when it was approved, for checkTargets.
+ *
+ * `args` is the call as it will actually run, which is not `ctx.args` when
+ * `withCanonicalTarget` rewrote a path: PostToolUse sees the rewritten
+ * arguments, so recording the original ones would leave the two halves of the
+ * comparison keyed differently and the check would quietly compare nothing.
+ */
+function rememberTargets(ctx, args = ctx.args) {
   const kind = ctx.stepIdx === null ? null : targetCheckKind(ctx.toolName);
   if (!kind) return;
   const check = TARGET_CHECKS[kind];
-  const targets = check.targets(ctx);
+  const targets = check.targets(ctx, args);
   if (targets.length === 0) return;
   updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
     const pending = s[check.pending] ?? (s[check.pending] = {});
@@ -659,8 +686,9 @@ export async function handlePreToolUse(payload, options = {}) {
 
   if (classification.verdict === 'allow') {
     if (config.log.allowed) appendDecision(home, { ...base, verdict: 'allow', reason: classification.reason });
-    rememberTargets(ctx);
-    return withOwnSandbox({ decision: 'allow' }, ctx);
+    const allowed = withCanonicalTarget({ decision: 'allow' }, ctx);
+    rememberTargets(ctx, { ...ctx.args, ...(allowed.overwrite ?? {}) });
+    return withOwnSandbox(allowed, ctx);
   }
   if (classification.verdict === 'deny') {
     appendDecision(home, { ...base, verdict: 'deny', reason: classification.reason });
@@ -744,8 +772,9 @@ export async function handlePreToolUse(payload, options = {}) {
   if (config.log.reviews && prompt) {
     writeReviewRecord(home, `${Date.now()}-${ctx.conversationId.slice(0, 8)}`, { prompt, result });
   }
-  if (output.decision !== 'deny') rememberTargets(ctx);
-  return withOwnSandbox(output, ctx);
+  const reviewed = withCanonicalTarget(output, ctx);
+  if (reviewed.decision !== 'deny') rememberTargets(ctx, { ...ctx.args, ...(reviewed.overwrite ?? {}) });
+  return withOwnSandbox(reviewed, ctx);
 }
 
 /**

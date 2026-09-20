@@ -2,7 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { classify, plannedAction } from '../plugin/lib/policy.mjs';
+import { classify, plannedAction, canonicalPathArgs } from '../plugin/lib/policy.mjs';
 import { makeSandboxDirs, contextFor, configWith, okProbe } from './helpers.mjs';
 import { PROTECTED_WORKSPACE_DIRS } from '../plugin/lib/context.mjs';
 
@@ -659,4 +659,50 @@ test('an escalation into a planted repository says so in its reason', () => {
   assert.match(escalated.reason, /appeared while a sandboxed command ran/);
   assert.ok(escalated.reason.includes(repo));
   fs.rmSync(repo, { recursive: true, force: true });
+});
+
+test('every place a hook can be registered is refused outright, not reviewed', () => {
+  // A file written to either of these is a command agy runs before every tool
+  // call, outside every sandbox — the agent writing its own supervisor. Being
+  // under ~/.gemini made them "protected", which is a review; a model is asked
+  // that question once and the answer then runs on every call afterwards.
+  for (const target of [
+    path.join(dirs.home, '.gemini', 'config', 'hooks.json'),
+    path.join(dirs.home, '.gemini', 'config', 'plugins', 'anything', 'hooks.json'),
+  ]) {
+    const out = verdict('write_to_file', { TargetFile: target });
+    assert.equal(out.verdict, 'deny', target);
+    assert.equal(out.category, 'self-protection', target);
+  }
+  // And a command that names one is flagged as touching a security control
+  // rather than judged as an ordinary escalation.
+  const cmd = verdict('run_command', { CommandLine: `rm ${path.join(dirs.home, '.gemini', 'config', 'hooks.json')}`, BypassSandbox: true }, { config: configWith({ ownSandbox: 'off' }) });
+  assert.match(cmd.reason, /security controls/);
+});
+
+test('a path is rewritten only when it actually resolves somewhere else', () => {
+  const real = path.join(dirs.workspace, 'real');
+  const link = path.join(dirs.workspace, 'link');
+  fs.mkdirSync(real, { recursive: true });
+  fs.rmSync(link, { force: true, recursive: true });
+  fs.symlinkSync(real, link);
+  try {
+    const of = (args) => canonicalPathArgs(contextFor(dirs, 'write_to_file', args));
+    // Nothing to resolve: no rewrite, so no "a pre-tool hook changed the
+    // arguments" notice on an ordinary edit.
+    assert.equal(of({ TargetFile: path.join(real, 'a.js') }), null);
+    // Turning a relative path absolute is not a resolution either.
+    assert.equal(of({ TargetFile: 'a.js' }), null);
+    // A symlinked parent is.
+    assert.deepEqual(of({ TargetFile: path.join(link, 'a.js') }), { TargetFile: path.join(real, 'a.js') });
+    // Including one that does not exist yet: the parents are what get resolved.
+    assert.deepEqual(of({ TargetFile: path.join(link, 'new', 'b.js') }), { TargetFile: path.join(real, 'new', 'b.js') });
+    // A search names its path differently, and it is covered too.
+    assert.deepEqual(canonicalPathArgs(contextFor(dirs, 'grep_search', { SearchPath: link, Query: 'x' })), { SearchPath: real });
+    // Lists are mapped element by element.
+    assert.deepEqual(of({ TargetFiles: [path.join(real, 'a.js'), path.join(link, 'b.js')] }), { TargetFiles: [path.join(real, 'a.js'), path.join(real, 'b.js')] });
+  } finally {
+    fs.rmSync(link, { force: true });
+    fs.rmSync(real, { recursive: true, force: true });
+  }
 });

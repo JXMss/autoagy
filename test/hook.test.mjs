@@ -512,3 +512,35 @@ test('reads stay out of the edit list the reviewer is shown', () => {
   assert.equal(state.recentEdits.length, 1);
   assert.equal(state.recentEdits[0].kind, 'write_to_file');
 });
+
+// The everyday face of the check-to-use race: tools that rebuild symlink trees
+// in the background (pnpm's node_modules, build caches) re-point links while
+// the agent works. Without resolving the target first, an edit that ran beside
+// one looked exactly like a swapped path and cost the user an `autoagy trust`.
+test('resolving the target first stops a re-pointed symlink from looking like a swap', () => {
+  const real = path.join(dirs.workspace, 'real');
+  const other = path.join(dirs.workspace, 'other');
+  const link = path.join(dirs.workspace, 'pkg');
+  for (const dir of [real, other]) fs.mkdirSync(dir, { recursive: true });
+  fs.rmSync(link, { force: true });
+  fs.symlinkSync(real, link);
+  try {
+    const args = { TargetFile: path.join(link, 'a.js'), CodeContent: 'x' };
+    const out = runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', args, ws()));
+    assert.equal(out.decision, 'allow');
+    assert.equal(out.overwrite.TargetFile, path.join(real, 'a.js'), 'agy is handed the path with the link already followed');
+
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(other, link);
+    runHook('post-tool-use', payloadFor(dirs, 'write_to_file', { ...args, ...out.overwrite }, ws()));
+
+    assert.equal(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).untrusted, null);
+    assert.ok(!readDecisions(dirs.env.AUTOAGY_HOME, 5).some((r) => r.verdict === 'edit-target-changed'));
+    // The variant this does not cover keeps its own test above: a real
+    // directory replaced by a symlink is still reported, because the write has
+    // to traverse that directory whatever it has become.
+  } finally {
+    fs.rmSync(link, { force: true });
+    for (const dir of [real, other]) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

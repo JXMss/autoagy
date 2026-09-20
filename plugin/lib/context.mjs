@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { autoagyHome } from './config.mjs';
 import { toAbsolute, uniquePaths, expandHome, expandAnchoredGlob, resolveReal, findExecutable } from './paths.mjs';
 import { detectOwnSandbox, probeBwrap, hostBuildId, envBinaryPath, envScrubDisabled } from './confine.mjs';
+import { userHooksPath } from './tripwire.mjs';
 
 export const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -487,6 +488,18 @@ export class HookContext {
       return uniquePaths([
         this.autoagyHome,
         this.pluginDir,
+        // Everywhere a hook can be registered. A file written here is a command
+        // agy runs before every tool call, outside every sandbox — the same
+        // thing autoagy is, so an agent writing one is writing its own
+        // supervisor. `~/.gemini` already made these "protected" (a review);
+        // that is the wrong strength for something a model is asked to judge
+        // once and which then runs on every call afterwards.
+        //
+        // Measured on agy 1.2.7: the user-level file is loaded and is not
+        // managed by `agy plugin`, a new plugin directory is picked up with no
+        // enabling step, and two files registering the same name both run.
+        userHooksPath(this.home),
+        path.join(this.home, '.gemini', 'config', 'plugins'),
         this.appDataDir ? path.join(this.appDataDir, 'plugin_data', 'autoagy') : null,
         this.hostExecutable,
         reviewer,

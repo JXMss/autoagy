@@ -635,8 +635,8 @@ function classifyFileEdit(ctx, state = {}) {
  * symlink between the check and the write.
  * @returns {{ abs: string, real: string }[]}
  */
-export function editTargets(ctx) {
-  return resolvedTargets(ctx, pathArgs(ctx.args));
+export function editTargets(ctx, args = ctx.args) {
+  return resolvedTargets(ctx, pathArgs(args));
 }
 
 /**
@@ -655,8 +655,58 @@ export function editTargets(ctx) {
  * path the same way, for the same reason — a search reads every file beneath it.
  * @returns {{ abs: string, real: string }[]}
  */
-export function readTargets(ctx) {
-  return resolvedTargets(ctx, [...pathArgs(ctx.args), ctx.args.SearchPath]);
+export function readTargets(ctx, args = ctx.args) {
+  return resolvedTargets(ctx, [...pathArgs(args), args.SearchPath]);
+}
+
+/**
+ * The path arguments whose parent directories resolve somewhere else, in the
+ * shape an `overwrite` takes — or null when none do.
+ *
+ * Handing agy the already-resolved path takes one variant of the check-to-use
+ * race off the table: with the symlink followed in advance, re-pointing it
+ * afterwards no longer moves the call. Be clear about which variant. It does
+ * **not** cover a real directory in the path being replaced by a symlink after
+ * the check, because the call has to traverse that directory whatever it now
+ * is; only agy opening the file could catch that one.
+ *
+ * The everyday reason is the same mechanism seen from the other side. Tools
+ * that rebuild symlink trees in the background — pnpm's `node_modules`, build
+ * caches — re-point links constantly, and an edit or read that happened to run
+ * beside one would otherwise be reported as a swapped target and cost the user
+ * an `autoagy trust` for nothing.
+ *
+ * Only arguments that actually change are returned, so an ordinary call is not
+ * rewritten and the agent is not shown "a pre-tool hook changed the arguments"
+ * for no reason. Measured on agy 1.2.7: `overwrite` applies to the edit tools
+ * and to the read tools alike.
+ * @returns {object | null}
+ */
+export function canonicalPathArgs(ctx) {
+  const out = {};
+  for (const [key, value] of Object.entries(ctx.args)) {
+    // `SearchPath` is a read's target and is deliberately outside PATH_ARG_RE
+    // (see readTargets), so it is named here as well.
+    if (!PATH_ARG_RE.test(key) && key !== 'SearchPath') continue;
+    if (typeof value === 'string') {
+      const canonical = canonicalTarget(ctx, value);
+      if (canonical) out[key] = canonical;
+    } else if (Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === 'string')) {
+      const mapped = value.map((v) => canonicalTarget(ctx, v) ?? v);
+      if (mapped.some((v, i) => v !== value[i])) out[key] = mapped;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** One path argument resolved, when that differs from the path as written. */
+function canonicalTarget(ctx, raw) {
+  const abs = toAbsolute(raw, ctx.baseDir, ctx.home);
+  if (!abs) return null;
+  const real = resolveReal(abs);
+  // Comparing against the absolute form, not the raw one: turning a relative
+  // path into an absolute one is not a resolution and is not worth a rewrite.
+  return real === abs ? null : real;
 }
 
 function resolvedTargets(ctx, raws) {
