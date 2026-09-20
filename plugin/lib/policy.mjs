@@ -706,7 +706,23 @@ function canonicalTarget(ctx, raw) {
   const real = resolveReal(abs);
   // Comparing against the absolute form, not the raw one: turning a relative
   // path into an absolute one is not a resolution and is not worth a rewrite.
-  return real === abs ? null : real;
+  if (real === abs) return null;
+  // A link at or above the base is not a resolution either, and this is the
+  // difference between a rewrite that helps and one that trains the notice away.
+  // The call traverses the base's own link whether or not the target is
+  // rewritten, so rewriting it buys nothing — while on a host whose workspace
+  // path goes through one (macOS `/tmp` and `/var/folders`, a symlinked home)
+  // every relative target differs from its realpath, so every edit and read
+  // would carry an `overwrite` and agy would tell the agent "a pre-tool hook
+  // changed the arguments" every single time. That notice is the only signal the
+  // agent gets when a rewrite is real. What is worth reporting is a difference
+  // below the base — a link in the target's own path.
+  const base = ctx.baseDir;
+  if (base && isWithin(abs, base)) {
+    const expected = path.join(resolveReal(base), path.relative(base, abs));
+    if (real === expected) return null;
+  }
+  return real;
 }
 
 function resolvedTargets(ctx, raws) {

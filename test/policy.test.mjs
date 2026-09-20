@@ -722,6 +722,44 @@ test('a path is rewritten only when it actually resolves somewhere else', () => 
   }
 });
 
+test('a workspace root that is itself a symlink is not a reason to rewrite every call', () => {
+  // A host whose workspace path goes through a link — macOS `/tmp`,
+  // `/var/folders`, a symlinked home or working directory — would otherwise
+  // rewrite every relative target, and agy tells the agent "a pre-tool hook
+  // changed the arguments" for each one. That notice is the only signal the
+  // agent gets when the rewrite is real, and it cannot survive being shown on
+  // every ordinary call.
+  const link = path.join(dirs.root, 'ws-link');
+  fs.rmSync(link, { force: true });
+  fs.symlinkSync(dirs.workspace, link);
+  const host = { kind: 'cli', cwd: link, argv: ['agy'], flags: { skipPermissions: false, sandbox: false, addDirs: [] } };
+  const of = (args) => canonicalPathArgs(contextFor(dirs, 'write_to_file', args, { host }));
+  try {
+    assert.equal(of({ TargetFile: 'src/a.js' }), null, 'the root link is traversed either way');
+    assert.equal(of({ TargetFile: path.join(link, 'src', 'a.js') }), null);
+    // A link below the root is still a resolution, and still gets rewritten.
+    const inner = path.join(dirs.workspace, 'inner-real');
+    const innerLink = path.join(dirs.workspace, 'inner-link');
+    fs.mkdirSync(inner, { recursive: true });
+    fs.symlinkSync(inner, innerLink);
+    assert.deepEqual(of({ TargetFile: path.join(innerLink, 'x.js') }), { TargetFile: path.join(inner, 'x.js') });
+    fs.rmSync(innerLink, { force: true });
+    fs.rmSync(inner, { recursive: true, force: true });
+    // And so is a target outside the root entirely, whatever the root is.
+    const outside = path.join(dirs.root, 'outside-real');
+    const outsideLink = path.join(dirs.root, 'outside-link');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.symlinkSync(outside, outsideLink);
+    assert.deepEqual(canonicalPathArgs(contextFor(dirs, 'write_to_file', { TargetFile: path.join(outsideLink, 'y.js') }, { host })), {
+      TargetFile: path.join(outside, 'y.js'),
+    });
+    fs.rmSync(outsideLink, { force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  } finally {
+    fs.rmSync(link, { force: true });
+  }
+});
+
 test('a command reaching autoagy\'s own files is flagged in all three spellings of the path', () => {
   const config = configWith({ ownSandbox: 'off' });
   // `${HOME}` was the one missing. The argument-side checks in policy.mjs have
