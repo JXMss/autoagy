@@ -104,6 +104,17 @@ export const DEFAULT_CONFIG = Object.freeze({
     // MCP tool names (globs over "server/tool") that are read-only and need no review.
     allow: [],
   },
+  // Which `command(...)` grant autoagy's own sandbox runs under.
+  //
+  // "wildcard": `command(*)`, which is what the rewritten call needs to leave
+  //   Antigravity's sandbox — and which keeps working after the hook stops
+  //   running. That is the fail-open the README opens with.
+  // "executor": `command(<$AUTOAGY_HOME/bin/exec-confined.mjs>)`. The rewritten
+  //   call redeems a one-shot token the hook wrote into a directory the agent
+  //   cannot write, so no hook means no tokens and the grant is worth nothing.
+  //   Needs `autoagy setup` to have installed the executor and written that
+  //   grant; see tokens.mjs for what the guarantee rests on.
+  commandGrant: 'wildcard',
   // "review": clicks/typing/JS in the browser are reviewed; "allow": not reviewed.
   browser: 'review',
   // A web search sends the agent's query off the machine, and unlike a command
@@ -152,6 +163,7 @@ const ENUMS = {
   browser: ['review', 'allow'],
   webSearch: ['allow', 'review'],
   'commandEnv.mode': ['inherit', 'scrub'],
+  commandGrant: ['wildcard', 'executor'],
 };
 
 /** Directory holding config.json, state/ and logs/. */
@@ -284,7 +296,7 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
 
 /** The default config file written by `autoagy setup`. */
 export function defaultConfigFileText() {
-  const { mode, sandbox, ownSandbox, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv } = DEFAULT_CONFIG;
+  const { mode, sandbox, ownSandbox, commandGrant, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv } = DEFAULT_CONFIG;
   const { mock, ...reviewer } = DEFAULT_CONFIG.reviewer;
-  return `${JSON.stringify({ mode, sandbox, ownSandbox, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv }, null, 2)}\n`;
+  return `${JSON.stringify({ mode, sandbox, ownSandbox, commandGrant, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv }, null, 2)}\n`;
 }

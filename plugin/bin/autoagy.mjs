@@ -22,6 +22,7 @@ import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
 import { listStates, updateState, readState, isUntrusted, readHeartbeat } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, RECOMMENDED_GRANTS, readSetupRecord } from '../lib/setup.mjs';
+import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
 
 /**
  * The home directory the account database reports. `HOME` can be set for a
@@ -302,6 +303,16 @@ function trust(prefix, all, force) {
   console.log('Only do this once you have checked what changed on disk AND know that no backgrounded command is still running.');
 }
 
+/**
+ * The grants this configuration needs. `commandGrant: "executor"` replaces the
+ * wildcard with the one program that redeems tokens, which is the whole point:
+ * a grant that is worth nothing once the hook stops writing tokens.
+ */
+function grantsFor(config, autoagyHome) {
+  const command = config.commandGrant === 'executor' ? `command(${executorPath(autoagyHome)})` : 'command(*)';
+  return [command, ...RECOMMENDED_GRANTS.filter((g) => g !== 'command(*)')];
+}
+
 function readJsonQuiet(file) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -352,6 +363,19 @@ function status() {
   }
   const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath()), autoagyHome: autoagyHome });
   lines.push(`  own sandbox     ${own.active ? 'active' : own.required ? 'REQUIRED BUT UNAVAILABLE (commands are reviewed)' : 'inactive'} — ${own.detail}`);
+  // What the command grant is worth when the hook is not running is the whole
+  // reason the executor exists, so say which of the two shapes is in force.
+  if (config.commandGrant === 'executor') {
+    lines.push(`  command grant   one program (${executorPath(autoagyHome)})${executorInstalled(autoagyHome) ? '' : ' — NOT INSTALLED, run `autoagy setup`'}`);
+    const settingsNow = readJsonQuiet(cliSettingsPath());
+    if (settingsNow && settingsNow.allowNonWorkspaceAccess !== false) {
+      lines.push('  ! that grant only stays narrow while the executor cannot be overwritten. A file-editing');
+      lines.push('    tool can still write outside the workspace here (allowNonWorkspaceAccess is not false),');
+      lines.push('    and a hook that is not running refuses nothing. Set it to false to close that.');
+    }
+  } else {
+    lines.push('  command grant   command(*) — a standing licence to run anything, which keeps working if the hook stops (see commandGrant: "executor")');
+  }
   // The degraded mode is worth saying out loud rather than falling back in
   // silence: without a usable `flock`, autoagy cannot tell whether a sandboxed
   // command is still running, so it has to guess — and the guess can be wrong in
@@ -399,8 +423,11 @@ function status() {
     lines.push(`  toolPermission          ${settings.toolPermission}`);
     lines.push(`  allowNonWorkspaceAccess ${settings.allowNonWorkspaceAccess}`);
     lines.push(`  permissions.allow       ${JSON.stringify(allow)}`);
-    const missing = RECOMMENDED_GRANTS.filter((g) => !allow.includes(g));
+    const missing = grantsFor(config, autoagyHome).filter((g) => !allow.includes(g));
     if (missing.length) lines.push(`  ! missing grants ${missing.join(', ')} — approved actions may still prompt; run \`autoagy setup\``);
+    if (config.commandGrant === 'executor' && allow.includes('command(*)')) {
+      lines.push('  ! command(*) is still granted, which makes the narrow executor grant pointless — remove it');
+    }
     if (allow.some((g) => /^read_url\(\*\)$/.test(g))) lines.push('  ! read_url(*) is granted: sandboxed commands can reach any host without review');
     // Report what the policy will actually conclude, not what the file says: on
     // a platform where the process arguments cannot be read, detectSandbox
@@ -550,11 +577,18 @@ function setup(flags) {
     const pin = pinHookCommands(PLUGIN_DIR, { configHome: resolveAutoagyHome(process.env, accountHome()), home: accountHome(), dryRun });
     console.log(pin.changed ? `${dryRun ? 'Would pin' : 'Pinned'} hook interpreter to ${process.execPath}` : 'Hook interpreter already pinned');
   }
+  const { config } = loadConfig();
+  const home = resolveAutoagyHome(process.env, accountHome());
+  if (config.commandGrant === 'executor') {
+    if (!dryRun) installExecutor(home);
+    console.log(`${dryRun ? 'Would install' : 'Installed'} the token executor at ${executorPath(home)}`);
+    console.log('  the command grant names that program instead of `command(*)`, so a hook that stops running leaves nothing usable behind');
+  }
   if (flags['no-settings']) {
     console.log('Skipping Antigravity settings (--no-settings). Approved actions may still show Antigravity prompts.');
     return;
   }
-  const report = applySetup({ dryRun });
+  const report = applySetup({ dryRun, grants: grantsFor(config, home) });
   console.log(`\nAntigravity CLI settings: ${report.settingsFile}`);
   if (report.addGrants.length === 0 && report.changes.length === 0) console.log('  already configured');
   for (const g of report.addGrants) console.log(`  ${dryRun ? 'would add' : 'added'} permissions.allow ${g}`);

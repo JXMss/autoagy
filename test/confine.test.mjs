@@ -11,6 +11,7 @@ import { parseShell } from '../plugin/lib/shell.mjs';
 import { classify } from '../plugin/lib/policy.mjs';
 import { readState, updateState } from '../plugin/lib/state.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
+import { installExecutor, executorPath, tokenDir } from '../plugin/lib/tokens.mjs';
 import { makeSandboxDirs, configWith, payloadFor } from './helpers.mjs';
 
 const dirs = makeSandboxDirs();
@@ -753,6 +754,46 @@ test('a workspace full of nested repositories does not turn the check off', asyn
     assert.equal(planted.length, 1);
   } finally {
     fs.rmSync(decoys, { recursive: true, force: true });
+    fs.rmSync(path.join(home, 'config.json'), { force: true });
+  }
+});
+
+test('executor mode hands agy a token instead of the command, and will not fall back without one', async () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  const conversationId = '99999999-0000-4000-8000-70ke40000001';
+  const config = { ownSandbox: 'on', commandGrant: 'executor' };
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(config));
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  try {
+    // Before the executor exists the own sandbox refuses to call itself active,
+    // rather than falling back to the rewrite that needs `command(*)` — the
+    // grant this configuration deliberately does not have.
+    const ctx = ctxFor({ CommandLine: 'ls' }, { ownSandbox: 'on' });
+    ctx.config.commandGrant = 'executor';
+    const detected = detectOwnSandbox({ config: ctx.config, host: cliHost(), appDataDir: dirs.appData, autoagyHome: home, platform: 'linux', probe: okProbe });
+    assert.equal(detected.active, false);
+    assert.match(detected.detail, /not installed/);
+
+    installExecutor(home);
+    const out = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'echo hi', Cwd: dirs.workspace }, { conversationId, stepIdx: 5 }), opts);
+    assert.equal(out.decision, 'allow');
+    assert.equal(out.overwrite.BypassSandbox, true);
+    // What agy runs is one program and a name — nothing an agent could aim.
+    const match = /^'([^']+)' ([0-9a-f]{32})$/.exec(out.overwrite.CommandLine);
+    assert.ok(match, out.overwrite.CommandLine);
+    assert.equal(match[1], executorPath(home));
+
+    const token = JSON.parse(fs.readFileSync(path.join(tokenDir(home), `${match[2]}.json`), 'utf8'));
+    assert.match(token.commandLine, /bwrap/, 'the bwrap line is what the token carries');
+    assert.equal(token.cwd, dirs.workspace, 'the working directory is recorded, not left to be inherited');
+    assert.equal(token.conversation, conversationId);
+
+    // The turn ending takes away whatever nobody redeemed: a surviving token is
+    // a retry, and autoagy's retries are deliberately one-shot.
+    handlePostInvocation({ conversationId }, opts);
+    assert.equal(fs.existsSync(path.join(tokenDir(home), `${match[2]}.json`)), false);
+  } finally {
     fs.rmSync(path.join(home, 'config.json'), { force: true });
   }
 });

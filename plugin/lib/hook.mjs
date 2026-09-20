@@ -18,6 +18,8 @@ import { createReviewer } from './reviewers.mjs';
 import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat } from './state.mjs';
 import { appendDecision, writeReviewRecord } from './log.mjs';
 import { readTranscriptRows } from './transcript.mjs';
+import { mintToken, sweepTokens } from './tokens.mjs';
+import { toAbsolute } from './paths.mjs';
 
 const SUMMARY_MAX = 300;
 
@@ -103,7 +105,12 @@ export function withOwnSandbox(output, ctx) {
   if (ctx.toolName !== 'run_command' || ctx.args.BypassSandbox === true || typeof ctx.args.CommandLine !== 'string') return output;
   if (!ctx.ownSandbox.active) return withScrubbedEnv(output, ctx);
   const placeholders = [];
-  const commandLine = confinedCommandLine(ctx, ctx.args.CommandLine, { placeholders });
+  const confined = confinedCommandLine(ctx, ctx.args.CommandLine, { placeholders });
+  // What agy is actually told to run. In executor mode that is not the bwrap
+  // line but a one-shot token that redeems it, so the standing grant can name
+  // one program instead of every command — see tokens.mjs. Everything below
+  // works on the line that runs, because that is what PostToolUse will see.
+  const commandLine = ctx.config.commandGrant === 'executor' ? issueToken(ctx, confined) : confined;
   // Remembered for the PostToolUse self-check and for cleaning the mount points up.
   if (ctx.stepIdx !== null) {
     updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
@@ -155,6 +162,27 @@ export function withOwnSandbox(output, ctx) {
     removeControlPlaceholders(placeholders);
   }
   return { ...output, overwrite: { BypassSandbox: true, CommandLine: commandLine } };
+}
+
+/**
+ * Puts the confined command line behind a one-shot token and returns the call
+ * that redeems it.
+ *
+ * The working directory is recorded rather than left to be inherited: the
+ * executor is started by agy with the `Cwd` the agent chose, and the command was
+ * judged against the one the hook saw. Sweeping here as well as at the end of
+ * the turn means a hook that dies between minting and running does not leave a
+ * usable retry behind.
+ */
+function issueToken(ctx, commandLine) {
+  sweepTokens(ctx.autoagyHome);
+  const cwd = typeof ctx.args.Cwd === 'string' && ctx.args.Cwd ? toAbsolute(ctx.args.Cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
+  return mintToken(ctx.autoagyHome, {
+    commandLine,
+    cwd,
+    conversation: ctx.conversationId,
+    step: ctx.stepIdx,
+  }).commandLine;
 }
 
 /**
@@ -763,6 +791,10 @@ export function handlePostInvocation(payload, options = {}) {
   // one that is merely quiet. Written before the early returns below, so mode
   // "off" and a payload without a conversation id both leave a mark.
   touchHeartbeat(home, 'post-invocation');
+  // A token nobody redeemed is a retry nobody granted. The turn ending is the
+  // point at which none of this turn's calls can still be on their way, so this
+  // one takes them all rather than only the expired ones.
+  sweepTokens(home, { all: true });
   if (!conversationId) return {};
   const state = readState(home, conversationId);
   // Sweep the mount points PostToolUse did not see (a backgrounded command, or

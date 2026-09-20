@@ -29,6 +29,8 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 
 > **装它之前要知道的一件事。** autoagy 要向 Antigravity 申请 `command(*)`、`mcp(*)`、`execute_url(*)` 三条授权，之后 hook 就是唯一的闸门。hook 自己失败是 fail-closed（工具调用报错），但**插件没加载是 fail-open**：`agy plugin disable`、`agy plugin install` 用未钉住的 `hooks.json` 覆盖、或钉住的解释器失效——这三种情况下授权都还在，闸门没了。
 >
+> **命令这一类可以收窄。** 把 `commandGrant` 设成 `"executor"` 之后，授权从 `command(*)` 变成 `command(<~/.gemini/autoagy/bin/exec-confined.mjs>)`——一个只会兑换 hook 写下的一次性令牌的程序。hook 不跑了就没人写令牌，那条授权拿在手里也没用，**命令这一类因此是 fail-closed 的**。详见下文配置表。`mcp(*)` 和 `execute_url(*)` 没有对应的收窄办法（它们不是命令），所以那两类仍然是上面说的形状。
+>
 > 这跟 Codex 的形状不同，而且方向是反的：Codex 关掉 auto 模式会回到更严格的状态（它本来不需要放宽任何宿主权限），autoagy 关掉会回到**比从未安装更宽松**的状态。`autoagy status` 会报「hooks 最后一次运行」的时间，据此可以查（这一节末尾那条 `agy plugin disable` 的说明是同一件事的另一种说法）。彻底的解法是不授予这三条通配，代价是 autoagy 大部分能力失效。
 
 要求：Node.js ≥ 20，Antigravity CLI（`agy`）≥ 1.2。
@@ -149,6 +151,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | --- | --- | --- |
 | `mode` | `"auto"` | `auto` / `ask` / `off` |
 | `sandbox` | `"auto"` | Antigravity 的沙箱是否真的隔离命令；`auto` 从 CLI 设置和启动参数判断，`on`/`off` 强制指定。没有沙箱时只有已知只读命令免审 |
+| `commandGrant` | `"wildcard"` | 自带沙箱的改写要离开 Antigravity 的沙箱，这需要一条 `command(...)` 授权。`wildcard` 给 `command(*)`——能跑任何东西，而且 **hook 停了它还在**（README 开头那条结构性风险就是它）。`executor` 改为只授权一个程序：`autoagy setup` 会把 `bin/exec-confined.mjs` 装进 `~/.gemini/autoagy/bin/`，改写后的调用变成 `'<那个程序>' <32 位令牌>`，令牌由 hook 写进 `~/.gemini/autoagy/state/pending/`（沙箱外只读、`selfPaths` 拒绝编辑），一次性、五分钟过期、回合末清空。**没有 hook 就没有令牌，授权因此失效。** 换配置后要重跑 `autoagy setup`，并把旧的 `command(*)` 从设置里删掉（`autoagy status` 会提醒）。注意这层保证依赖执行器本身不可被改写——`allowNonWorkspaceAccess: false` 时才完全成立，`status` 会在不成立时说出来 |
 | `ownSandbox` | `"auto"` | autoagy 自己的 bubblewrap 沙箱（见上文）：`auto` 满足条件时启用，`on` 强制启用（不可用时命令送审），`off` 不使用 |
 | `reviewer.backend` | `"agy"` | `agy` / `openai` / `none`（`none` 等同 `ask`） |
 | `reviewer.timeoutSec` / `maxAttempts` | `90` / `3` | Codex 的审核期限与重试次数 |

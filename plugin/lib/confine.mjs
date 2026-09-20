@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { resolveReal, uniquePaths, isWithin } from './paths.mjs';
 import { withLock } from './state.mjs';
 import { seccompProgramFile, seccompSupported } from './seccomp.mjs';
+import { executorPath, executorInstalled } from './tokens.mjs';
 
 // Only root-owned system binaries: a `bwrap` or shell found through PATH could
 // be a script the agent planted in a directory it can write.
@@ -275,11 +276,19 @@ export function envScrubDisabled(autoagyHome, build) {
   return Boolean(check && check.status === 'broken' && check.build === build);
 }
 
-function commandGrantPresent(appDataDir) {
+/**
+ * The `command(...)` grant the rewritten call will need, which depends on how
+ * `commandGrant` is set: the wildcard, or the one program that redeems tokens.
+ */
+export function wantedCommandGrant(config, autoagyHome) {
+  return config.commandGrant === 'executor' ? `command(${executorPath(autoagyHome)})` : 'command(*)';
+}
+
+function commandGrantPresent(appDataDir, wanted) {
   if (!appDataDir) return false;
   try {
     const allow = JSON.parse(fs.readFileSync(path.join(appDataDir, 'settings.json'), 'utf8'))?.permissions?.allow;
-    return Array.isArray(allow) && allow.includes('command(*)');
+    return Array.isArray(allow) && allow.includes(wanted);
   } catch {
     return false;
   }
@@ -295,11 +304,20 @@ export function detectOwnSandbox({ config, host, appDataDir, autoagyHome, build 
   if (mode === 'off') return { active: false, required: false, detail: 'ownSandbox: "off" in autoagy config' };
   const required = mode === 'on';
   if (platform !== 'linux') return { active: false, required, detail: "autoagy's own sandbox needs Linux with bubblewrap" };
+  // In executor mode the rewritten call redeems a token, so the program that
+  // redeems it has to be there. Failing here rather than falling back to the
+  // wildcard rewrite is the point: that rewrite needs a grant this
+  // configuration deliberately does not have, and agy would refuse it with an
+  // error that says nothing about why.
+  if (config.commandGrant === 'executor' && !executorInstalled(autoagyHome)) {
+    return { active: false, required, detail: 'commandGrant is "executor" but bin/exec-confined.mjs is not installed (run `autoagy setup`)' };
+  }
   // The rewritten call leaves Antigravity's sandbox, which Antigravity only
   // allows without prompting under a command grant; without one, every
   // command would prompt, so "auto" stays with Antigravity's sandbox.
-  if (!required && !host?.flags?.skipPermissions && !commandGrantPresent(appDataDir)) {
-    return { active: false, required, detail: 'command(*) is not granted in the Antigravity CLI settings (see `autoagy setup`)' };
+  const wanted = wantedCommandGrant(config, autoagyHome);
+  if (!required && !host?.flags?.skipPermissions && !commandGrantPresent(appDataDir, wanted)) {
+    return { active: false, required, detail: `${wanted} is not granted in the Antigravity CLI settings (see \`autoagy setup\`)` };
   }
   const check = readSandboxCheck(autoagyHome);
   if (check?.status === 'broken' && check.build === build) {
