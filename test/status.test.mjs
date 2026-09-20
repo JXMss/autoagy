@@ -108,3 +108,41 @@ test('`mode` refuses to rewrite a configuration file it cannot parse', () => {
   assert.equal(fs.readFileSync(file, 'utf8'), broken, 'and the file is left exactly as it was');
   fs.rmSync(home, { recursive: true, force: true });
 });
+
+test('`stats` counts the decisions, and says what the log cannot show', () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  const logs = path.join(home, 'logs');
+  fs.mkdirSync(logs, { recursive: true });
+  const row = (over) => JSON.stringify({ time: new Date().toISOString(), conversation: 'c1', tool: 'run_command', ...over });
+  const stats = () => {
+    const res = spawnSync(process.execPath, [BIN, 'stats'], { env: dirs.env, encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    return res.stdout;
+  };
+  fs.writeFileSync(
+    path.join(logs, 'decisions.jsonl'),
+    [
+      row({ verdict: 'deny', category: 'dangerous-command', review: { backend: 'agy', status: 'denied', risk: 'high', latencyMs: 5200 } }),
+      row({ verdict: 'allow', category: 'sandbox-escalation', review: { backend: 'agy', status: 'approved', risk: 'low', latencyMs: 3900 } }),
+      row({ verdict: 'deny', category: 'mcp', review: { backend: 'agy', status: 'failed', error: 'quota', latencyMs: 900 } }),
+      '',
+    ].join('\n'),
+  );
+  const out = stats();
+  const reviewLine = out.split('\n').find((l) => l.includes('reviews')) ?? '';
+  assert.match(reviewLine, /total 3/);
+  for (const part of ['approved 1', 'denied 1', 'failed 1']) assert.ok(reviewLine.includes(part), `${part} in: ${reviewLine.trim()}`);
+  assert.match(out, /p50 3\.9s/);
+  const riskLine = out.split('\n').find((l) => l.includes('risk')) ?? '';
+  for (const part of ['low 1', 'high 1']) assert.ok(riskLine.includes(part), `${part} in: ${riskLine.trim()}`);
+  // An action allowed *without* a review is the other half of the answer, and it
+  // is only in the log when `log.allowed` is on — so a zero has to be explained
+  // rather than reported as "none happened".
+  assert.match(out, /allowed free\s+0 action/, 'the count is shown');
+  assert.match(out, /log\.allowed/, 'and the reason it may be zero is named, with how to turn it on');
+
+  fs.appendFileSync(path.join(logs, 'decisions.jsonl'), `${row({ verdict: 'allow', category: 'read' })}\n`);
+  const withAllows = stats();
+  assert.match(withAllows, /allowed free\s+1 action/);
+  assert.doesNotMatch(withAllows, /log\.allowed/, 'once one is recorded, the caveat is gone');
+});

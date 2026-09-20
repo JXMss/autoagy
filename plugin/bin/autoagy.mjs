@@ -474,6 +474,78 @@ function printLog(flags) {
   }
 }
 
+/**
+ * What the decisions in the log add up to.
+ *
+ * The plugin exists to turn approvals into automatic decisions, and until now
+ * nothing could say how many or at what cost — every configuration choice
+ * (`mcp.allow`, `trustedDomains`, `rules`, the review timeout) was made blind.
+ *
+ * One number is missing by design: an action that was allowed without a review
+ * writes no record unless `log.allowed` is on, because that is a line per tool
+ * call including every read. It is said out loud here rather than reported as
+ * zero, so the counts cannot be mistaken for the whole picture.
+ */
+function printStats(flags) {
+  const { autoagyHome } = managementContext();
+  const days = Number(flags.days ?? 0);
+  const since = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 3600 * 1000 : 0;
+  const records = readDecisions(autoagyHome, 20_000).filter((r) => !since || Date.parse(r.time ?? 0) >= since);
+  if (records.length === 0) return console.log(since > 0 ? `No decisions in the last ${days} day(s).` : 'No decisions logged yet.');
+
+  const count = (list, key) => {
+    const map = new Map();
+    for (const item of list) {
+      const name = key(item);
+      if (name === undefined || name === null) continue;
+      map.set(name, (map.get(name) ?? 0) + 1);
+    }
+    return [...map.entries()].sort((a, b) => b[1] - a[1]);
+  };
+  const line = (label, pairs, limit = 8) => `  ${label.padEnd(14)}${pairs.slice(0, limit).map(([k, v]) => `${k} ${v}`).join(', ') || '—'}`;
+
+  const reviews = records.filter((r) => r.review);
+  const latencies = reviews.map((r) => r.review.latencyMs).filter((ms) => Number.isFinite(ms) && ms > 0).sort((a, b) => a - b);
+  const pct = (p) => (latencies.length === 0 ? null : latencies[Math.min(latencies.length - 1, Math.floor((latencies.length - 1) * p))]);
+  const secs = (ms) => (ms === null ? '—' : `${(ms / 1000).toFixed(1)}s`);
+
+  const first = records[0].time;
+  const last = records[records.length - 1].time;
+  console.log(`autoagy stats — ${fmtTime(first)} → ${fmtTime(last)}${since > 0 ? `, last ${days} day(s)` : ''}`);
+  console.log('');
+  console.log(line('verdicts', count(records, (r) => r.verdict)));
+  console.log(line('tools', count(records, (r) => r.tool), 6));
+  console.log(
+    line('reviews', [
+      ['total', reviews.length],
+      ...count(reviews, (r) => r.review.status),
+    ]),
+  );
+  if (latencies.length > 0) {
+    console.log(
+      `  ${'review time'.padEnd(14)}p50 ${secs(pct(0.5))}, p90 ${secs(pct(0.9))}, max ${secs(latencies[latencies.length - 1])}, ` +
+        `total ${(latencies.reduce((a, b) => a + b, 0) / 1000).toFixed(0)}s over ${latencies.length} review(s)`,
+    );
+  }
+  const risks = count(reviews, (r) => r.review.risk);
+  if (risks.length > 0) console.log(line('risk', risks));
+  const categories = count(records, (r) => r.category);
+  if (categories.length > 0) console.log(line('categories', categories, 6));
+  // An action allowed *without* a review is the other half of the answer, and it
+  // is only in the log when `log.allowed` is on — one line per tool call,
+  // including every read, which is why it is off by default. A zero here
+  // therefore means "none happened" or "none were recorded", and the two are
+  // told apart on the line rather than left to look the same.
+  const unreviewed = records.filter((r) => r.verdict === 'allow' && !r.review).length;
+  console.log('');
+  console.log(`  ${'allowed free'.padEnd(14)}${unreviewed} action(s) with no review`);
+  if (unreviewed === 0) {
+    console.log('');
+    console.log('  They are only recorded with `log.allowed`: true (one line per tool call). To count them:');
+    console.log(`  set "log": { "allowed": true } in ${path.join(autoagyHome, 'config.json')}`);
+  }
+}
+
 function listDenials() {
   const { autoagyHome: home } = managementContext();
   const rows = [];
@@ -652,6 +724,7 @@ const USAGE = `autoagy — Codex-style auto mode for Google Antigravity
 Usage:
   autoagy status                     show configuration and environment checks
   autoagy log [-n 20]                recent decisions
+  autoagy stats [--days 7]           what the decisions add up to (reviews, risk, time)
   autoagy denials                    recent auto-review denials
   autoagy approve <id>               approve one retry of a denied action
   autoagy trust [<conversation>] [--all] [--force]
@@ -672,6 +745,8 @@ async function main() {
       return status();
     case 'log':
       return printLog(flags);
+    case 'stats':
+      return printStats(flags);
     case 'denials':
       return listDenials();
     case 'approve':
