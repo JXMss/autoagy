@@ -21,7 +21,7 @@ import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INST
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
 import { listStates, updateState, readState, isUntrusted, readHeartbeat } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, readSetupRecord, restrictHomePermissions } from '../lib/setup.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, readSetupRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
 import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath } from '../lib/tripwire.mjs';
 
@@ -39,41 +39,12 @@ export function accountHome() {
 }
 
 /**
- * The paths `autoagy setup` pinned into hooks.json, if it ran.
- *
- * The hooks always use these. Management commands are run from the user's shell,
- * which may have a different HOME or AUTOAGY_HOME than setup wrote (a launcher,
- * sudo, or an exported variable), and without reading the same pin they would
- * report on — and repair — a different configuration than the one in force.
- */
-export function hookPins(pluginDir = PLUGIN_DIR) {
-  const hooks = readJsonQuiet(path.join(pluginDir, 'hooks.json'));
-  let command = null;
-  const visit = (value) => {
-    if (Array.isArray(value)) return value.forEach(visit);
-    if (value && typeof value === 'object') {
-      if (command === null && typeof value.command === 'string') command = value.command;
-      Object.values(value).forEach(visit);
-    }
-  };
-  visit(hooks);
-  const read = (flag) => {
-    if (!command) return null;
-    const match = new RegExp(`${flag}\\s+(?:"([^"]+)"|(\\S+))`).exec(command);
-    return match ? match[1] ?? match[2] : null;
-  };
-  const configHome = read('--autoagy-home');
-  const home = read('--home');
-  return { pinned: Boolean(command && configHome && home), command, configHome, home };
-}
-
-/**
  * Environment, user home and configuration directory for a management command.
  * The pin wins where it exists; without one the ambient environment decides, as
  * it did before — a dev checkout and the test harness rely on that.
  */
 function managementContext() {
-  const pins = hookPins();
+  const pins = hookPins(PLUGIN_DIR);
   const env = { ...process.env };
   if (pins.configHome) env.AUTOAGY_HOME = pins.configHome;
   const home = pins.home || accountHome();
@@ -362,13 +333,13 @@ function status() {
     else agyLine = `reviewer.agy.command (${JSON.stringify(command)}) does not name a program — use a bare name or an absolute path`;
     lines.push(`  agy             ${agyLine}`);
   }
-  const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath()), autoagyHome: autoagyHome });
+  const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath(userHome)), autoagyHome: autoagyHome });
   lines.push(`  own sandbox     ${own.active ? 'active' : own.required ? 'REQUIRED BUT UNAVAILABLE (commands are reviewed)' : 'inactive'} — ${own.detail}`);
   // What the command grant is worth when the hook is not running is the whole
   // reason the executor exists, so say which of the two shapes is in force.
   if (config.commandGrant === 'executor') {
     lines.push(`  command grant   one program (${executorPath(autoagyHome)})${executorInstalled(autoagyHome) ? '' : ' — NOT INSTALLED, run `autoagy setup`'}`);
-    const settingsNow = readJsonQuiet(cliSettingsPath());
+    const settingsNow = readJsonQuiet(cliSettingsPath(userHome));
     if (settingsNow && settingsNow.allowNonWorkspaceAccess !== false) {
       lines.push('  ! that grant only stays narrow while the executor cannot be overwritten. A file-editing');
       lines.push('    tool can still write outside the workspace here (allowNonWorkspaceAccess is not false),');
@@ -412,7 +383,7 @@ function status() {
   }
   for (const w of warnings) lines.push(`  ! config: ${w}`);
 
-  const settingsFile = cliSettingsPath();
+  const settingsFile = cliSettingsPath(userHome);
   const settings = readJsonQuiet(settingsFile);
   lines.push('');
   lines.push(`Antigravity CLI settings (${settingsFile}):`);
@@ -586,34 +557,37 @@ async function dryRunReview(flags) {
 
 function setup(flags) {
   const dryRun = Boolean(flags['dry-run']);
-  const cfg = ensureConfigFile({ dryRun });
+  // One context for the whole command: the pin first, then the account home —
+  // the same pair the hook resolves. `ensureConfigFile` and
+  // `restrictHomePermissions` used to fall back to `$HOME` on their own while
+  // the grants below came from `accountHome()`, so a launcher, `sudo` or an
+  // exported `HOME` split one run in two: the config file the user is told to
+  // edit was not the one the grants were read from (which is how a declared
+  // `writableRoots` entry ends up with no `write_file(...)` grant).
+  const { env, home, autoagyHome } = managementContext();
+  const cfg = ensureConfigFile({ dryRun, env, home });
   console.log(`${cfg.created ? (dryRun ? 'Would create' : 'Created') : 'Keeping'} config ${cfg.file}`);
-  if (!dryRun) restrictHomePermissions();
-  const installedRoot = path.join(os.homedir(), '.gemini', 'config', 'plugins');
+  if (!dryRun) restrictHomePermissions({ env, home });
+  const installedRoot = path.join(home, '.gemini', 'config', 'plugins');
   if (PLUGIN_DIR.startsWith(installedRoot) || flags['pin-node']) {
-    const pin = pinHookCommands(PLUGIN_DIR, { configHome: resolveAutoagyHome(process.env, accountHome()), home: accountHome(), dryRun });
+    const pin = pinHookCommands(PLUGIN_DIR, { configHome: autoagyHome, home, dryRun });
     console.log(pin.changed ? `${dryRun ? 'Would pin' : 'Pinned'} hook interpreter to ${process.execPath}` : 'Hook interpreter already pinned');
   }
-  // `accountHome()`, the same home this command pins into hooks.json — a bare
-  // `loadConfig()` would take `$HOME`, which a launcher or `sudo` can have set
-  // to somewhere else, and then the grants would be written from one config
-  // while the hook judged by another.
-  const { config } = loadConfig({ env: process.env, home: accountHome() });
-  const home = resolveAutoagyHome(process.env, accountHome());
+  const { config } = loadConfig({ env, home });
   if (config.commandGrant === 'executor') {
-    if (!dryRun) installExecutor(home);
-    console.log(`${dryRun ? 'Would install' : 'Installed'} the token executor at ${executorPath(home)}`);
+    if (!dryRun) installExecutor(autoagyHome);
+    console.log(`${dryRun ? 'Would install' : 'Installed'} the token executor at ${executorPath(autoagyHome)}`);
     console.log('  the command grant names that program instead of `command(*)`, so a hook that stops running leaves nothing usable behind');
   }
   if (flags['no-settings']) {
     console.log('Skipping Antigravity settings (--no-settings). Approved actions may still show Antigravity prompts.');
     return;
   }
-  const report = applySetup({ dryRun, grants: grantsFor(config, { autoagyHome: home, home: accountHome() }) });
+  const report = applySetup({ dryRun, env, home, grants: grantsFor(config, { autoagyHome, home }) });
   // The tripwire exists because those grants do: it is installed where the
   // grants are, and `--no-settings` (which writes none) gets none.
   if (!dryRun && PLUGIN_DIR.startsWith(installedRoot)) {
-    const tw = installTripwire({ autoagyHome: home, home: accountHome(), pluginDir: PLUGIN_DIR });
+    const tw = installTripwire({ autoagyHome, home, pluginDir: PLUGIN_DIR });
     console.log(`\nTripwire: ${tw.script}`);
     console.log(`  registered in ${tw.hooks}, which \`agy plugin\` does not manage — so it keeps running when`);
     console.log('  the plugin is disabled or its hooks.json is replaced, and refuses tool calls rather than let');
@@ -631,17 +605,23 @@ function setup(flags) {
 
 function teardown(flags) {
   const dryRun = Boolean(flags['dry-run']);
+  // The same context the hook and `setup` use, and for the same reason: the
+  // setup record lives in the *pinned* home. Reverting through the ambient one
+  // finds nothing, prints "no setup record", and leaves `command(*)`, `mcp(*)`
+  // and `execute_url(*)` standing — while this command has already removed the
+  // tripwire that would have refused tool calls once the plugin was gone. That
+  // is the fail-open the README opens with, manufactured on the way out.
+  const { env, home, autoagyHome } = managementContext();
   // Before the grants, and whether or not a setup record exists: a tripwire
   // left behind refuses every tool call, which is the right failure while
   // autoagy is installed and the wrong one once it is not.
   if (!dryRun) {
-    const { autoagyHome: home } = managementContext();
-    const removed = removeTripwire({ autoagyHome: home, home: accountHome() });
-    if (removed.script || removed.registration) console.log(`Removed the tripwire (${tripwirePath(home)}, ${userHooksPath(accountHome())})`);
+    const removed = removeTripwire({ autoagyHome, home });
+    if (removed.script || removed.registration) console.log(`Removed the tripwire (${removed.path ?? tripwirePath(autoagyHome)}, ${userHooksPath(home)})`);
   } else {
     console.log('Would remove the tripwire');
   }
-  const report = applyTeardown({ dryRun });
+  const report = applyTeardown({ dryRun, env, home });
   if (!report.found) return console.log('No setup record found; nothing else to revert.');
   const verb = (done, planned) => (report.dryRun ? planned : done);
   console.log(`${verb('Reverted', 'Would revert')} ${report.settingsFile}`);

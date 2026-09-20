@@ -215,3 +215,27 @@ test('the uninstaller finds the tripwire where the plugin put it', () => {
   assert.equal(fs.existsSync(path.join(custom, 'bin', 'tripwire.mjs')), false, 'the program goes with it');
   assert.equal(tripwireRegistered({ home }), false, 'and so does the registration');
 });
+
+test('the uninstaller finds a custom home with nothing in the environment to say so', () => {
+  // The reported failure, end to end: installed with `AUTOAGY_HOME` set, later
+  // uninstalled from a shell that does not have it — and with the plugin
+  // directory already gone, so no pinned `hooks.json` carries it either. What
+  // is left is the registration, which names the program by absolute path, and
+  // the uninstaller has to follow it to the home the install wrote to.
+  const script = fileURLToPath(new URL('../scripts/install.mjs', import.meta.url));
+  const custom = path.join(root, 'registration-only');
+  installTripwire({ autoagyHome: custom, home, pluginDir });
+  fs.mkdirSync(custom, { recursive: true });
+  fs.writeFileSync(
+    path.join(custom, 'setup.json'),
+    JSON.stringify({ time: new Date().toISOString(), settingsFile: path.join(home, 'settings.json'), addedGrants: ['command(*)'], priorValues: {} }),
+  );
+  fs.writeFileSync(path.join(home, 'settings.json'), JSON.stringify({ permissions: { allow: ['command(*)'] } }));
+  fs.rmSync(pluginDir, { recursive: true, force: true });
+
+  const res = spawnSync(process.execPath, [script, '--uninstall'], { encoding: 'utf8', env: { HOME: home, PATH: '/nonexistent' } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.doesNotMatch(res.stdout, /No setup record found/, 'the record is where the registration says the install is');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, 'settings.json'), 'utf8')).permissions.allow, [], 'and the grants come back out');
+  removeTripwire({ autoagyHome: custom, home });
+});

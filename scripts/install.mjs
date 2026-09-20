@@ -12,7 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { removeTripwire, tripwireInstalled, tripwireRegistered, tripwirePath, userHooksPath } from '../plugin/lib/tripwire.mjs';
+import { removeTripwire, tripwireInstalled, tripwireRegistered, tripwirePath, userHooksPath, registeredTripwirePath, registeredAutoagyHome } from '../plugin/lib/tripwire.mjs';
+import { applyTeardown, hookPins } from '../plugin/lib/setup.mjs';
 import { autoagyHome as resolveAutoagyHome } from '../plugin/lib/config.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -71,20 +72,42 @@ function uninstall() {
   // the clone, whose lib is always here, which is why the call can be
   // unconditional.
   //
-  // The home is resolved the way the plugin resolves it rather than assumed: a
-  // user with `AUTOAGY_HOME` set has the tripwire somewhere else. And the two
-  // halves are asked about separately, because `tripwireInstalled` is both at
-  // once while the state that matters most here is the one where they disagree
-  // — a registration whose program is gone, still refusing every tool call.
-  const autoagyHome = resolveAutoagyHome(process.env, os.homedir());
+  // `$HOME`, the same home this script installs into (INSTALLED is built from
+  // it) and the one `os.homedir()` reports. The plugin itself prefers the
+  // account database's home for anything the policy reads, so an install made
+  // with the two disagreeing is reconciled by the two answers below rather than
+  // by picking one here.
+  const userHome = os.homedir();
+  // Where the state is. The pin written at install time is the first answer;
+  // when the plugin directory is the thing that went missing, the tripwire's
+  // own registration carries it instead (the registered program is
+  // `<autoagyHome>/bin/tripwire.mjs`), and only then does the environment get a
+  // say. Both halves are asked about separately, because `tripwireInstalled` is
+  // both at once while the state that matters most here is the one where they
+  // disagree — a registration whose program is gone, still refusing every call.
+  const installedPin = hookPins(INSTALLED);
+  const env = { ...process.env };
+  const pinnedHome = installedPin.configHome ?? registeredAutoagyHome(userHome);
+  if (pinnedHome) env.AUTOAGY_HOME = pinnedHome;
+  const autoagyHome = resolveAutoagyHome(env, userHome);
   const tripwire = dryRun
-    ? { script: fs.existsSync(tripwirePath(autoagyHome)), registration: tripwireRegistered({}) }
-    : removeTripwire({ autoagyHome });
+    ? { script: fs.existsSync(registeredTripwirePath(userHome) ?? tripwirePath(autoagyHome)), registration: tripwireRegistered({ home: userHome }) }
+    : removeTripwire({ autoagyHome, home: userHome });
   if (tripwire.script || tripwire.registration) {
-    console.log(`${dryRun ? 'Would remove' : 'Removed'} the tripwire${tripwire.script ? ` (${tripwirePath(autoagyHome)})` : ''}${tripwire.registration ? ` from ${userHooksPath()}` : ''}`);
+    console.log(`${dryRun ? 'Would remove' : 'Removed'} the tripwire${tripwire.script ? ` (${tripwire.path ?? registeredTripwirePath(userHome) ?? tripwirePath(autoagyHome)})` : ''}${tripwire.registration ? ` from ${userHooksPath(userHome)}` : ''}`);
   }
 
-  if (fs.existsSync(BIN)) run(process.execPath, [BIN, 'teardown', ...(dryRun ? ['--dry-run'] : [])], { allowFailure: true });
+  // The grants have to come back out even when the installed copy is gone. That
+  // is the same argument the tripwire removal above makes — this script runs
+  // from the clone, whose lib is always here — and it is the difference between
+  // "uninstalled" and a silent fail-open: the record `setup` wrote is what makes
+  // `command(*)`, `mcp(*)` and `execute_url(*)` revertable at all.
+  if (fs.existsSync(BIN)) {
+    run(process.execPath, [BIN, 'teardown', ...(dryRun ? ['--dry-run'] : [])], { allowFailure: true });
+  } else {
+    const report = applyTeardown({ dryRun, env, home: userHome });
+    console.log(report.found ? `${dryRun ? 'Would revert' : 'Reverted'} ${report.settingsFile}` : `No setup record found in ${autoagyHome}; nothing else to revert.`);
+  }
   if (dryRun) return console.log(`(dry run) would remove ${INSTALLED}`);
   if (!(agyAvailable() && run('agy', ['plugin', 'uninstall', 'autoagy'], { allowFailure: true }))) {
     fs.rmSync(INSTALLED, { recursive: true, force: true });
@@ -95,8 +118,8 @@ function uninstall() {
   }
   // The one thing that would still be refusing every tool call gets said out
   // loud, and "uninstalled" is not printed over it.
-  if (tripwireInstalled({ autoagyHome })) {
-    console.error(`autoagy: the tripwire is still registered in ${userHooksPath()} — delete its \`autoagy-tripwire\` key there, or every tool call stays refused.`);
+  if (tripwireInstalled({ autoagyHome, home: userHome })) {
+    console.error(`autoagy: the tripwire is still registered in ${userHooksPath(userHome)} — delete its \`autoagy-tripwire\` key there, or every tool call stays refused.`);
     process.exitCode = 1;
     return;
   }

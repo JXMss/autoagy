@@ -137,6 +137,45 @@ export function applySetup({ home = os.homedir(), env = process.env, dryRun = fa
   return report;
 }
 
+/**
+ * The paths `autoagy setup` pinned into hooks.json, if it ran.
+ *
+ * The hooks always use these. Management commands are run from the user's shell,
+ * which may have a different HOME or AUTOAGY_HOME than setup wrote (a launcher,
+ * `sudo`, or an exported variable), and without reading the same pin they would
+ * report on — and repair — a different configuration than the one in force.
+ *
+ * It lives here, next to the writer, because a second reader needs it too:
+ * `scripts/install.mjs` runs with the plugin directory possibly already gone,
+ * and it must find the same state the install wrote rather than whatever the
+ * ambient environment points at.
+ */
+export function hookPins(pluginDir) {
+  let hooks = null;
+  try {
+    hooks = readJsonFile(path.join(pluginDir, 'hooks.json'));
+  } catch {
+    return { pinned: false, command: null, configHome: null, home: null };
+  }
+  let command = null;
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (value && typeof value === 'object') {
+      if (command === null && typeof value.command === 'string') command = value.command;
+      Object.values(value).forEach(visit);
+    }
+  };
+  visit(hooks);
+  const read = (flag) => {
+    if (!command) return null;
+    const match = new RegExp(`${flag}\\s+(?:"([^"]+)"|(\\S+))`).exec(command);
+    return match ? match[1] ?? match[2] : null;
+  };
+  const configHome = read('--autoagy-home');
+  const home = read('--home');
+  return { pinned: Boolean(command && configHome && home), command, configHome, home };
+}
+
 export function readSetupRecord(autoagyHome) {
   try {
     return readJsonFile(setupRecordPath(autoagyHome));

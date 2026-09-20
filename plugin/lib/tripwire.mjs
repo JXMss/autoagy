@@ -61,9 +61,53 @@ export function tripwireRegistered({ home = os.homedir() } = {}) {
   return Boolean(readJson(userHooksPath(home))?.[TRIPWIRE_KEY]);
 }
 
-/** True when both halves are in place. */
+/**
+ * The program the registration runs, or null.
+ *
+ * The registration is the half that decides whether anything is still refusing
+ * tool calls, and it names the program by absolute path — which makes it the
+ * ground truth for where that program is. Nothing else survives an uninstall
+ * that took the plugin directory with it, and the home a command happens to
+ * resolve can differ from the one `autoagy setup` pinned (a launcher, `sudo`,
+ * an exported `AUTOAGY_HOME`), so guessing from the environment is exactly the
+ * mistake this avoids.
+ */
+export function registeredTripwirePath(home = os.homedir()) {
+  const entry = readJson(userHooksPath(home))?.[TRIPWIRE_KEY];
+  const command = entry?.PreToolUse?.[0]?.hooks?.[0]?.command;
+  if (typeof command !== 'string') return null;
+  const text = command.trim();
+  const quoted = /^"((?:[^"\\]|\\.)*)"/.exec(text);
+  let token = quoted ? quoted[1] : text.split(/\s+/)[0];
+  if (quoted) {
+    try {
+      token = JSON.parse(`"${quoted[1]}"`);
+    } catch {
+      // keep the raw contents
+    }
+  }
+  return token && path.isAbsolute(token) ? token : null;
+}
+
+/**
+ * The autoagy home the registered program lives in, or null.
+ *
+ * `installTripwire` writes the program to `<autoagyHome>/bin/tripwire.mjs`, so
+ * the registration carries the pinned home with it — which is what
+ * `scripts/install.mjs` needs when it runs with the plugin directory already
+ * gone and therefore no `hooks.json` to read the pin from.
+ */
+export function registeredAutoagyHome(home = os.homedir()) {
+  const script = registeredTripwirePath(home);
+  if (!script) return null;
+  const bin = path.dirname(script);
+  return path.basename(bin) === 'bin' ? path.dirname(bin) : null;
+}
+
+/** True when both halves are in place, at the path the registration names. */
 export function tripwireInstalled({ autoagyHome, home = os.homedir() }) {
-  return fs.existsSync(tripwirePath(autoagyHome)) && tripwireRegistered({ home });
+  const registered = registeredTripwirePath(home);
+  return tripwireRegistered({ home }) && fs.existsSync(registered ?? tripwirePath(autoagyHome));
 }
 
 /**
@@ -97,11 +141,16 @@ export function installTripwire({ autoagyHome, home = os.homedir(), pluginDir, n
 
 /** Takes both halves away, leaving any other hooks in that file alone. */
 export function removeTripwire({ autoagyHome, home = os.homedir() }) {
-  const removed = { script: false, registration: false };
-  const script = tripwirePath(autoagyHome);
-  if (fs.existsSync(script)) {
+  const removed = { script: false, registration: false, path: null };
+  // Both candidates: the home this command resolved, and the one the
+  // registration names. They differ whenever the install was pinned to another
+  // home, and taking away only the first leaves a registered program that every
+  // tool call keeps running.
+  for (const script of new Set([tripwirePath(autoagyHome), registeredTripwirePath(home)].filter(Boolean))) {
+    if (!fs.existsSync(script)) continue;
     fs.rmSync(script, { force: true });
     removed.script = true;
+    removed.path = script;
   }
   const file = userHooksPath(home);
   const hooks = readJson(file);

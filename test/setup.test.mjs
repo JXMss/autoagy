@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, RECOMMENDED_SETTINGS } from '../plugin/lib/setup.mjs';
 import { executorPath } from '../plugin/lib/tokens.mjs';
 import { configPath, loadConfig } from '../plugin/lib/config.mjs';
+import { removeTripwire, tripwireInstalled, tripwireRegistered, userHooksPath, registeredTripwirePath, registeredAutoagyHome, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-setup-'));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -139,4 +142,88 @@ test('a path-shaped setting is resolved once, so the policy and the grants agree
   assert.deepEqual(config.protectedPaths, ['**/.husky/**']);
   assert.equal(warnings.filter((w) => w.startsWith('writableRoots[0]')).length, 1);
   assert.equal(warnings.filter((w) => w.startsWith('protectedPaths[0]')).length, 1);
+});
+
+const SOURCE_PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin');
+
+/**
+ * A copy of the plugin whose `hooks.json` carries the pin `autoagy setup`
+ * writes, so the CLI can be run against it the way an installed plugin is run.
+ */
+function pinnedPlugin({ root, configHome, home }) {
+  const dir = path.join(root, 'plugin');
+  fs.cpSync(SOURCE_PLUGIN, dir, { recursive: true });
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(dir, 'bin', 'autoagy.mjs'))} hook pre-tool-use --autoagy-home ${JSON.stringify(configHome)} --home ${JSON.stringify(home)}`;
+  fs.writeFileSync(path.join(dir, 'hooks.json'), JSON.stringify({ autoagy: { PreToolUse: [{ matcher: '*', hooks: [{ command }] }] } }));
+  return dir;
+}
+
+test('teardown reverts through the pin, not through the environment', () => {
+  // The bug this covers was in the wiring, not in the library: `setup` wrote the
+  // record into the pinned home while `teardown` looked for it in whatever
+  // `HOME`/`AUTOAGY_HOME` the current shell had. It then printed "no setup
+  // record" and left `command(*)`, `mcp(*)` and `execute_url(*)` standing — the
+  // fail-open the README opens with, together with the tripwire this command had
+  // already removed.
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-pin-'));
+  try {
+    const pinned = path.join(root2, 'pinned-autoagy-home');
+    const userHome = path.join(root2, 'user-home');
+    const elsewhere = path.join(root2, 'elsewhere');
+    fs.mkdirSync(userHome, { recursive: true });
+    fs.mkdirSync(path.join(elsewhere, '.gemini'), { recursive: true });
+    const pluginDir = pinnedPlugin({ root: root2, configHome: pinned, home: userHome });
+    const settingsFile = cliSettingsPath(userHome);
+    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+    fs.writeFileSync(settingsFile, JSON.stringify({ model: 'Gemini Flash', permissions: { allow: [] } }, null, 2));
+
+    // A shell that knows nothing: no AUTOAGY_HOME, and a `HOME` of its own.
+    const env = { HOME: elsewhere, PATH: process.env.PATH };
+    const run = (...argv) => spawnSync(process.execPath, [path.join(pluginDir, 'bin', 'autoagy.mjs'), ...argv], { env, encoding: 'utf8' });
+
+    const installed = run('setup');
+    assert.equal(installed.status, 0, installed.stderr);
+    const after = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    assert.ok(after.permissions.allow.includes('command(*)'), 'setup wrote the grants into the pinned home');
+    assert.ok(fs.existsSync(path.join(pinned, 'setup.json')), 'and the record that makes them revertable');
+    assert.ok(fs.readFileSync(path.join(pluginDir, 'hooks.json'), 'utf8').includes('--autoagy-home'), 'and pinned the hooks');
+
+    const removed = run('teardown');
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.doesNotMatch(removed.stdout, /No setup record found/, 'the record is in the pinned home, and that is where teardown looks');
+    const reverted = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    assert.deepEqual(reverted.permissions.allow, [], 'the grants are gone whatever the shell had set');
+    assert.equal(reverted.model, 'Gemini Flash');
+    assert.equal(fs.existsSync(path.join(pinned, 'setup.json')), false);
+  } finally {
+    fs.rmSync(root2, { recursive: true, force: true });
+  }
+});
+
+test('the tripwire is removed where it is registered, not where this shell would put it', () => {
+  // `install.mjs` and `teardown` both have to work when the home they resolve
+  // differs from the one the install pinned: the registration names the program
+  // by absolute path, so it — not the environment — is the ground truth.
+  const root3 = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-pin-tw-'));
+  try {
+    const registered = path.join(root3, 'pinned', 'bin', 'tripwire.mjs');
+    const hooksFile = userHooksPath(root3);
+    fs.mkdirSync(path.dirname(registered), { recursive: true });
+    fs.writeFileSync(registered, '// the registered program\n');
+    fs.mkdirSync(path.dirname(hooksFile), { recursive: true });
+    fs.writeFileSync(hooksFile, JSON.stringify({ [TRIPWIRE_KEY]: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: JSON.stringify(registered) }] }] } }));
+
+    assert.equal(registeredTripwirePath(root3), registered);
+    assert.equal(registeredAutoagyHome(root3), path.dirname(path.dirname(registered)));
+    assert.equal(tripwireInstalled({ autoagyHome: path.join(root3, 'other'), home: root3 }), true, 'the registration names where the program is');
+
+    // Asked to remove it "from" a different home entirely.
+    const removed = removeTripwire({ autoagyHome: path.join(root3, 'other'), home: root3 });
+    assert.equal(removed.script, true);
+    assert.equal(removed.path, registered);
+    assert.equal(fs.existsSync(registered), false, 'the registered program is the one that goes');
+    assert.equal(tripwireRegistered({ home: root3 }), false);
+  } finally {
+    fs.rmSync(root3, { recursive: true, force: true });
+  }
 });
