@@ -636,8 +636,33 @@ function classifyFileEdit(ctx, state = {}) {
  * @returns {{ abs: string, real: string }[]}
  */
 export function editTargets(ctx) {
+  return resolvedTargets(ctx, pathArgs(ctx.args));
+}
+
+/**
+ * The same question for the tools that return file contents.
+ *
+ * A read follows symlinks exactly as a write does, and it runs outside every
+ * sandbox for exactly the same reason — agy performs it itself. The difference
+ * is which way the damage points: a write that lands elsewhere can be cleaned
+ * up, while a read that lands elsewhere has already put that file in the model's
+ * context, and nothing takes that back. So this is worth catching at least as
+ * much as the write is.
+ *
+ * `SearchPath` is included here and not in `PATH_ARG_RE`: that pattern is shared
+ * with the edit tools and with the planned action the reviewer sees, and
+ * widening it would change what those two do. `classifyRead` treats the search
+ * path the same way, for the same reason — a search reads every file beneath it.
+ * @returns {{ abs: string, real: string }[]}
+ */
+export function readTargets(ctx) {
+  return resolvedTargets(ctx, [...pathArgs(ctx.args), ctx.args.SearchPath]);
+}
+
+function resolvedTargets(ctx, raws) {
   const out = [];
-  for (const raw of pathArgs(ctx.args)) {
+  for (const raw of raws) {
+    if (typeof raw !== 'string') continue;
     const abs = toAbsolute(raw, ctx.baseDir, ctx.home);
     if (abs) out.push({ abs, real: resolveReal(abs) });
   }

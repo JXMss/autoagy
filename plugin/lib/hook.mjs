@@ -10,7 +10,7 @@
 
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext, HOST_INSPECTABLE_PLATFORMS, newNestedGitPlantings } from './context.mjs';
-import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets } from './policy.mjs';
+import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets, readTargets } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
@@ -303,7 +303,8 @@ export function handlePostToolUse(payload, options = {}) {
     checkScrubbedEnv(ctx, state);
     return checkConfinedRun(ctx, state);
   }
-  if (FILE_EDIT_TOOLS.has(ctx.toolName)) return checkEditTargets(ctx);
+  const kind = targetCheckKind(ctx.toolName);
+  if (kind) return checkTargets(ctx, kind);
   return {};
 }
 
@@ -382,15 +383,60 @@ function checkConfinedRun(ctx, state = {}) {
   return {};
 }
 
-/** Records where an edit tool's targets resolved, for checkEditTargets. */
-function rememberEditTargets(ctx) {
-  if (ctx.stepIdx === null || !FILE_EDIT_TOOLS.has(ctx.toolName)) return;
-  const targets = editTargets(ctx);
+/**
+ * The two kinds of tool call whose path arguments are resolved once before the
+ * call and once after: agy performs both itself, outside every sandbox, so a
+ * path swapped in between lands the call somewhere other than the place that was
+ * approved. Everything about the check is the same for both; only the state key,
+ * the log verdict and what the user has to do about it differ.
+ */
+const TARGET_CHECKS = {
+  edit: {
+    pending: 'pendingEdits',
+    verdict: 'edit-target-changed',
+    targets: editTargets,
+    message: (tool, abs, real, after) =>
+      `autoagy: ${abs} resolved to ${real} when the ${tool} was approved, but to ${after} when it ran. ` +
+      'Something replaced part of that path in between, so the write may have landed outside the approved location. ' +
+      'Check what changed there before continuing.',
+  },
+  read: {
+    pending: 'pendingReads',
+    verdict: 'read-target-changed',
+    targets: readTargets,
+    // The consequence points the other way from an edit's. A write that landed
+    // somewhere else can be cleaned up; a read that landed somewhere else has
+    // already put that file into the model's context, and nothing takes that
+    // back. So the message says the one thing the user can still act on.
+    message: (tool, abs, real, after) =>
+      `autoagy: ${abs} resolved to ${real} when the ${tool} was approved, but to ${after} when it ran. ` +
+      `Something replaced part of that path in between, so ${after} is what may have been read into this conversation. ` +
+      'That cannot be taken back: treat anything secret in that file as disclosed, and rotate it.',
+  },
+};
+
+/** Which check a tool call belongs to, or null. */
+function targetCheckKind(toolName) {
+  if (FILE_EDIT_TOOLS.has(toolName)) return 'edit';
+  if (CONTENT_READ_TOOLS.has(toolName)) return 'read';
+  return null;
+}
+
+/** Records where a tool's targets resolved when it was approved, for checkTargets. */
+function rememberTargets(ctx) {
+  const kind = ctx.stepIdx === null ? null : targetCheckKind(ctx.toolName);
+  if (!kind) return;
+  const check = TARGET_CHECKS[kind];
+  const targets = check.targets(ctx);
   if (targets.length === 0) return;
   updateState(ctx.autoagyHome, ctx.conversationId, (s) => {
-    s.pendingEdits[ctx.stepIdx] = targets;
-    const steps = Object.keys(s.pendingEdits);
-    for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_EDITS))) delete s.pendingEdits[step];
+    const pending = s[check.pending] ?? (s[check.pending] = {});
+    pending[ctx.stepIdx] = targets;
+    const steps = Object.keys(pending);
+    for (const step of steps.slice(0, Math.max(0, steps.length - MAX_PENDING_EDITS))) delete pending[step];
+    // Only the edits go on from here. `recentEdits` is handed to the reviewer as
+    // the files this conversation edited, and a read is not one of those.
+    if (kind !== 'edit') return;
     // Kept for the reviewer: the transcript is budget-trimmed, so an edit made
     // long before a command is approved can be gone from it by then.
     s.recentEdits = [...(s.recentEdits ?? []), ...targets.map((t) => ({ path: t.abs, real: t.real, step: ctx.stepIdx, kind: ctx.toolName }))].slice(-MAX_RECENT_EDITS);
@@ -407,28 +453,27 @@ const MAX_RECENT_EDITS = 20;
  * background could do that): the write may have landed somewhere other than
  * the location that was approved, which is worth interrupting the turn over.
  */
-function checkEditTargets(ctx) {
+function checkTargets(ctx, kind) {
+  const check = TARGET_CHECKS[kind];
   const home = ctx.autoagyHome;
   const recorded = updateState(home, ctx.conversationId, (s) => {
-    const targets = s.pendingEdits[ctx.stepIdx] ?? null;
-    delete s.pendingEdits[ctx.stepIdx];
+    const pending = s[check.pending] ?? {};
+    const targets = pending[ctx.stepIdx] ?? null;
+    delete pending[ctx.stepIdx];
     return targets;
   });
   if (!recorded) return {};
   let rootId;
-  const now = new Map(editTargets(ctx).map((t) => [t.abs, t.real]));
+  const now = new Map(check.targets(ctx).map((t) => [t.abs, t.real]));
   for (const { abs, real } of recorded) {
     const after = now.get(abs);
     if (!after || after === real) continue;
-    const message =
-      `autoagy: ${abs} resolved to ${real} when the ${ctx.toolName} was approved, but to ${after} when it ran. ` +
-      'Something replaced part of that path in between, so the write may have landed outside the approved location. ' +
-      'Check what changed there before continuing.';
+    const message = check.message(ctx.toolName, abs, real, after);
     appendDecision(home, {
       conversation: ctx.conversationId,
       step: ctx.stepIdx,
       tool: ctx.toolName,
-      verdict: 'edit-target-changed',
+      verdict: check.verdict,
       path: abs,
       before: real,
       after,
@@ -437,13 +482,13 @@ function checkEditTargets(ctx) {
       s.interrupt = { turnKey: countUserMessages(ctx.transcriptPath), pending: true, message };
       // This is a fact about the filesystem, not about the agent's behaviour, so
       // it outlives the turn: leaving the symlink in place does not undo it.
-      markUntrusted(s, { reason: 'edit-target-changed', detail: `${abs} resolved to ${after}`, step: ctx.stepIdx });
+      markUntrusted(s, { reason: check.verdict, detail: `${abs} resolved to ${after}`, step: ctx.stepIdx });
       rootId = s.rootConversationId;
     });
     // A subagent's conversation keeps its own state file, but it just changed
     // the parent's workspace too, so the parent stops trusting its paths as well.
     if (rootId && rootId !== ctx.conversationId) {
-      updateState(home, rootId, (s) => markUntrusted(s, { reason: 'edit-target-changed', detail: `${abs} changed while a subagent ran`, step: ctx.stepIdx }));
+      updateState(home, rootId, (s) => markUntrusted(s, { reason: check.verdict, detail: `${abs} changed while a subagent ran`, step: ctx.stepIdx }));
     }
     return {};
   }
@@ -586,7 +631,7 @@ export async function handlePreToolUse(payload, options = {}) {
 
   if (classification.verdict === 'allow') {
     if (config.log.allowed) appendDecision(home, { ...base, verdict: 'allow', reason: classification.reason });
-    rememberEditTargets(ctx);
+    rememberTargets(ctx);
     return withOwnSandbox({ decision: 'allow' }, ctx);
   }
   if (classification.verdict === 'deny') {
@@ -671,7 +716,7 @@ export async function handlePreToolUse(payload, options = {}) {
   if (config.log.reviews && prompt) {
     writeReviewRecord(home, `${Date.now()}-${ctx.conversationId.slice(0, 8)}`, { prompt, result });
   }
-  if (output.decision !== 'deny') rememberEditTargets(ctx);
+  if (output.decision !== 'deny') rememberTargets(ctx);
   return withOwnSandbox(output, ctx);
 }
 

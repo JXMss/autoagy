@@ -436,3 +436,79 @@ test('mode off still asks about an untrusted conversation\'s edits', () => {
     fs.rmSync(src, { force: true });
   }
 });
+
+// agy performs a read itself, outside every sandbox, exactly as it performs a
+// write — so a path swapped between the check and the call lands the read
+// somewhere else too. The difference is that a write can be cleaned up and a
+// read cannot: the file is already in the model's context.
+test('a read whose target is swapped after approval is caught the way an edit is', () => {
+  const dir = path.join(dirs.workspace, 'notes');
+  const target = path.join(dir, 'readme.md');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(target, 'harmless');
+  try {
+    assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'view_file', { AbsolutePath: target }, ws())).decision, 'allow');
+    // A backgrounded command replaces the directory before agy opens the file.
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.symlinkSync(dirs.home, dir);
+    runHook('post-tool-use', payloadFor(dirs, 'view_file', { AbsolutePath: target }, ws()));
+
+    const [record] = readDecisions(dirs.env.AUTOAGY_HOME, 1);
+    assert.equal(record.verdict, 'read-target-changed');
+    assert.equal(record.after, path.join(fs.realpathSync(dirs.home), 'readme.md'));
+    const state = readState(dirs.env.AUTOAGY_HOME, dirs.conversationId);
+    assert.equal(state.untrusted?.reason, 'read-target-changed', 'a fact about the disk, so it outlives the turn');
+    // The only thing left to act on is naming what was disclosed.
+    assert.match(state.interrupt.message, /may have been read into this conversation/);
+    assert.match(state.interrupt.message, /rotate it/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a search is judged by its SearchPath, which no edit tool ever looks at', () => {
+  const dir = path.join(dirs.workspace, 'pkg');
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+  try {
+    // `SearchPath` is deliberately not in PATH_ARG_RE — that pattern is shared
+    // with the edit tools and the planned action — so readTargets adds it.
+    assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'grep_search', { SearchPath: dir, Query: 'token' }, ws())).decision, 'allow');
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.symlinkSync(path.join(dirs.home, '.ssh'), dir);
+    runHook('post-tool-use', payloadFor(dirs, 'grep_search', { SearchPath: dir, Query: 'token' }, ws()));
+    const [record] = readDecisions(dirs.env.AUTOAGY_HOME, 1);
+    assert.equal(record.verdict, 'read-target-changed');
+    assert.equal(record.after, path.join(fs.realpathSync(dirs.home), '.ssh'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a read that resolved where it said records nothing', () => {
+  const target = path.join(dirs.workspace, 'steady.md');
+  fs.writeFileSync(target, 'hello');
+  assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'view_file', { AbsolutePath: target }, ws())).decision, 'allow');
+  runHook('post-tool-use', payloadFor(dirs, 'view_file', { AbsolutePath: target }, ws()));
+  const state = readState(dirs.env.AUTOAGY_HOME, dirs.conversationId);
+  assert.equal(state.untrusted, null);
+  assert.deepEqual(state.pendingReads, {}, 'consumed by the check that ran');
+  assert.ok(!readDecisions(dirs.env.AUTOAGY_HOME, 10).some((r) => r.verdict === 'read-target-changed'));
+});
+
+test('reads stay out of the edit list the reviewer is shown', () => {
+  const file = path.join(dirs.workspace, 'shown.js');
+  fs.writeFileSync(file, 'a');
+  runHook('pre-tool-use', payloadFor(dirs, 'view_file', { AbsolutePath: file }, ws()));
+  let state = readState(dirs.env.AUTOAGY_HOME, dirs.conversationId);
+  // `recentEdits` reaches the reviewer labelled as the files this conversation
+  // edited. A read is tracked, but it is not one of those.
+  assert.deepEqual(state.recentEdits, []);
+  assert.ok(Object.keys(state.pendingReads).length > 0);
+
+  runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: file, CodeContent: 'b' }, ws()));
+  state = readState(dirs.env.AUTOAGY_HOME, dirs.conversationId);
+  assert.equal(state.recentEdits.length, 1);
+  assert.equal(state.recentEdits[0].kind, 'write_to_file');
+});

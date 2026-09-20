@@ -55,6 +55,11 @@ function freshState(conversationId) {
     pendingLock: null,
     // stepIdx -> [{ abs, real }] a file edit targets, resolved when it was approved.
     pendingEdits: {},
+    // The same for the tools that return file contents. Kept apart from
+    // pendingEdits because the two feed different things: only the edits go on
+    // to `recentEdits`, which the reviewer is told is the list of files this
+    // conversation *edited*.
+    pendingReads: {},
     // Set when supervision saw the environment do something it did not approve:
     // a path that resolved elsewhere when the edit ran, or a command that wrote
     // into a protected directory. Sticky for the conversation, because a new

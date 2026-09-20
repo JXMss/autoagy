@@ -224,7 +224,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 - Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问（这是为保住沙箱网络隔离做的取舍）。
 - hook 负载里没有可信的用户消息（`lastUserInput` 等字段存在但未填），autoagy 只能从 transcript 里识别用户说的话，而 transcript 的完整性依赖上面的沙箱。
 - 审核模型没有工具（Codex 的 guardian 可以做只读检查）；autoagy 用确定性的目标检查部分弥补。
-- **文件编辑本身不在任何沙箱里执行**：写文件的是 agy 自己（Codex 的 `apply_patch` 在文件系统沙箱里跑），autoagy 只能在写入前检查一次目标路径。如果一条后台的沙箱命令在这中间把路径换成了符号链接，写入就会落到别处（检查时刻和使用时刻不一致）。PostToolUse 会在写入后重新解析目标并比对：对不上就记一条 `edit-target-changed`、熔断本轮，并把整个会话标记为不可信（见「会话信任」）。这些都只能事后发现，不能阻止那一次写入。**读取凭据类文件的检查没有任何事后核对**：它只在执行前判断一次，读类工具没有对应的 PostToolUse 检查。根治要等 Antigravity 把编辑也放进沙箱。
+- **文件编辑本身不在任何沙箱里执行**：写文件的是 agy 自己（Codex 的 `apply_patch` 在文件系统沙箱里跑），autoagy 只能在写入前检查一次目标路径。如果一条后台的沙箱命令在这中间把路径换成了符号链接，写入就会落到别处（检查时刻和使用时刻不一致）。PostToolUse 会在写入后重新解析目标并比对：对不上就记一条 `edit-target-changed`、熔断本轮，并把整个会话标记为不可信（见「会话信任」）。这些都只能事后发现，不能阻止那一次写入。**读取走的是同一条路，也有同样的事后核对**：agy 同样是自己去读、不经过任何沙箱，所以返回文件内容的工具（`view_file`、`read_file`、`grep_search` 等，`grep_search` 按它的 `SearchPath` 判）在执行后会重新解析一次目标，对不上就记 `read-target-changed`、同样熔断并标记会话不可信。**但性质比编辑更不可逆**：写错地方还能清理，读错地方的内容已经进了模型上下文，收不回来——所以那条提示直接告诉你哪个文件可能被读走了、该去轮换什么。根治仍然要等 Antigravity 把编辑和读取都放进沙箱。
 - 子 agent 的授权以根会话里用户的话为准（通过父会话的 `invoke_subagent` 记录回溯），找不到父会话时按不可信处理。
 - Windows 上命令解析是尽力而为（PowerShell 语法与 POSIX shell 不同，但会偏向保守）。
 - 用 `--dangerously-skip-permissions` 启动 agy 时 Antigravity 的沙箱实际不生效：启用了 autoagy 自己的沙箱时命令仍在其中运行（实测 `overwrite` 在该模式下照样生效）；否则 autoagy 按无沙箱处理，审核会变多；`force_ask` 在该模式下会被自动同意，所以 autoagy 在此模式下只使用 allow/deny——这条现在也覆盖 `mode: off` 的弹窗路径。
