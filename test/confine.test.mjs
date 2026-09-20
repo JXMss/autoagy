@@ -12,7 +12,7 @@ import { classify } from '../plugin/lib/policy.mjs';
 import { readState, updateState } from '../plugin/lib/state.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
 import { installExecutor, executorPath, tokenDir } from '../plugin/lib/tokens.mjs';
-import { makeSandboxDirs, configWith, payloadFor } from './helpers.mjs';
+import { makeSandboxDirs, configWith, payloadFor, contextFor } from './helpers.mjs';
 
 const dirs = makeSandboxDirs();
 after(() => dirs.cleanup());
@@ -942,4 +942,29 @@ test('the walk stops on the clock as well as on the directory count', () => {
   const whole = findNestedGitPaths(path.join(dirs.workspace), { maxMs: 10_000 });
   assert.equal(whole.truncated, false);
   assert.ok(whole.visited > 0);
+});
+
+test('protectedPaths reaches commands, not only the edit tools', () => {
+  // The setting is documented as "paths that need review to modify" and the
+  // class it names — `.husky/`, `.envrc`, a `postinstall` script — is the
+  // "written now, executed later outside the sandbox" one, which a *command*
+  // writes. It gated only the edit tools: measured, `echo pwn >
+  // .husky/pre-commit` was `allow | sandboxed-command` with or without the entry.
+  const husky = path.join(dirs.workspace, '.husky', 'pre-commit');
+  const config = configWith({ ownSandbox: 'on', protectedPaths: [`${dirs.workspace}/.husky/**`] });
+  const withGlob = (CommandLine, extra = {}) => classify(contextFor(dirs, 'run_command', { CommandLine, ...extra }, { config, bwrapProbe: okProbe }));
+  assert.equal(withGlob(`echo pwn > ${husky}`).verdict, 'review');
+  assert.equal(withGlob(`echo pwn > ${husky}`).category, 'protected-path');
+  assert.equal(withGlob('rm -rf .husky').verdict, 'review', 'deleting the directory is the same path');
+  assert.equal(withGlob('cd .husky && ls').verdict, 'review');
+  assert.equal(withGlob('ls -la .husky/pre-commit').verdict, 'review', 'it cannot tell a read from a write, and erring towards a review is the point');
+  assert.equal(withGlob('echo pwn > src/other.txt').verdict, 'allow', 'and nothing else is dragged in');
+  // A `~` in the command and in the setting name the same file.
+  const homeConfig = configWith({ ownSandbox: 'on', protectedPaths: [`${dirs.home}/secrets/**`] });
+  assert.equal(
+    classify(contextFor(dirs, 'run_command', { CommandLine: 'echo x > ~/secrets/a' }, { config: homeConfig, bwrapProbe: okProbe })).verdict,
+    'review',
+  );
+  // Without the setting nothing changes.
+  assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: `echo pwn > ${husky}` }, { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe })).verdict, 'allow');
 });

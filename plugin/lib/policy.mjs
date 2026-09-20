@@ -476,12 +476,52 @@ function hiddenByOwnSandbox(ctx, abs) {
  * been reviewed, and nothing masks it inside autoagy's own sandbox either.
  * `hiddenBySandbox` drops the reads that sandbox does prevent.
  */
-function credentialArgument(ctx, analysis, cwd, { hiddenBySandbox = false } = {}) {
-  const base = typeof cwd === 'string' && cwd ? toAbsolute(cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
+/** The literal arguments of every command in the line, plus write-redirect targets. */
+function literalWords(analysis) {
   const words = analysis.segments.flatMap((s) => s.argv.slice(1));
   for (const command of analysis.parsed.commands) {
     for (const r of command.redirects) if (!r.op.startsWith('<<')) words.push(r.target);
   }
+  return words;
+}
+
+/**
+ * A path `protectedPaths` asks to review that a command names, or null.
+ *
+ * The setting is documented as "paths that need review to modify", and it
+ * reached only the edit tools: `echo x > .husky/pre-commit` was
+ * `allow | sandboxed-command` with or without a matching entry, which matters
+ * because the class it exists for — `.husky/`, `.envrc`, a `postinstall` script,
+ * a `Makefile` — is exactly the "written now, executed later outside the sandbox"
+ * one, and the sandbox is where a command writes from.
+ *
+ * Best effort in the same way the rest of the command analysis is: a literal
+ * path, `~` and `$HOME` are resolved, and a path assembled at runtime or reached
+ * by a tool that reads its own configuration file is not found. Globs that name a
+ * directory are matched by their literal prefix, so `**\/.husky/**` catches
+ * `rm -rf .husky` as well as a file inside it.
+ *
+ * @returns {string | null} the path that matched, for the reason
+ */
+function protectedArgument(ctx, analysis, cwd) {
+  const globs = ctx.protectedGlobs ?? [];
+  if (globs.length === 0) return null;
+  const base = typeof cwd === 'string' && cwd ? toAbsolute(cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
+  for (const word of literalWords(analysis)) {
+    const value = word.replace(/^~(?=$|\/)/, ctx.home).replace(/\$\{HOME\}|\$HOME\b/g, ctx.home);
+    if (/[$`]/.test(value)) continue;
+    const abs = toAbsolute(value, base, ctx.home);
+    if (!abs) continue;
+    for (const p of new Set([abs, resolveReal(abs)])) {
+      if (matchesAnyGlob(p, globs, ctx.home)) return p;
+    }
+  }
+  return null;
+}
+
+function credentialArgument(ctx, analysis, cwd, { hiddenBySandbox = false } = {}) {
+  const base = typeof cwd === 'string' && cwd ? toAbsolute(cwd, ctx.baseDir, ctx.home) : ctx.baseDir;
+  const words = literalWords(analysis);
   for (const word of words) {
     // PowerShell's `Env:` provider is the environment, and *any* command name
     // can reach it — `ls`, `cat` and `type` are the cmdlets' aliases, and a
@@ -925,6 +965,13 @@ function classifyCommand(ctx, state = {}) {
     ? ` The command reads ${envExposure}: the hook inherits the environment agy was started with, which commonly holds exported API keys, and nothing rebuilds it for this command.`
     : '';
 
+  // `protectedPaths` names paths the operator wants reviewed before they change;
+  // it reached the edit tools only, so a command writing one of them — the case
+  // the setting exists for, since a command is what writes inside the sandbox —
+  // was allowed without a look.
+  const protectedHit = protectedArgument(ctx, analysis, ctx.args.Cwd);
+  const protectedNote = protectedHit ? ` The command names ${protectedHit}, which protectedPaths asks to review before it changes.` : '';
+
   // A planted hook runs outside every sandbox — the writing git command that
   // reaches it has to `BypassSandbox` to work at all — and nothing can mount a
   // `.git` that did not exist when the command line was built. So the repository
@@ -943,7 +990,7 @@ function classifyCommand(ctx, state = {}) {
   }
   // An operator wrote those rules before there was a plant; the allow is not
   // evidence that anyone looked at this.
-  if (rules.decision === 'allow' && !selfNote && !credential && !envExposure && !planted) return allow('rule-allow', describeRule(rules.rule));
+  if (rules.decision === 'allow' && !selfNote && !credential && !envExposure && !planted && !protectedHit) return allow('rule-allow', describeRule(rules.rule));
 
   if (bypass) {
     // `plantedNote` belongs here most of all: leaving the sandbox is how a hook
@@ -959,6 +1006,7 @@ function classifyCommand(ctx, state = {}) {
   if (selfNote) return review('touches-security-controls', selfNote.trim());
   if (credential) return review('credential-read', credentialNote.trim());
   if (envExposure) return review('environment-read', envNote.trim());
+  if (protectedHit) return review('protected-path', `${protectedNote.trim()} It would change inside the sandbox, where nothing else reviews it.`);
   // Starting another Antigravity is never routine: whether these hooks are
   // loaded at all is decided by that instance's own configuration and
   // environment, and this call can set both. Placed after the categories above
