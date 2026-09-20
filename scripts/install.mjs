@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { removeTripwire, tripwireInstalled, tripwirePath, userHooksPath } from '../plugin/lib/tripwire.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE = path.join(REPO, 'plugin');
@@ -62,14 +63,34 @@ Tip: alias autoagy="node ${BIN}"`);
 }
 
 function uninstall() {
+  // First, and deliberately not gated on the installed copy existing: a tripwire
+  // left behind refuses every tool call, and it is registered in a file `agy
+  // plugin` does not manage — so the install that most needs this is the one
+  // where the plugin directory is already gone. This script runs from the clone,
+  // whose lib is always here, which is why the call can be unconditional.
+  const autoagyHome = path.join(os.homedir(), '.gemini', 'autoagy');
+  const tripwire = dryRun
+    ? { script: fs.existsSync(tripwirePath(autoagyHome)), registration: tripwireInstalled({ autoagyHome }) }
+    : removeTripwire({ autoagyHome });
+  if (tripwire.script || tripwire.registration) {
+    console.log(`${dryRun ? 'Would remove' : 'Removed'} the tripwire${tripwire.script ? ` (${tripwirePath(autoagyHome)})` : ''}${tripwire.registration ? ` from ${userHooksPath()}` : ''}`);
+  }
+
   if (fs.existsSync(BIN)) run(process.execPath, [BIN, 'teardown', ...(dryRun ? ['--dry-run'] : [])], { allowFailure: true });
   if (dryRun) return console.log(`(dry run) would remove ${INSTALLED}`);
   if (!(agyAvailable() && run('agy', ['plugin', 'uninstall', 'autoagy'], { allowFailure: true }))) {
     fs.rmSync(INSTALLED, { recursive: true, force: true });
   }
   if (args.has('--purge')) {
-    fs.rmSync(path.join(os.homedir(), '.gemini', 'autoagy'), { recursive: true, force: true });
+    fs.rmSync(autoagyHome, { recursive: true, force: true });
     console.log('Removed ~/.gemini/autoagy (config, state and logs).');
+  }
+  // The one thing that would still be refusing every tool call gets said out
+  // loud, and "uninstalled" is not printed over it.
+  if (tripwireInstalled({ autoagyHome })) {
+    console.error(`autoagy: the tripwire is still registered in ${userHooksPath()} — delete its \`autoagy-tripwire\` key there, or every tool call stays refused.`);
+    process.exitCode = 1;
+    return;
   }
   console.log('autoagy uninstalled.');
 }

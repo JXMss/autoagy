@@ -30,7 +30,16 @@ import fs from 'node:fs';
 
 const PLUGIN_DIR = '__PLUGIN_DIR__';
 const CONFIG_JSON = '__CONFIG_JSON__';
+// The file this program is registered in. Named in the refusal because it is the
+// one way out that does not need a command to run — including when the thing
+// that is missing IS the command the other instructions point at.
+const HOOKS_JSON = '__HOOKS_JSON__';
 const PLUGIN_NAME = 'autoagy';
+// Spelled out rather than imported: this file is copied out of the plugin on
+// purpose (the plugin directory going away is one of the things it has to keep
+// noticing), so the lib that writes the key is not reachable from here. A test
+// pins the two spellings together.
+const TRIPWIRE_KEY = 'autoagy-tripwire';
 
 const readJson = (file) => {
   try {
@@ -71,6 +80,8 @@ process.stdout.write(
     reason:
       `autoagy is not reviewing anything: ${wrong}. The permission grants \`autoagy setup\` added are still in place, ` +
       'so tool calls are refused rather than run unreviewed. Tell the user, and suggest `autoagy status`. ' +
-      'To stop reviewing on purpose use `autoagy mode off`, and to remove autoagy entirely use `autoagy teardown`.',
+      'To stop reviewing on purpose use `autoagy mode off`, and to remove autoagy entirely use `autoagy teardown`. ' +
+      `If that command is part of what went missing, the way out needs no command: delete the \`${TRIPWIRE_KEY}\` key ` +
+      `from ${HOOKS_JSON} and this refusal stops. Every other key in that file belongs to someone else — leave them.`,
   }),
 );

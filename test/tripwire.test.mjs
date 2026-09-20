@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-tripwire-')));
@@ -39,11 +40,16 @@ const run = () => {
 setPlugin();
 installTripwire({ autoagyHome, home, pluginDir });
 
-test('installs a runnable program with its interpreter and both paths pinned', () => {
+test('installs a runnable program with its interpreter and every path pinned', () => {
   const text = fs.readFileSync(tripwirePath(autoagyHome), 'utf8');
   assert.equal(text.split('\n')[0], `#!${process.execPath}`);
   assert.ok(text.includes(pluginDir) && text.includes(configJson));
-  assert.ok(!text.includes('__PLUGIN_DIR__') && !text.includes('__CONFIG_JSON__'));
+  assert.ok(!text.includes('__PLUGIN_DIR__') && !text.includes('__CONFIG_JSON__') && !text.includes('__HOOKS_JSON__'));
+  assert.ok(text.includes(userHooksPath(home)), 'the refusal has to name the file it is registered in');
+  // The key is spelled twice on purpose: the installed program is copied out of
+  // the plugin and cannot import the lib that writes it. This pins the two
+  // spellings together, so a rename on either side fails here.
+  assert.ok(text.includes(TRIPWIRE_KEY), 'and the key to delete');
   assert.ok(tripwireInstalled({ autoagyHome, home }));
 });
 
@@ -76,6 +82,20 @@ test('refuses when the plugin hooks are gone, or no longer pinned', () => {
 
   setPlugin();
   assert.equal(run(), null);
+});
+
+test('the refusal names the way out that does not need a command', () => {
+  // The lockout this exists for: the plugin directory is deleted by hand, so
+  // every instruction that begins with `autoagy …` points at a program that is
+  // no longer there. The registration is the only way back, and the refusal has
+  // to say so rather than let the user guess.
+  fs.rmSync(pluginDir, { recursive: true, force: true });
+  const out = run();
+  assert.equal(out.decision, 'deny');
+  assert.match(out.reason, /missing or unreadable/);
+  assert.ok(out.reason.includes(userHooksPath(home)), 'the file to edit');
+  assert.ok(out.reason.includes(TRIPWIRE_KEY), 'and the key to delete from it');
+  setPlugin();
 });
 
 test('registration merges into the user hooks file and leaves the rest alone', () => {
@@ -119,4 +139,35 @@ test('setup installs the tripwire and teardown removes it', () => {
   assert.match(body('setup'), /installTripwire\(/, 'setup must install it, or the grants it guards stand alone');
   assert.match(body('teardown'), /removeTripwire\(/, 'teardown must remove it, or every tool call is refused after uninstall');
   assert.match(body('status'), /tripwireInstalled\(/, 'status must say whether it is there');
+});
+
+// The other half of the same failure, in the uninstaller. The call used to sit
+// inside `if (fs.existsSync(BIN))`, so the case that needed it most — the plugin
+// directory already gone — skipped it, and the script said "uninstalled"
+// anyway. The invariant is the position, which is why it is asserted rather
+// than described.
+test('the uninstaller removes the tripwire before it asks for an installed copy', () => {
+  const text = fs.readFileSync(new URL('../scripts/install.mjs', import.meta.url), 'utf8');
+  const start = text.indexOf('function uninstall(');
+  assert.ok(start > 0, 'uninstall() not found');
+  const body = text.slice(start, text.indexOf('\n}', start));
+  const removal = body.indexOf('removeTripwire(');
+  assert.ok(removal > 0, 'uninstall must remove it, or a half-removed install has no way back');
+  const guard = body.indexOf('existsSync(BIN)');
+  assert.ok(guard > 0 && removal < guard, 'and outside the existsSync(BIN) branch, which is the case it exists for');
+});
+
+test('an install whose plugin directory was deleted by hand still uninstalls', () => {
+  // The lockout, end to end: delete the plugin directory, then run the
+  // documented uninstall. PATH is emptied so the `agy` on it cannot be reached
+  // and the script takes its fallback path — which in this sandbox only ever
+  // touches the fake home.
+  installTripwire({ autoagyHome, home, pluginDir });
+  fs.rmSync(pluginDir, { recursive: true, force: true });
+  const script = fileURLToPath(new URL('../scripts/install.mjs', import.meta.url));
+  const res = spawnSync(process.execPath, [script, '--uninstall'], { encoding: 'utf8', env: { HOME: home, PATH: '/nonexistent' } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /Removed the tripwire/);
+  assert.match(res.stdout, /autoagy uninstalled\./);
+  assert.equal(tripwireInstalled({ autoagyHome, home }), false, 'nothing is left refusing every tool call');
 });

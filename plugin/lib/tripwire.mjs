@@ -65,7 +65,10 @@ export function installTripwire({ autoagyHome, home = os.homedir(), pluginDir, n
     .readFileSync(SOURCE, 'utf8')
     .replace(/^#![^\n]*\n/, `#!${nodePath}\n`)
     .replace('__PLUGIN_DIR__', pluginDir)
-    .replace('__CONFIG_JSON__', path.join(home, '.gemini', 'config', 'config.json'));
+    .replace('__CONFIG_JSON__', path.join(home, '.gemini', 'config', 'config.json'))
+    // Where it is registered, so a refusal can name the one way out that needs
+    // no command to run.
+    .replace('__HOOKS_JSON__', userHooksPath(home));
   fs.mkdirSync(path.dirname(script), { recursive: true, mode: 0o700 });
   const tmp = `${script}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, source, { mode: 0o700 });
