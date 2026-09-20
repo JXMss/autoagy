@@ -105,8 +105,12 @@ export function planSetup(settings, { grants = RECOMMENDED_GRANTS, settingsChang
 export function applySetup({ home = os.homedir(), env = process.env, dryRun = false, grants = RECOMMENDED_GRANTS, settingsChanges = true } = {}) {
   const autoagyHome = resolveAutoagyHome(env, home);
   const settingsFile = cliSettingsPath(home);
-  let settings = {};
-  if (fs.existsSync(settingsFile)) settings = readJsonFile(settingsFile);
+  const { value: settings, readable } = readForRewrite(settingsFile);
+  // Refused for the same reason `applyTeardown` refuses, one step earlier: this
+  // command rewrites the file, and a file it cannot read is a file it would
+  // overwrite from an empty object. The raw parse error it used to throw said
+  // nothing about that.
+  if (!readable) throw new Error(`${settingsFile} is not valid JSON, so autoagy setup left it alone. Fix it first (a trailing comma is the usual cause).`);
   const plan = planSetup(settings, { grants, settingsChanges });
   const report = { settingsFile, ...plan, backup: null, dryRun };
   if (dryRun || (plan.addGrants.length === 0 && plan.changes.length === 0)) return report;
@@ -184,18 +188,36 @@ export function readSetupRecord(autoagyHome) {
   }
 }
 
+/**
+ * Reads a file this command is about to rewrite, and says whether it may.
+ *
+ * A read-modify-write that cannot read the file must stop, not proceed from an
+ * empty object: `{}` is written back over everything the user had. Measured on
+ * `~/.gemini/antigravity-cli/settings.json` with one syntax error in it —
+ * teardown replaced the whole file with the keys it was restoring, taking
+ * `model`, `theme`, `mcpServers` and the existing `permissions.deny` with it,
+ * and then deleted the setup record, so the grants it was supposed to remove
+ * were left in a file that could no longer be reverted at all.
+ */
+function readForRewrite(file) {
+  if (!fs.existsSync(file)) return { value: {}, readable: true };
+  try {
+    return { value: readJsonFile(file), readable: true };
+  } catch {
+    return { value: null, readable: false };
+  }
+}
+
 /** Reverts the grants and settings that setup changed. */
 export function applyTeardown({ home = os.homedir(), env = process.env, dryRun = false } = {}) {
   const autoagyHome = resolveAutoagyHome(env, home);
   const record = readSetupRecord(autoagyHome);
   if (!record) return { found: false, removedGrants: [], restored: [], dryRun };
   const settingsFile = record.settingsFile ?? cliSettingsPath(home);
-  let settings = {};
-  try {
-    settings = readJsonFile(settingsFile);
-  } catch {
-    settings = {};
-  }
+  const { value: settings, readable } = readForRewrite(settingsFile);
+  // Nothing is written and the record is kept, so the grants are still
+  // revertable once the file is fixed.
+  if (!readable) return { found: true, settingsFile, unreadable: true, removedGrants: [], restored: [], dryRun };
   const allow = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow : [];
   const removedGrants = allow.filter((g) => record.addedGrants?.includes(g));
   const restored = Object.entries(record.priorValues ?? {}).map(([key, prior]) => ({ key, to: prior.present ? prior.value : undefined }));

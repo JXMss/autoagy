@@ -89,3 +89,22 @@ test('a reviewer command that cannot name a program is reported, not crashed on'
   fs.writeFileSync(config, JSON.stringify({ reviewer: { backend: 'agy', agy: { command: '/nope/agy' } } }));
   assert.match(status(), /NOT runnable at \/nope\/agy/);
 });
+
+test('`mode` refuses to rewrite a configuration file it cannot parse', () => {
+  // It was `readJsonQuiet(file) ?? {}` followed by a write of the whole object:
+  // one trailing comma in `config.json` and the mode change took
+  // `trustedDomains`, `credentialPaths`, `protectedPaths`, `writableRoots` and
+  // `policy.file` with it. The result is *valid* JSON, so nothing downstream —
+  // `loadConfig`'s warnings included — ever mentioned it again.
+  const home = path.join(path.dirname(dirs.env.AUTOAGY_HOME), 'mode-home');
+  const env = { ...dirs.env, AUTOAGY_HOME: home };
+  fs.mkdirSync(home, { recursive: true });
+  const file = path.join(home, 'config.json');
+  const broken = '{\n  "trustedDomains": ["docs.example"],\n}\n';
+  fs.writeFileSync(file, broken);
+  const res = spawnSync(process.execPath, [BIN, 'mode', 'off'], { env, encoding: 'utf8' });
+  assert.notEqual(res.status, 0, 'it fails instead of reporting a mode change');
+  assert.match(res.stderr, /not valid JSON/);
+  assert.equal(fs.readFileSync(file, 'utf8'), broken, 'and the file is left exactly as it was');
+  fs.rmSync(home, { recursive: true, force: true });
+});

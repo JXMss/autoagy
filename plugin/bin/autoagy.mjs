@@ -512,7 +512,18 @@ function setMode(mode) {
   if (!['auto', 'ask', 'off'].includes(mode)) throw new Error('usage: autoagy mode <auto|ask|off>');
   ensureConfigFile({ env, home });
   const file = configPath(env, home);
-  const config = readJsonQuiet(file) ?? {};
+  // This is a read-modify-write of the file the user edits by hand, so a file
+  // that cannot be parsed stops it rather than being replaced by the one line
+  // it was about to add. `?? {}` here was measured taking `trustedDomains`,
+  // `credentialPaths`, `protectedPaths`, `writableRoots` and `policy.file` with
+  // it over a single trailing comma — and the result is *valid* JSON, so no
+  // other check ever mentions it again.
+  const config = fs.existsSync(file) ? readJsonQuiet(file) : {};
+  if (config === null) {
+    console.error(`autoagy: ${file} is not valid JSON, so the mode was not changed. Fix the file and run this again.`);
+    process.exitCode = 1;
+    return;
+  }
   config.mode = mode;
   fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
   console.log(`autoagy mode set to "${mode}" (${file}). It applies to the next tool call; no restart needed.`);
@@ -623,6 +634,13 @@ function teardown(flags) {
   }
   const report = applyTeardown({ dryRun, env, home });
   if (!report.found) return console.log('No setup record found; nothing else to revert.');
+  if (report.unreadable) {
+    console.error(`autoagy: ${report.settingsFile} is not valid JSON, so nothing was changed and nothing was removed.`);
+    console.error('  The grants are still in that file and the setup record is still here, so this is fixable:');
+    console.error('  repair the file, then run `autoagy teardown` again.');
+    process.exitCode = 1;
+    return;
+  }
   const verb = (done, planned) => (report.dryRun ? planned : done);
   console.log(`${verb('Reverted', 'Would revert')} ${report.settingsFile}`);
   for (const g of report.removedGrants) console.log(`  ${verb('removed', 'would remove')} permissions.allow ${g}`);

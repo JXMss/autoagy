@@ -13,7 +13,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { removeTripwire, tripwireInstalled, tripwireRegistered, tripwirePath, userHooksPath, registeredTripwirePath, registeredAutoagyHome } from '../plugin/lib/tripwire.mjs';
-import { applyTeardown, hookPins } from '../plugin/lib/setup.mjs';
+import { applyTeardown, hookPins, cliSettingsPath } from '../plugin/lib/setup.mjs';
 import { autoagyHome as resolveAutoagyHome } from '../plugin/lib/config.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -102,10 +102,17 @@ function uninstall() {
   // from the clone, whose lib is always here — and it is the difference between
   // "uninstalled" and a silent fail-open: the record `setup` wrote is what makes
   // `command(*)`, `mcp(*)` and `execute_url(*)` revertable at all.
+  const warnings = [];
   if (fs.existsSync(BIN)) {
-    run(process.execPath, [BIN, 'teardown', ...(dryRun ? ['--dry-run'] : [])], { allowFailure: true });
+    // The exit status is the only word on whether the grants came back out, and
+    // the installed command refuses (status 1) exactly when it could not — so
+    // it is checked rather than discarded.
+    if (!run(process.execPath, [BIN, 'teardown', ...(dryRun ? ['--dry-run'] : [])], { allowFailure: true })) {
+      warnings.push(`\`autoagy teardown\` could not revert ${cliSettingsPath(userHome)}; the permission grants may still be in it. Run it again and follow what it says.`);
+    }
   } else {
     const report = applyTeardown({ dryRun, env, home: userHome });
+    if (report.unreadable) warnings.push(`${report.settingsFile} is not valid JSON, so the permission grants are still in it. Repair the file, then run \`autoagy teardown\`.`);
     console.log(report.found ? `${dryRun ? 'Would revert' : 'Reverted'} ${report.settingsFile}` : `No setup record found in ${autoagyHome}; nothing else to revert.`);
   }
   if (dryRun) return console.log(`(dry run) would remove ${INSTALLED}`);
@@ -116,10 +123,14 @@ function uninstall() {
     fs.rmSync(autoagyHome, { recursive: true, force: true });
     console.log(`Removed ${autoagyHome} (config, state and logs).`);
   }
-  // The one thing that would still be refusing every tool call gets said out
-  // loud, and "uninstalled" is not printed over it.
+  // Anything that is still in place gets said out loud, and "uninstalled" is not
+  // printed over it: a tripwire still registered keeps refusing every tool call,
+  // and grants that could not be reverted keep applying with nobody reviewing.
   if (tripwireInstalled({ autoagyHome, home: userHome })) {
-    console.error(`autoagy: the tripwire is still registered in ${userHooksPath(userHome)} — delete its \`autoagy-tripwire\` key there, or every tool call stays refused.`);
+    warnings.push(`the tripwire is still registered in ${userHooksPath(userHome)} — delete its \`autoagy-tripwire\` key there, or every tool call stays refused.`);
+  }
+  if (warnings.length > 0) {
+    for (const warning of warnings) console.error(`autoagy: ${warning}`);
     process.exitCode = 1;
     return;
   }

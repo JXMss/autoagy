@@ -227,3 +227,37 @@ test('the tripwire is removed where it is registered, not where this shell would
     fs.rmSync(root3, { recursive: true, force: true });
   }
 });
+
+test('a settings file that cannot be parsed stops the revert instead of being replaced', () => {
+  // The destructive half of the same bug class as the pin: `applyTeardown` read
+  // the settings with `catch { settings = {} }` and then wrote that object back.
+  // Measured with a single syntax error in the file — the user's model, theme,
+  // mcpServers and existing deny rules went with it, the grants it was supposed
+  // to remove stayed (the reader could not see them, so nothing was reported as
+  // left), and the record was deleted, making them unrevertable.
+  const home = path.join(root, 'broken-settings');
+  const env = { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy') };
+  const file = cliSettingsPath(home);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ model: 'Gemini Flash', permissions: { allow: [] } }, null, 2));
+  applySetup({ home, env });
+  // Leave the file the way a hand-edit would: grants and all, plus one syntax
+  // error (a trailing comma is the ordinary shape).
+  const installed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, `${JSON.stringify(installed, null, 2).replace(/\n}$/, ',\n}')}`);
+  const after = fs.readFileSync(file, 'utf8');
+  assert.throws(() => applySetup({ home, env }), /not valid JSON/, 'setup refuses too, rather than overwriting what it cannot read');
+
+  const report = applyTeardown({ home, env });
+  assert.equal(report.found, true);
+  assert.equal(report.unreadable, true);
+  assert.equal(fs.readFileSync(file, 'utf8'), after, 'the file it could not read is left exactly as it was');
+  assert.ok(fs.existsSync(path.join(env.AUTOAGY_HOME, 'setup.json')), 'and the record survives, so this is still revertable');
+
+  // With the file repaired, the same call reverts it.
+  fs.writeFileSync(file, JSON.stringify(installed, null, 2));
+  const done = applyTeardown({ home, env });
+  assert.equal(done.unreadable, undefined);
+  assert.ok(done.removedGrants.includes('command(*)'));
+  assert.ok(!JSON.parse(fs.readFileSync(file, 'utf8')).permissions.allow.includes('command(*)'));
+});
