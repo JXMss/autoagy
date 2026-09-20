@@ -122,6 +122,44 @@ test('policy prompt inserts the tenant policy and the output contract', () => {
   assert.ok(!customPrompt.includes('### Data Exfiltration'));
 });
 
+test('a policy.file that is not an absolute path is refused, and `~` works', () => {
+  // Relative used to be actively harmful: the read took the string as written
+  // and let the OS resolve it against the hook's cwd (the agent's workspace),
+  // the guard resolved it against the cwd too, and `selfPaths` fed the null it
+  // got into `resolveReal`, which threw on every tool call. One rule now: `~`
+  // expanded, absolute required.
+  const captured = [];
+  const real = process.stderr.write;
+  const run = (file) => {
+    captured.length = 0;
+    process.stderr.write = (chunk) => captured.push(String(chunk));
+    try {
+      return policyPrompt(configWith({ policy: { file } }), { home: dirs.home });
+    } finally {
+      process.stderr.write = real;
+    }
+  };
+
+  const relative = run('policy.md');
+  assert.match(relative, /### Data Exfiltration/, 'the built-in policy runs instead');
+  assert.match(captured.join(''), /not an absolute path/);
+
+  // A value that is not a path at all is the same class, and used to reach
+  // `fs.readFileSync` as a number.
+  const numeric = run(123);
+  assert.match(numeric, /### Data Exfiltration/);
+  assert.match(captured.join(''), /not an absolute path/);
+
+  // The advice in the config table — put it under `~/.gemini/autoagy/` — did not
+  // work at all before this, because `fs.readFileSync` does not expand `~`.
+  const file = path.join(dirs.env.AUTOAGY_HOME, 'policy.md');
+  fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
+  fs.writeFileSync(file, '## Custom\n- Never allow deploys.');
+  const tilde = run('~/.gemini/autoagy/policy.md');
+  assert.match(tilde, /Never allow deploys/);
+  assert.equal(captured.join(''), '', 'and it is loaded without a complaint');
+});
+
 test('a policy file the agent could rewrite is refused and the built-in one runs', () => {
   // `policy.file` is a path from a config the agent cannot write, which makes it
   // worth exactly as much as where it points: pointed at the workspace it is a

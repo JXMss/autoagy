@@ -7,8 +7,10 @@
 // rejection / timeout instructions for the agent.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { PLUGIN_DIR } from './context.mjs';
+import { resolveConfigPath } from './config.mjs';
 import { plannedAction } from './policy.mjs';
 import { resolveReal, findContainingRoot } from './paths.mjs';
 import {
@@ -81,19 +83,24 @@ function readPrompt(name) {
  * the artifact and scratch directories, the temp roots, `writableRoots`. A
  * policy file in a temp directory is refused too, which is intended.
  *
+ * Two ways to be refused, and the caller says which: `'unusable'` when the
+ * setting is not an absolute path (see `resolveConfigPath` — a relative value
+ * would name a different file depending on who is asking), and `'writable'`
+ * when it is somewhere the agent can write.
+ *
  * @param {object} config
  * @param {string[]} writableRoots
- * @returns {{ path: string, real: string, root: string } | null}
+ * @param {{ home?: string }} [options]
+ * @returns {{ path: string, real: string | null, root: string | null, why: 'unusable' | 'writable' } | null}
  */
-export function policyFileRefusal(config, writableRoots = []) {
-  const file = config?.policy?.file;
-  if (typeof file !== 'string' || file.trim() === '') return null;
-  // Resolved the way the read below resolves it: `fs.readFileSync` takes the
-  // string as written, so a relative setting is relative to the hook's cwd.
-  const spelled = path.resolve(file);
-  const real = resolveReal(spelled);
-  const root = findContainingRoot(real, writableRoots) ?? findContainingRoot(spelled, writableRoots);
-  return root ? { path: spelled, real, root } : null;
+export function policyFileRefusal(config, writableRoots = [], { home = os.homedir() } = {}) {
+  const raw = config?.policy?.file;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const file = resolveConfigPath(raw, { home });
+  if (!file) return { path: String(raw), real: null, root: null, why: 'unusable' };
+  const real = resolveReal(file);
+  const root = findContainingRoot(real, writableRoots) ?? findContainingRoot(file, writableRoots);
+  return root ? { path: file, real, root, why: 'writable' } : null;
 }
 
 /**
@@ -106,24 +113,31 @@ export function policyFileRefusal(config, writableRoots = []) {
  * misconfiguration into a broken install. The built-in policy is autoagy's own
  * and is the stricter of the two, so the reviews that follow are reviews.
  */
-export function policyPrompt(config, { writableRoots = [] } = {}) {
+export function policyPrompt(config, { writableRoots = [], home = os.homedir() } = {}) {
   let tenant;
-  const refused = policyFileRefusal(config, writableRoots);
+  const refused = policyFileRefusal(config, writableRoots, { home });
   if (refused) {
+    const because =
+      refused.why === 'unusable'
+        ? `it is set to ${JSON.stringify(refused.path)}, which is not an absolute path — and a relative one would name a different file ` +
+          'depending on the directory the process happens to run in. Use an absolute path (`~` is expanded)'
+        : `it is inside ${refused.root}, which the agent can write, so the rules judging it could be rewritten by it`;
     process.stderr.write(
-      `autoagy: refusing to load the reviewer policy at ${refused.real} — it is inside ${refused.root}, which the agent can write, ` +
-        'so the rules judging it could be rewritten by it. Using the built-in policy instead; move policy.file somewhere the agent cannot ' +
-        'write (e.g. ~/.gemini/autoagy/) and restart.\n',
+      `autoagy: refusing to load the reviewer policy: ${because}. Using the built-in policy instead; ` +
+        'move policy.file somewhere the agent cannot write (e.g. ~/.gemini/autoagy/) and restart.\n',
     );
     tenant = readPrompt('policy.md');
-  } else if (config.policy?.file) {
-    try {
-      tenant = stripComments(fs.readFileSync(config.policy.file, 'utf8'));
-    } catch (err) {
-      throw new Error(`cannot read policy.file ${config.policy.file}: ${err.message}`);
-    }
   } else {
-    tenant = readPrompt('policy.md');
+    const file = resolveConfigPath(config.policy?.file, { home });
+    if (file) {
+      try {
+        tenant = stripComments(fs.readFileSync(file, 'utf8'));
+      } catch (err) {
+        throw new Error(`cannot read policy.file ${file}: ${err.message}`);
+      }
+    } else {
+      tenant = readPrompt('policy.md');
+    }
   }
   if (config.policy?.extra) tenant = `${tenant.trim()}\n\n## Organization-Specific Rules\n${String(config.policy.extra).trim()}`;
   const template = readPrompt('policy_template.md').trimEnd();
@@ -175,7 +189,7 @@ export function gatherEvidence(ctx, hints = {}) {
  * @returns {{ system: string, user: string, action: object }}
  */
 export function buildReviewPrompt(ctx, classification, evidence, extra = {}) {
-  const system = policyPrompt(ctx.config, { writableRoots: ctx.writableRoots });
+  const system = policyPrompt(ctx.config, { writableRoots: ctx.writableRoots, home: ctx.home });
   const action = plannedAction(ctx);
   const parts = [];
   parts.push(

@@ -176,3 +176,22 @@ test('only a .git that was not there when the command was built counts as a plan
     fs.rmSync(path.join(dirs.workspace, 'created'), { recursive: true, force: true });
   }
 });
+
+test('a relative policy.file no longer breaks every tool call', () => {
+  // This is the regression test. The value reaches `selfPaths`, and the version
+  // of that line which fed `toAbsolute`'s null straight into `resolveReal` made
+  // every edit and command come back as a fail-closed deny reading
+  // `autoagy internal error (The "path" argument must be of type string.
+  // Received null)` — a sentence that explains nothing to the person seeing it.
+  const relative = contextFor(dirs, 'run_command', { CommandLine: 'ls' }, { config: configWith({ policy: { file: 'policy.md' } }) });
+  assert.ok(Array.isArray(relative.selfPaths));
+  assert.ok(!relative.selfPaths.some((p) => typeof p !== 'string'));
+
+  // And a value that IS usable names one file for every reader: `~` expanded
+  // once, here and in the prompt that reads it.
+  const file = path.join(dirs.env.AUTOAGY_HOME, 'policy.md');
+  fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
+  fs.writeFileSync(file, '## Custom\n- Never allow deploys.');
+  const tilde = contextFor(dirs, 'run_command', { CommandLine: 'ls' }, { config: configWith({ policy: { file: '~/.gemini/autoagy/policy.md' } }) });
+  assert.ok(tilde.selfPaths.includes(fs.realpathSync(file)), 'the file selfPaths protects is the one the reviewer reads');
+});

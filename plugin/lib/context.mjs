@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { autoagyHome } from './config.mjs';
+import { autoagyHome, resolveConfigPath } from './config.mjs';
 import { toAbsolute, uniquePaths, expandHome, expandAnchoredGlob, resolveReal, findExecutable } from './paths.mjs';
 import { detectOwnSandbox, probeBwrap, hostBuildId, envBinaryPath, envScrubDisabled } from './confine.mjs';
 import { userHooksPath } from './tripwire.mjs';
@@ -485,6 +485,7 @@ export class HookContext {
   get selfPaths() {
     return this.memo('selfPaths', () => {
       const reviewer = this.config.reviewer?.backend === 'agy' ? this.reviewerExecutable : null;
+      const policyFile = resolveConfigPath(this.config.policy?.file, { home: this.home });
       return uniquePaths([
         this.autoagyHome,
         this.pluginDir,
@@ -506,7 +507,12 @@ export class HookContext {
         // is what buys the edit tools a refusal and, where autoagy's own sandbox
         // is in force, a read-only bind inside it — neither of which exists on a
         // host with no own sandbox.
-        this.config.policy?.file ? resolveReal(toAbsolute(this.config.policy.file, null, this.home)) : null,
+        //
+        // Through `resolveConfigPath` like the other two readers, and guarded
+        // rather than fed straight in: it returns null for a value that is
+        // unset, relative, or not a string, and the version of this line that
+        // handed that null to `resolveReal` made every tool call fail.
+        policyFile ? resolveReal(policyFile) : null,
         this.appDataDir ? path.join(this.appDataDir, 'plugin_data', 'autoagy') : null,
         this.hostExecutable,
         reviewer,

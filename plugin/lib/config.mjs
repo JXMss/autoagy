@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { toAbsolute } from './paths.mjs';
 
 export const DEFAULT_CONFIG = Object.freeze({
   // "auto": Codex "Approve for me" — risky actions are judged by the reviewer model.
@@ -174,6 +175,32 @@ export function autoagyHome(env = process.env, home = os.homedir()) {
 /** Always inside autoagyHome, which agents may not modify. */
 export function configPath(env = process.env, home = os.homedir()) {
   return path.join(autoagyHome(env, home), 'config.json');
+}
+
+/**
+ * A path out of the config, resolved the way it will be used: `~` expanded, and
+ * required to be absolute.
+ *
+ * Every reader of a config-supplied path comes through here, because they
+ * drifted apart once and it cost a crash. `policy.file` had three readers — the
+ * read itself, the guard that decides whether it may be loaded, and
+ * `selfPaths` — and each resolved it its own way: one took the string as
+ * written, one resolved it against the cwd, one required an absolute path and
+ * fed the null it got for a relative value into `resolveReal`, which threw on
+ * every tool call. They cannot disagree about which file they mean now.
+ *
+ * A relative path returns null rather than being resolved against the cwd. The
+ * hook's cwd is the agent's workspace, while `autoagy review` runs wherever the
+ * user is — so the same setting would name different files depending on who
+ * asked, for a value that decides how the agent is judged. Callers treat a
+ * value that is set and unusable as a refusal, not as a default.
+ *
+ * @param {unknown} value
+ * @param {{ home?: string }} [options]
+ * @returns {string | null} null when it is unset, not a string, empty, or relative
+ */
+export function resolveConfigPath(value, { home = os.homedir() } = {}) {
+  return toAbsolute(value, null, home);
 }
 
 function isPlainObject(v) {
