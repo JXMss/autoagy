@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { toAbsolute } from './paths.mjs';
+import { toAbsolute, expandHome } from './paths.mjs';
 
 export const DEFAULT_CONFIG = Object.freeze({
   // "auto": Codex "Approve for me" — risky actions are judged by the reviewer model.
@@ -203,6 +203,26 @@ export function resolveConfigPath(value, { home = os.homedir() } = {}) {
   return toAbsolute(value, null, home);
 }
 
+/**
+ * Whether a glob out of the config can ever match, given that it is tested
+ * against absolute paths.
+ *
+ * `matchesAnyGlob` compares against an absolute path, so a pattern that names a
+ * directory relatively — `.husky/**`, `src/secrets/**` — is anchored to a root
+ * it never reaches and matches nothing, silently. The two forms that do work
+ * are an absolute pattern and a location-independent one (`**\/.husky/**`,
+ * `*.pem`), and the difference is invisible unless someone says so: the setting
+ * looks accepted, and the only symptom is a path that was never protected.
+ *
+ * A pattern with no separator is a basename match anywhere, so it is fine.
+ * @param {string} glob already `~`-expanded
+ */
+export function configGlobCanMatch(glob) {
+  if (!glob.includes('/') && !glob.includes('\\')) return true;
+  if (path.isAbsolute(glob)) return true;
+  return glob.startsWith('**/') || glob.startsWith('**\\');
+}
+
 function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
 }
@@ -249,7 +269,33 @@ function setPath(obj, keyPath, value) {
   target[last] = value;
 }
 
-function validate(config, warnings) {
+function validate(config, warnings, home = os.homedir()) {
+  // Path-shaped keys are normalised here, once, for the same reason
+  // `resolveConfigPath` exists: `writableRoots` had two readers that disagreed
+  // — the policy dropped a relative entry and `autoagy setup` resolved it
+  // against whatever directory it happened to run in, so a declared root was
+  // never honoured while a grant nobody could see accumulated in the Antigravity
+  // settings. Resolving before either of them reads it means there is nothing
+  // left to disagree about.
+  config.writableRoots = (config.writableRoots ?? []).flatMap((p, i) => {
+    const resolved = resolveConfigPath(p, { home });
+    if (resolved) return [resolved];
+    warnings.push(`writableRoots[${i}] (${JSON.stringify(p)}) is not an absolute path; ignored — a relative one would name a different directory depending on where the process runs`);
+    return [];
+  });
+  // Globs are not resolved (a location-independent pattern is the point of
+  // them) but they are checked, because one that cannot match fails silently.
+  for (const key of ['protectedPaths', 'credentialPaths', 'credentialPathExceptions']) {
+    config[key] = (config[key] ?? []).filter((p, i) => {
+      if (typeof p !== 'string' || p === '') {
+        warnings.push(`${key}[${i}] is not a non-empty string; ignored`);
+        return false;
+      }
+      if (configGlobCanMatch(expandHome(p, home))) return true;
+      warnings.push(`${key}[${i}] (${JSON.stringify(p)}) is relative, so it can never match an absolute path; ignored — write it absolute, or prefix it with "**/"`);
+      return false;
+    });
+  }
   for (const [keyPath, allowed] of Object.entries(ENUMS)) {
     const value = getPath(config, keyPath);
     if (!allowed.includes(value)) {
@@ -314,7 +360,7 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
   }
   // No environment variable may weaken the policy: the hook inherits agy's
   // environment, which an escalated command can set for an agy it starts.
-  validate(config, warnings);
+  validate(config, warnings, home);
   // The hook runner caps the review deadline so it always answers inside the hook timeout.
   const cap = Number(env.AUTOAGY_REVIEW_TIMEOUT_CAP);
   if (Number.isFinite(cap) && cap > 0) config.reviewer.timeoutSec = Math.min(config.reviewer.timeoutSec, cap);

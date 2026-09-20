@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { autoagyHome as resolveAutoagyHome, defaultConfigFileText, configPath } from './config.mjs';
+import { autoagyHome as resolveAutoagyHome, defaultConfigFileText, configPath, resolveConfigPath } from './config.mjs';
 import { expandHome } from './paths.mjs';
 import { executorPath } from './tokens.mjs';
 
@@ -43,9 +43,15 @@ export const RECOMMENDED_SETTINGS = { enableTerminalSandbox: true, toolPermissio
  * does not count those as outside the workspace (measured).
  */
 export function writableRootGrants(config, home = os.homedir()) {
+  // `resolveConfigPath`, not `path.resolve`: `loadConfig` already resolved these
+  // and dropped the ones it could not, so the grant names the same directory the
+  // policy treats as writable. Resolving against the cwd here was the other half
+  // of that disagreement — `setup` run from two directories wrote two grants for
+  // one entry, and neither matched what the hook honoured.
   return (config?.writableRoots ?? [])
-    .filter((p) => typeof p === 'string' && p.trim() !== '')
-    .map((p) => `write_file(${path.resolve(expandHome(p.trim(), home))})`);
+    .map((p) => resolveConfigPath(p, { home }))
+    .filter(Boolean)
+    .map((p) => `write_file(${p})`);
 }
 
 /**

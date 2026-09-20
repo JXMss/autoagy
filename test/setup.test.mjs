@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, RECOMMENDED_SETTINGS } from '../plugin/lib/setup.mjs';
 import { executorPath } from '../plugin/lib/tokens.mjs';
-import { configPath } from '../plugin/lib/config.mjs';
+import { configPath, loadConfig } from '../plugin/lib/config.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-setup-'));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -117,4 +117,26 @@ test('setup writes a write_file grant for each writable root', () => {
   // Teardown puts the setting back where it found it rather than at the default.
   applyTeardown({ home, env });
   assert.equal('allowNonWorkspaceAccess' in JSON.parse(fs.readFileSync(file, 'utf8')), false);
+});
+
+test('a path-shaped setting is resolved once, so the policy and the grants agree', () => {
+  // `writableRoots` had two readers and they disagreed: the policy dropped a
+  // relative entry without a word, while `writableRootGrants` resolved it
+  // against whatever directory `autoagy setup` happened to run in. The declared
+  // root was therefore never honoured, and a grant nobody could see accumulated
+  // in the Antigravity settings — one more on every run from a new directory.
+  const home = path.join(root, 'one-reading');
+  fs.mkdirSync(path.join(home, '.gemini', 'autoagy'), { recursive: true });
+  fs.writeFileSync(
+    configPath({}, home),
+    JSON.stringify({ writableRoots: ['rel/dir', 'file:///srv/build', '~/ok'], protectedPaths: ['.husky/**', '**/.husky/**'] }),
+  );
+  const { config, warnings } = loadConfig({ env: {}, home });
+  assert.deepEqual(config.writableRoots, ['/srv/build', path.join(home, 'ok')]);
+  assert.deepEqual(writableRootGrants(config, home), ['write_file(/srv/build)', `write_file(${path.join(home, 'ok')})`]);
+  // A glob that can never match an absolute path is dropped too, and the one
+  // that can is kept. `status` prints these; they used to be nothing at all.
+  assert.deepEqual(config.protectedPaths, ['**/.husky/**']);
+  assert.equal(warnings.filter((w) => w.startsWith('writableRoots[0]')).length, 1);
+  assert.equal(warnings.filter((w) => w.startsWith('protectedPaths[0]')).length, 1);
 });
