@@ -506,6 +506,24 @@ test('reading the environment is reviewed wherever nothing rebuilds it', () => {
   // A variable that is in the environment but not on the sandbox allowlist is
   // exactly what the sandbox would have dropped, so it is judged the same way.
   assert.equal(verdict('run_command', { CommandLine: 'echo $JAVA_HOME' }, options).category, 'environment-read');
+  // Routes that name no `$NAME` at all, so the variable rule cannot see them:
+  // the builtins dump what the shell already holds, the interpreters read it
+  // from inside their own argument, and a multi-call binary hides the applet.
+  for (const cmd of [
+    'declare -x',
+    'export -p',
+    'set',
+    'compgen -e',
+    'busybox env',
+    'busybox printenv',
+    'node -p process.env.OPENAI_API_KEY',
+    'python3 -c "import os;print(os.environ)"',
+    "ruby -e 'puts ENV.to_h'",
+    "perl -e 'print $ENV{OPENAI_API_KEY}'",
+    'awk \'BEGIN{print ENVIRON["OPENAI_API_KEY"]}\'',
+  ]) {
+    assert.equal(verdict('run_command', { CommandLine: cmd }, options).category, 'environment-read', cmd);
+  }
   // An escalated command is reviewed anyway, but the reviewer is told.
   const escalated = verdict('run_command', { CommandLine: 'printenv', BypassSandbox: true }, options);
   assert.equal(escalated.category, 'sandbox-escalation');
@@ -522,6 +540,17 @@ test('the environment check leaves ordinary command lines alone', () => {
     'echo $NOT_IN_THE_ENVIRONMENT',
     'ps -ef',
     "cat <<'EOF'\n$OPENAI_API_KEY\nEOF\n", // a quoted heredoc does not expand
+    // Setting one variable is not reading the environment. `node -e` with an
+    // assignment to `process.env` is routine, and flagging it would make the
+    // check noise; the patterns are per language so `const ENV=1` is not it
+    // either. A heuristic, and the exclusions are what it costs.
+    "node -e \"process.env.NODE_ENV='test'\"",
+    "python3 -c \"os.environ['X']='1'\"",
+    'node -e "const ENV=1"',
+    'export FOO=bar',
+    'set -e',
+    'declare -i x=1',
+    'compgen -c',
   ]) {
     assert.equal(verdict('run_command', { CommandLine: cmd }, options).verdict, 'allow', cmd);
   }

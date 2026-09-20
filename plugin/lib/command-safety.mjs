@@ -107,6 +107,16 @@ export function unwrapCommand(argv) {
       const args = skipOptions(rest, new Set(['-w', '--wait', '--timeout', '-E', '--conflict-exit-code']));
       return nonEmpty(args.slice(1));
     }
+    // A multi-call binary: the first word left is the applet and the rest belongs
+    // to it. Unwrapping it here rather than in each consumer is what makes
+    // `busybox rm -rf /` visible to the dangerous-command table, `busybox sh -c
+    // …` to `shellScriptOf` (which already special-cased busybox for shells) and
+    // `busybox env` to `printsEnvironment`. Deliberately not added to the
+    // wrapper list in `isSafeArgv`: that list grants *allow* where no sandbox
+    // confines a command, and widening it is not what this is for.
+    case 'busybox':
+    case 'toybox':
+      return nonEmpty(skipOptions(rest));
     default:
       return null;
   }
@@ -471,6 +481,14 @@ const UNSAFE_GIT_ARGS = new Set(['--output', '-o', '--ext-diff', '--textconv', '
 export function printsEnvironment(argv) {
   const name = executableName(argv[0]);
   const args = argv.slice(1);
+  // A multi-call binary answers for its applet: `busybox env` is `env`, and the
+  // command name says nothing at all. Answered here as well as through the
+  // unwrapped segment the analysis produces, so a caller holding only the
+  // original argv still gets the right answer.
+  if (name === 'busybox' || name === 'toybox') {
+    const inner = unwrapCommand(argv);
+    return inner ? printsEnvironment(inner) : null;
+  }
   if (name === 'printenv') return '`printenv`, which prints the environment';
   if (name === 'env') {
     // `env A=b cmd` runs cmd and is judged by what it runs, `env -S ...` by the
@@ -492,6 +510,84 @@ export function printsEnvironment(argv) {
   // rather than the letter keeps `.environment` and `.vendor` working.
   if (name === 'jq' && args.some((a) => /(^|[^A-Za-z0-9_])env([^A-Za-z0-9_]|$)/i.test(a))) {
     return "jq's `env` / `$ENV` builtin, which is the environment";
+  }
+  // Shell builtins that dump the variables with no `$NAME` anywhere for the
+  // variable rule to see. Judged here rather than as `isSafeArgv` switch cases
+  // on purpose: `SIMPLE_SAFE` returns true *before* that switch is reached,
+  // which is exactly how the PowerShell `Env:` provider was missed the first
+  // time. None of these names are in `SIMPLE_SAFE`, so the whitelist path
+  // already refuses them — what was missing is the policy path, and that one
+  // comes through this function.
+  if (name === 'export' && args.every((a) => a.startsWith('-'))) {
+    return '`export`, which prints the exported environment';
+  }
+  if ((name === 'declare' || name === 'typeset') && args.length > 0 && args.every((a) => a.startsWith('-')) && args.some((a) => /[xp]/.test(a))) {
+    return `\`${name}\` asked for the variables and their attributes`;
+  }
+  if (name === 'set' && args.length === 0) return 'a bare `set`, which prints every variable';
+  if (name === 'compgen' && args.some((a) => /^-[a-z]*[ev]/.test(a))) {
+    return '`compgen`, which lists the variable names';
+  }
+  const inline = inlineEnvironmentRead(argv);
+  if (inline) return inline;
+  return null;
+}
+
+// Interpreters that read the environment when the code handed to them asks for
+// it. The pattern is per language on purpose: one shared `\bENV\b` would flag
+// `node -e "const ENV='prod'"`, and a list that flags routine work is a list
+// that gets turned off. `flags` are the options that carry the program text;
+// `valueFlags` are the ones to step over when the text is a bare argument, as
+// it is for awk.
+const INTERPRETER_ENV_CODE = [
+  { names: ['node', 'nodejs', 'bun', 'deno'], flags: ['-e', '--eval', '-p', '--print', 'eval'], pattern: /process\.env\b|getenv\s*\(/ },
+  { names: ['python', 'python2', 'python3', 'pypy', 'pypy3'], flags: ['-c'], pattern: /os\.environ\b|os\.getenv/ },
+  { names: ['ruby', 'irb'], flags: ['-e'], pattern: /\bENV\b/ },
+  { names: ['perl'], flags: ['-e', '-E'], pattern: /\$ENV\b|%ENV\b|getenv/ },
+  { names: ['php'], flags: ['-r'], pattern: /\$_ENV|\$_SERVER|getenv\s*\(/ },
+  { names: ['awk', 'gawk', 'mawk', 'nawk'], valueFlags: ['-F', '-v'], pattern: /\bENVIRON\b/ },
+];
+
+// Writing one variable is not reading the environment, and
+// `node -e "process.env.NODE_ENV='test'"` is a routine thing to run. An
+// assignment (`=` not followed by another `=`, so `==` stays a read) is removed
+// before the patterns are tried. A heuristic, not a proof:
+// `Object.assign(process.env, …)` and a value read into a local before being
+// written are still reported.
+const ENV_WRITE_RE = /(?:process\.env|os\.environ|\$ENV|%ENV|\$_ENV)\s*(?:\.[A-Za-z_]\w*|\[[^\]]*\])+\s*(?:=[^=]|:=)/g;
+
+/** The program text an interpreter `argv` is handed, or null. */
+function interpreterProgram(argv, entry) {
+  const args = argv.slice(1);
+  if (entry.flags) {
+    for (let i = 0; i < args.length; i += 1) {
+      if (entry.flags.includes(args[i])) return args[i + 1];
+      const inline = /^(--[a-z-]+)=(.*)$/.exec(args[i]);
+      if (inline && entry.flags.includes(inline[1])) return inline[2];
+    }
+    return null;
+  }
+  const skip = new Set(entry.valueFlags ?? []);
+  for (let i = 0; i < args.length; i += 1) {
+    if (skip.has(args[i])) {
+      i += 1;
+      continue;
+    }
+    if (args[i].startsWith('-') && args[i] !== '-') continue;
+    return args[i];
+  }
+  return null;
+}
+
+/** The interpreter whose inline code would read the environment, or null. */
+function inlineEnvironmentRead(argv) {
+  const name = executableName(argv[0]);
+  for (const entry of INTERPRETER_ENV_CODE) {
+    if (!entry.names.includes(name)) continue;
+    const program = interpreterProgram(argv, entry);
+    if (typeof program !== 'string') continue;
+    if (!entry.pattern.test(program.replace(ENV_WRITE_RE, ' '))) continue;
+    return `code handed to \`${name}\` that reads the environment`;
   }
   return null;
 }

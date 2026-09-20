@@ -246,6 +246,49 @@ test('commands that hand over the process environment', () => {
   }
 });
 
+test('routes to the environment that name no $NAME at all', () => {
+  // Each of these dumps or reads the environment without the shell expanding
+  // anything, so the variable rule in the policy cannot see them: `busybox env`
+  // is one word as far as `executableName` is concerned, the builtins print what
+  // is already in the shell, and the interpreters read it from inside their own
+  // argument.
+  const says = (cmd) => Boolean(printsEnvironment(analyzeCommandLine(cmd).segments[0].argv));
+  const reads = [
+    'declare -x', 'declare -p', 'typeset -x', 'typeset -xp',
+    'export -p', 'export', 'set', 'compgen -e', 'compgen -v',
+    'busybox env', 'busybox printenv', 'toybox env',
+    'node -p process.env.OPENAI_API_KEY', "node -e 'console.log(process.env.X)'", 'node --eval="getenv(\'X\')"',
+    'python3 -c "import os;print(os.environ)"', 'python3 -c "import os;print(os.getenv(\'X\'))"',
+    "ruby -e 'puts ENV.to_h'", "perl -e 'print $ENV{OPENAI_API_KEY}'", "php -r 'echo getenv(\"X\");'",
+    "awk 'BEGIN{print ENVIRON[\"OPENAI_API_KEY\"]}'",
+  ];
+  for (const cmd of reads) assert.equal(says(cmd), true, cmd);
+
+  // What must keep working: setting one variable is not reading the
+  // environment, and neither is a version probe, a word that merely contains
+  // "env", or an option that prints something else entirely.
+  const silent = [
+    'export FOO=bar', 'declare -i x=1', 'set -e', 'compgen -c', 'ls',
+    'node --version', 'node -e "const ENV=1"', "node -e \"process.env.NODE_ENV='test'\"",
+    "python3 -c \"os.environ['X']='1'\"", "python3 -c \"print('environment')\"",
+    'awk -F, "{print $1}" f.csv', "ruby -e 'puts 1'", "perl -e 'print 1'",
+  ];
+  for (const cmd of silent) assert.equal(says(cmd), false, cmd);
+});
+
+test('a multi-call binary is unwrapped, so the applet is what gets judged', () => {
+  // `busybox` is one binary with the applet as its first argument, so every
+  // consumer that only looks at the command name sees nothing. Unwrapping is
+  // what makes the applet reachable — but deliberately only for the analysis,
+  // not for `isKnownSafeCommandLine`: widening the allowlist is not the point.
+  const argv = (cmd) => analyzeCommandLine(cmd).segments.map((s) => s.argv.join(' '));
+  assert.deepEqual(argv('busybox rm -rf /'), ['busybox rm -rf /', 'rm -rf /']);
+  assert.ok(findDangerousCommand(analyzeCommandLine('busybox rm -rf /')), 'the applet reaches the dangerous table');
+  assert.ok(findDangerousCommand(analyzeCommandLine('busybox sh -c "rm -rf /"')), 'and through a shell the applet starts');
+  assert.equal(findDangerousCommand(analyzeCommandLine('busybox ls -l')), null);
+  assert.equal(isKnownSafeCommandLine('busybox ls -l'), false, 'an applet is not waved through by name');
+});
+
 test('the variables a command line expands are collected through every nesting', () => {
   const names = (cmd) => [...analyzeCommandLine(cmd).variables].sort();
   // A nested script hides the reference from the outer line; the analysis follows it.
