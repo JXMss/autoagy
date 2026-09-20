@@ -227,7 +227,67 @@ test('the seccomp filter is assembled for this architecture and denies with EPER
   assert.ok(compared.includes(0xc000003e), 'guard on the audit architecture');
   assert.ok(compared.includes(41) && compared.includes(53), 'socket and socketpair are argument-checked');
   assert.ok(compared.includes(101) && compared.includes(310), 'ptrace and process_vm_readv are denied outright');
+  assert.ok(compared.includes(46), 'sendmsg is denied: an unconnected datagram socket takes its destination in the message header');
+  // The x32 ABI on x86-64 is marked by bit 30 of the syscall *number*, not by
+  // the arch field, so an equality table never sees it and the call is allowed
+  // — `socket(AF_INET)` was measured returning a descriptor inside a real bwrap.
+  // The refusal is therefore a bit test, and it belongs to x86-64 alone.
+  const x64 = seccompProgram('x64');
+  const x64Instr = [];
+  for (let i = 0; i < x64.length; i += 8) x64Instr.push({ code: x64.readUInt16LE(i), k: x64.readUInt32LE(i + 4) });
+  assert.ok(x64Instr.some((i) => i.code === 0x45 && i.k === 0x40000000), 'x86-64 refuses the x32 syscall-number bit');
+  const arm = seccompProgram('arm64');
+  const armInstr = [];
+  for (let i = 0; i < arm.length; i += 8) armInstr.push({ code: arm.readUInt16LE(i), k: arm.readUInt32LE(i + 4) });
+  assert.ok(!armInstr.some((i) => i.code === 0x45), 'aarch64 has no x32 ABI to refuse');
+  assert.ok(armInstr.some((i) => i.code === 0x15 && i.k === 211), 'the syscall tables are per architecture (aarch64 sendmsg)');
   assert.throws(() => seccompProgram('s390x'), /no seccomp filter/);
+});
+
+test('the x32 alias and sendmsg are refused inside the real sandbox', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  // Measured, not reasoned: with this filter in place a 64-bit syscall is
+  // refused and the same call with bit 30 set used to be *allowed* — one
+  // `ctypes` call away from any command the sandbox was supposed to bound.
+  // `sendmsg` was refused only after it was added to the deny list; `sendto`
+  // was already there, so the pair is what the test pins.
+  const probe = path.join(dirs.tmp, 'rawsyscalls.py');
+  fs.writeFileSync(
+    probe,
+    [
+      'import ctypes',
+      'libc = ctypes.CDLL(None, use_errno=True)',
+      'X32 = 0x40000000',
+      'def call(nr, *a):',
+      '    ctypes.set_errno(0)',
+      '    r = libc.syscall(ctypes.c_long(nr), *[ctypes.c_long(x) if isinstance(x, int) else x for x in a])',
+      '    return r, ctypes.get_errno()',
+      "fd, _ = call(41, 1, 1, 0)  # AF_UNIX, SOCK_STREAM: allowed by the filter",
+      "sa = ctypes.create_string_buffer(b'/nonexistent-autoagy-probe\\x00', 30)",
+      "print('X32_SOCKET', call(X32 | 41, 2, 1, 0)[1])",
+      "print('X32_CONNECT', call(X32 | 42, fd, sa, 30)[1])",
+      "print('X64_SOCKET', call(41, 2, 1, 0)[1])",
+      'class IOV(ctypes.Structure): _fields_ = [("base", ctypes.c_void_p), ("len", ctypes.c_size_t)]',
+      'class MSG(ctypes.Structure):',
+      '    _fields_ = [("name", ctypes.c_void_p), ("namelen", ctypes.c_uint), ("iov", ctypes.POINTER(IOV)), ("iovlen", ctypes.c_size_t), ("control", ctypes.c_void_p), ("controllen", ctypes.c_size_t), ("flags", ctypes.c_int)]',
+      'fd2, _ = call(41, 1, 2, 0)  # AF_UNIX, SOCK_DGRAM',
+      'buf = ctypes.create_string_buffer(b"x")',
+      'iov = IOV(ctypes.cast(buf, ctypes.c_void_p), 1)',
+      'msg = MSG(ctypes.cast(sa, ctypes.c_void_p), 26, ctypes.pointer(iov), 1, None, 0, 0)',
+      "print('SENDMSG', call(46, fd2, ctypes.byref(msg), 0)[1])",
+      '',
+    ].join('\n'),
+  );
+  if (spawnSync('python3', ['-c', 'pass']).status !== 0) {
+    return; // no interpreter on this host that can make a raw syscall
+  }
+  const ctx = ctxFor({ CommandLine: 'x' }, { probe: () => real });
+  const line = confinedCommandLine(ctx, `python3 ${JSON.stringify(probe)}`);
+  const res = spawnSync('/bin/sh', ['-c', line], { cwd: dirs.workspace, encoding: 'utf8' });
+  assert.equal(res.status, 0, res.stderr);
+  const got = Object.fromEntries(res.stdout.trim().split('\n').map((l) => l.split(' ')));
+  // EPERM is 1 both for the syscall the filter names and for the x32 alias of
+  // one it does not: the point is that the second number was not a way around it.
+  assert.deepEqual(got, { X32_SOCKET: '1', X32_CONNECT: '1', X64_SOCKET: '1', SENDMSG: '1' });
 });
 
 test('the own sandbox denies reaching a socket, which the read-only root bind does not', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
