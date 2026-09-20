@@ -514,3 +514,33 @@ test('the scrub can be widened by ownSandboxEnvPassThrough', () => {
   assert.match(line, /'CARGO_HOME=\/home\/someone\/\.cargo'/, 'the one list widens both rewrites');
   assert.ok(!line.includes('OTHER='));
 });
+
+test('a repository nested in the workspace keeps its .git read-only too', () => {
+  const nested = path.join(dirs.workspace, 'sub');
+  const deep = path.join(dirs.workspace, 'packages', 'lib');
+  const skipped = path.join(dirs.workspace, 'node_modules', 'pkg');
+  for (const dir of [nested, deep, skipped]) fs.mkdirSync(path.join(dir, '.git'), { recursive: true });
+  try {
+    const ctx = ctxFor({ CommandLine: 'ls' });
+    const found = ctx.nestedGitPaths;
+    assert.ok(found.includes(path.join(nested, '.git')), 'a submodule-style nested repository is found');
+    assert.ok(found.includes(path.join(deep, '.git')), 'a repository a few directories down is found');
+    assert.ok(!found.includes(path.join(skipped, '.git')), 'node_modules is not walked');
+    assert.ok(!found.includes(path.join(dirs.workspace, '.git')), 'the top-level one is already a protected workspace directory');
+    // The point of finding them: a hook planted in a nested .git runs on the
+    // next git command in that directory, which has to leave this sandbox to
+    // write anything. The edit tools already refuse the same path.
+    const argv = parseShell(confinedCommandLine(ctx, 'ls')).commands[0].argv;
+    const mountIndex = (flag, p) => argv.findIndex((a, i) => a === flag && argv[i + 1] === p && argv[i + 2] === p);
+    const workspaceRw = mountIndex('--bind-try', dirs.workspace);
+    assert.ok(mountIndex('--ro-bind-try', path.join(nested, '.git')) > workspaceRw);
+    assert.ok(mountIndex('--ro-bind-try', path.join(deep, '.git')) > workspaceRw);
+    assert.equal(classify(new HookContext(payloadFor(dirs, 'write_to_file', { TargetFile: path.join(nested, '.git', 'hooks', 'pre-commit') }), {
+      config: configWith({ ownSandbox: 'off' }), env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp],
+    })).verdict, 'review');
+  } finally {
+    for (const dir of [nested, path.join(dirs.workspace, 'packages'), path.join(dirs.workspace, 'node_modules')]) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

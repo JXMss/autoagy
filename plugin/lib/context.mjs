@@ -20,6 +20,56 @@ export const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.ur
 // Antigravity also reads `.agent`, `_agents`, `_agent` and `.gemini`.
 export const PROTECTED_WORKSPACE_DIRS = ['.git', '.agents', '.agent', '_agents', '_agent', '.gemini', '.codex', '.claude'];
 
+// Bounds for the search for nested repositories (see HookContext.nestedGitPaths).
+// A workspace can hold a node_modules tree with tens of thousands of directories,
+// and this runs in a hook that has to answer inside its budget, so the walk is
+// bounded on every axis and skips the directories that are large by convention.
+const NESTED_SCAN_MAX_DEPTH = 5;
+const NESTED_SCAN_MAX_DIRS = 1500;
+const NESTED_SCAN_SKIP = new Set([
+  'node_modules', 'target', 'dist', 'build', 'out', 'vendor', 'venv', '.venv', 'env',
+  '__pycache__', '.cache', '.next', '.nuxt', '.tox', '.gradle', '.mypy_cache', '.pytest_cache',
+]);
+
+/**
+ * `.git` entries below `root` (not the one at `root` itself, which the protected
+ * workspace directories already cover): submodules and nested repositories.
+ *
+ * Breadth-first so the shallow ones — where a submodule actually lives — are
+ * found before the budget runs out.
+ * @param {string} root
+ * @returns {string[]}
+ */
+export function findNestedGitPaths(root) {
+  const out = [];
+  const queue = [[root, 0]];
+  let visited = 0;
+  while (queue.length > 0) {
+    const [dir, depth] = queue.shift();
+    if (visited++ >= NESTED_SCAN_MAX_DIRS) break;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const child = path.join(dir, entry.name);
+      if (entry.name === '.git') {
+        // A submodule's `.git` is a file pointing into the superproject's
+        // `.git/modules`, which is read-only already; binding the file keeps the
+        // pointer itself from being redirected.
+        if (dir !== root) out.push(child);
+        continue;
+      }
+      if (!entry.isDirectory() || depth + 1 > NESTED_SCAN_MAX_DEPTH) continue;
+      if (NESTED_SCAN_SKIP.has(entry.name)) continue;
+      queue.push([child, depth + 1]);
+    }
+  }
+  return out;
+}
+
 /** Derives the product app-data dir (e.g. ~/.gemini/antigravity-cli) from hook paths. */
 export function appDataDirFromPayload(payload) {
   for (const candidate of [payload?.artifactDirectoryPath, payload?.transcriptPath]) {
@@ -352,6 +402,24 @@ export class HookContext {
     return this.memo('homeControlPaths', () =>
       uniquePaths([path.join(this.home, '.gemini'), path.join(this.home, '.codex'), path.join(this.home, '.claude')]),
     );
+  }
+
+  /**
+   * `.git` of every repository nested inside the workspace (submodules, vendored
+   * checkouts). autoagy's own sandbox keeps these read-only for the same reason
+   * it keeps the top-level one read-only: a command that plants a hook there has
+   * it executed by the next `git` that runs outside the sandbox, and a git
+   * command that writes has to leave the sandbox to work at all. The edit tools
+   * already refuse any path with a `.git` component (`classifyWriteTarget`), so
+   * without this the command side would be the weaker of the two.
+   *
+   * Best effort, and deliberately so: the walk is bounded, so a repository
+   * buried deeper than `NESTED_SCAN_MAX_DEPTH` or behind a skipped directory is
+   * not found. Nothing depends on the list being complete — a missing entry
+   * leaves that `.git` as writable as it was before this existed.
+   */
+  get nestedGitPaths() {
+    return this.memo('nestedGitPaths', () => uniquePaths(this.workspaceRoots.flatMap((root) => findNestedGitPaths(root))));
   }
 
   /**

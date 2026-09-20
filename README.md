@@ -87,7 +87,7 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 因此在 Linux 上，autoagy 改用自己的 [bubblewrap](https://github.com/containers/bubblewrap) 沙箱：agent 没有请求绕过沙箱的命令，会被 hook 的 `overwrite` 改写成在 bwrap 里运行。在 Antigravity 看来这是一条 `BypassSandbox` 命令，所以需要 setup 加的 `command(*)` 授权。沙箱规则与 Codex 的 workspace-write 相同：
 
 - 可写：工作区、临时目录、本会话的 artifact 和 scratch 目录、`writableRoots`；
-- 只读：其余所有路径，其中包括工作区里的 `.git`、`.agents`、`.gemini` 等目录，autoagy 自己的目录，以及对话日志；
+- 只读：其余所有路径，其中包括工作区里的 `.git`、`.agents`、`.gemini` 等目录，autoagy 自己的目录，以及对话日志；**工作区里嵌套仓库（submodule、vendored checkout）的 `.git` 同样只读**——植在那里的 hook 会被下一条在那个目录里运行的 git 命令执行，而写操作的 git 命令必须离开沙箱才能成功，也就是在沙箱外执行。查找是有预算的广度优先扫描（最深 5 层、最多 1500 个目录，跳过 `node_modules`、`target`、`.venv` 等），埋得更深的仓库找不到——找不到只是回到没有这条之前的状态，不会影响其它保护；
 - 隐藏：`credentialPaths` 里以 `~/` 开头的凭据位置（`~/.ssh`、`~/.aws`、`~/.netrc`……）在沙箱里显示为空目录或空文件；
 - 无网络；`socket`/`socketpair` 只允许 `AF_UNIX`，建立和使用的调用（`connect`、`bind`、`listen`、`sendto`……）一律以 `EPERM` 失败，另外禁掉 `ptrace`、`process_vm_*`、`io_uring_*`（`--unshare-net` 只挡 IP 网络，挡不住文件系统上的 Unix socket）；
 - 环境变量从白名单重建（`--clearenv` + `--setenv`）：`PATH`、`HOME`、`USER`、`LOGNAME`、`SHELL`、`TERM`、`TMPDIR`、`TZ`、`PWD`、`LANG` 和 `LC_*`，值原样传递。hook 继承的是 agy 的环境，里面通常有你 export 的 API key；不清理的话，沙箱里一条 `printenv` 就能读到它，而且这条命令是免审的。需要额外变量时用 `ownSandboxEnvPassThrough`（见下表）。
@@ -224,7 +224,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 - 子 agent 的授权以根会话里用户的话为准（通过父会话的 `invoke_subagent` 记录回溯），找不到父会话时按不可信处理。
 - Windows 上命令解析是尽力而为（PowerShell 语法与 POSIX shell 不同，但会偏向保守）。
 - 用 `--dangerously-skip-permissions` 启动 agy 时 Antigravity 的沙箱实际不生效：启用了 autoagy 自己的沙箱时命令仍在其中运行（实测 `overwrite` 在该模式下照样生效）；否则 autoagy 按无沙箱处理，审核会变多；`force_ask` 在该模式下会被自动同意，所以 autoagy 在此模式下只使用 allow/deny——这条现在也覆盖 `mode: off` 的弹窗路径。
-- **工作区里「写了之后会在沙箱外执行」的文件是免审的**：`.envrc`（direnv 自动加载）、`.husky/`（`git commit` 时执行）、`.vscode/tasks.json`、`package.json` 的 `postinstall`、`Makefile`，以及任何被别的工具读取后执行的脚本。暴露面和 `.git` 属于同一类（先写后执行），区别是 `git` 几乎必然会在沙箱外运行，而这一类要等某个工具去执行它。**Codex 在这里的取舍是同样的**——它的 workspace-write 只保护 `.git`、`.agents`、`.codex` 三个名字（`PROTECTED_METADATA_PATH_NAMES`），所以 autoagy 默认也保持这个集合（多出的 `.agent`/`_agents`/`.gemini` 是 Antigravity 自己会读的 agent 配置）。需要更严就用 `protectedPaths` 把它们加进去，代价是 agent 每次改这些文件都要过一次审核。
+- **工作区里「写了之后会在沙箱外执行」的文件是免审的**：`.envrc`（direnv 自动加载）、`.husky/`（`git commit` 时执行）、`.vscode/tasks.json`、`package.json` 的 `postinstall`、`Makefile`，以及任何被别的工具读取后执行的脚本。暴露面和 `.git` 属于同一类（先写后执行），区别是 `git` 几乎必然会在沙箱外运行，而这一类要等某个工具去执行它。**Codex 在这里的取舍是同样的**——它的 workspace-write 只保护 `.git`、`.agents`、`.codex` 三个名字（`PROTECTED_METADATA_PATH_NAMES`），所以 autoagy 默认也保持这个集合（多出的 `.agent`/`_agents`/`.gemini` 是 Antigravity 自己会读的 agent 配置）。**一处例外**：`.git` 在 autoagy 自己的沙箱里是递归保护的（嵌套仓库的 `.git` 也只读），Codex 只保护每个可写根下的那一层——因为 autoagy 的编辑工具本来就挡住任何带 `.git` 段的路径，两条路不一致时弱的那条正是沙箱存在的理由。需要更严就用 `protectedPaths` 把它们加进去，代价是 agent 每次改这些文件都要过一次审核。
 - **`search_web` 默认免审，而它是一条出网通道**：query 是 agent 写的文本，请求由 agy 发出，不在任何沙箱里（`--unshare-net` 只约束沙箱内的命令），策略里那套 Data Exfiltration 规则看不到它。默认放行是照 Codex 的做法：它的 web search 是托管工具，不走审批流程，由配置限制（`web_search` 模式、受管 `requirements.toml` 的 `allowed_web_search_modes`）；autoagy 对应的开关是 `webSearch: "review"`——代价是每次搜索多一次审核延迟（agy 后端实测 4～12 秒）。
 - **危险命令识别是有解析器支撑的模式表，不是纯字面黑名单，但也不要高估。** `shell.mjs` 是真正的 POSIX shell 解析器，会去引号、还原转义、解开 `sudo`/`env`/`nohup`/`timeout`/`xargs`/`flock`/`nice` 等包装，并从 `bash -c`、`eval`、`trap`、`watch`、`su -c`、`find -exec`、heredoc 里取出内层脚本，递归到 8 层，解析失败一律送审。所以「引号拼接」「全路径」「组合短选项」「多层包装」都拦得住。**拦不住的**是动态构造的命令名：`$CMD -rf`、`rm${IFS}-rf`、`$(printf rm)`、`base64|sh`、把脚本塞给解释器的 `-c`。另外，沙箱内这条模式表才是决定性判据（能解析、没命中就放行），无沙箱路径上起决定作用的是已知只读白名单（不在白名单里的一律送审）。
 

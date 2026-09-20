@@ -350,7 +350,11 @@ export function scrubbedCommandLine(ctx, commandLine) {
 /** Paths that stay read-only inside the sandbox even when they lie in a writable root. */
 export function readOnlyPaths(ctx) {
   const logs = [ctx.artifactDir ? path.join(ctx.artifactDir, '.system_generated') : null, ctx.transcriptPath ? path.dirname(ctx.transcriptPath) : null];
-  return [...ctx.workspaceControlPaths, ...ctx.selfPaths, ...logs].filter(Boolean);
+  // `nestedGitPaths`: a submodule or vendored checkout keeps its own `.git`, and
+  // a hook planted there runs on the next git command in that directory — which
+  // has to leave this sandbox to write anything, so it runs outside it. Only the
+  // top-level one is in `workspaceControlPaths`.
+  return [...ctx.workspaceControlPaths, ...ctx.nestedGitPaths, ...ctx.selfPaths, ...logs].filter(Boolean);
 }
 
 /**
