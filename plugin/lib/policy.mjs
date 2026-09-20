@@ -707,16 +707,22 @@ function canonicalTarget(ctx, raw) {
   // Comparing against the absolute form, not the raw one: turning a relative
   // path into an absolute one is not a resolution and is not worth a rewrite.
   if (real === abs) return null;
-  // A link at or above the base is not a resolution either, and this is the
-  // difference between a rewrite that helps and one that trains the notice away.
-  // The call traverses the base's own link whether or not the target is
-  // rewritten, so rewriting it buys nothing — while on a host whose workspace
-  // path goes through one (macOS `/tmp` and `/var/folders`, a symlinked home)
-  // every relative target differs from its realpath, so every edit and read
-  // would carry an `overwrite` and agy would tell the agent "a pre-tool hook
-  // changed the arguments" every single time. That notice is the only signal the
-  // agent gets when a rewrite is real. What is worth reporting is a difference
-  // below the base — a link in the target's own path.
+  // A link at or above the base is not rewritten either, and the reason is what
+  // it costs, not that it would buy nothing: handing agy the resolved path does
+  // pin the base's own link, the same way it pins one inside the target's path.
+  // What it costs is that agy tells the agent "a pre-tool hook changed the
+  // arguments" whenever `overwrite` is present — and on a host whose workspace
+  // path goes through a link (macOS `/tmp` and `/var/folders`, a symlinked
+  // home) that is every edit and every read. That notice is the only signal the
+  // agent gets when a rewrite is real, so it cannot be spent on calls where
+  // nothing moved. What is given up is the narrower half: a link above the
+  // workspace is a system path the agent cannot re-point — it is outside the
+  // workspace, so writing it needs a review, and agy refuses the write outright
+  // under `allowNonWorkspaceAccess: false` — and a swap that happens after the
+  // call is still caught by the PostToolUse comparison.
+  //
+  // What is worth reporting is a difference below the base: a link in the
+  // target's own path.
   const base = ctx.baseDir;
   if (base && isWithin(abs, base)) {
     const expected = path.join(resolveReal(base), path.relative(base, abs));

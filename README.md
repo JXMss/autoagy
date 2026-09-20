@@ -169,7 +169,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `rules` | `[]` | Codex execpolicy 风格前缀规则，例如 `{"pattern": ["terraform", "destroy"], "decision": "forbidden"}`；`allow` 仅对不含重定向、替换、变量、通配的简单命令生效。**注意 `allow` 也覆盖带 `BypassSandbox: true` 的同一条命令**（Codex 的 execpolicy 同样先于沙箱/升级判定，见 [docs/design.md](docs/design.md) §1）：写 `{"pattern": ["npm", "test"], "decision": "allow"}` 等于同时允许它在宿主上带完整权限和网络免审运行。要区分两者就用 `prompt`，或者不写这条规则 |
 | `mcp.allow` | `[]` | 免审的 MCP 工具（`"server/tool"` glob，如 `"github/get_*"`） |
 | `browser` | `"review"` | 浏览器点击/输入/执行 JS，以及 `browser_subagent` 是否审核 |
-| `policy.file` / `policy.extra` | — | 替换/追加组织安全策略（对应 Codex 的 tenant policy），例如声明哪些仓库、域名是可信的。**这个路径不受保护**：指到工作区里，agent 就能免审改写审核所依据的策略本身。请放在 `~/.gemini/autoagy/` 下或别的 agent 写不到的位置 |
+| `policy.file` / `policy.extra` | — | 替换/追加组织安全策略（对应 Codex 的 tenant policy），例如声明哪些仓库、域名是可信的。**必须是绝对路径**（`~` 会被展开，相对路径不接受——那样它会按进程所在的目录解析，同一个值在不同场合指向不同文件）。**写在 agent 能写的地方等于没写**：指到工作区里，agent 就能免审改写审核所依据的策略本身。这两种情况都**不会被加载**，autoagy 退回内置策略并在 stderr 上说明原因。放在 `~/.gemini/autoagy/` 下或别的 agent 写不到的位置 |
 | `circuitBreaker` | `3 / 10 / 50` | 连续拒绝次数 / 窗口内拒绝次数 / 窗口大小 |
 | `log.allowed` / `log.reviews` | `false` | 记录所有放行的操作 / 保存完整审核 prompt 与回复 |
 
