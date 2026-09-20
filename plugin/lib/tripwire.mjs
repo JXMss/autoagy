@@ -48,10 +48,22 @@ function writeJson(file, value) {
   fs.renameSync(tmp, file);
 }
 
+/**
+ * True when the registration is in the user hooks file, whatever became of the
+ * program it names.
+ *
+ * The two halves fail apart in both directions, and the interesting one is a
+ * registration with no program: the hook runs a command that is not there, so
+ * every tool call fails, and it is still registered — which is a state someone
+ * has to be told about, not a state to report as "nothing to do".
+ */
+export function tripwireRegistered({ home = os.homedir() } = {}) {
+  return Boolean(readJson(userHooksPath(home))?.[TRIPWIRE_KEY]);
+}
+
 /** True when both halves are in place. */
 export function tripwireInstalled({ autoagyHome, home = os.homedir() }) {
-  if (!fs.existsSync(tripwirePath(autoagyHome))) return false;
-  return Boolean(readJson(userHooksPath(home))?.[TRIPWIRE_KEY]);
+  return fs.existsSync(tripwirePath(autoagyHome)) && tripwireRegistered({ home });
 }
 
 /**

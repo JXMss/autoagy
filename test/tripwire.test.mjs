@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
+import { installTripwire, removeTripwire, tripwireInstalled, tripwireRegistered, tripwirePath, userHooksPath, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-tripwire-')));
 const home = path.join(root, 'home');
@@ -170,4 +170,48 @@ test('an install whose plugin directory was deleted by hand still uninstalls', (
   assert.match(res.stdout, /Removed the tripwire/);
   assert.match(res.stdout, /autoagy uninstalled\./);
   assert.equal(tripwireInstalled({ autoagyHome, home }), false, 'nothing is left refusing every tool call');
+});
+
+test('the program and its registration are reported apart', () => {
+  // They fail apart in both directions, and the one that matters is a
+  // registration whose program is gone: the hook runs a command that is not
+  // there, so every tool call fails — while `tripwireInstalled` wants both
+  // halves and therefore says there is nothing here.
+  installTripwire({ autoagyHome, home, pluginDir });
+  assert.ok(tripwireRegistered({ home }));
+  fs.rmSync(tripwirePath(autoagyHome), { force: true });
+  assert.equal(tripwireInstalled({ autoagyHome, home }), false);
+  assert.ok(tripwireRegistered({ home }), 'the registration outlives the program it names');
+  removeTripwire({ autoagyHome, home });
+  assert.equal(tripwireRegistered({ home }), false);
+});
+
+test('--dry-run says what the real run would do to a half-removed install', () => {
+  // A preview that skips the half causing the lockout is worse than no preview:
+  // the state it under-reports is the one this path exists for.
+  const script = fileURLToPath(new URL('../scripts/install.mjs', import.meta.url));
+  installTripwire({ autoagyHome, home, pluginDir });
+  fs.rmSync(tripwirePath(autoagyHome), { force: true });
+
+  const res = spawnSync(process.execPath, [script, '--uninstall', '--dry-run'], { encoding: 'utf8', env: { HOME: home, PATH: '/nonexistent' } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /Would remove the tripwire from /);
+  assert.ok(res.stdout.includes(userHooksPath(home)), 'naming the file it would be taken out of');
+  // The program is already gone, so there is nothing to claim about it.
+  assert.ok(!res.stdout.includes(`(${tripwirePath(autoagyHome)})`));
+  removeTripwire({ autoagyHome, home });
+});
+
+test('the uninstaller finds the tripwire where the plugin put it', () => {
+  // `AUTOAGY_HOME` moves it. The registration is the half that causes the
+  // lockout, and an uninstaller that assumed the default home would clear that
+  // one while leaving the program behind — or miss both.
+  const custom = path.join(root, 'custom-home');
+  installTripwire({ autoagyHome: custom, home, pluginDir });
+  const script = fileURLToPath(new URL('../scripts/install.mjs', import.meta.url));
+  const res = spawnSync(process.execPath, [script, '--uninstall'], { encoding: 'utf8', env: { HOME: home, AUTOAGY_HOME: custom, PATH: '/nonexistent' } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(res.stdout.includes(custom), 'the home it used is the one it names');
+  assert.equal(fs.existsSync(path.join(custom, 'bin', 'tripwire.mjs')), false, 'the program goes with it');
+  assert.equal(tripwireRegistered({ home }), false, 'and so does the registration');
 });

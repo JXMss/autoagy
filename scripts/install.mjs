@@ -12,7 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { removeTripwire, tripwireInstalled, tripwirePath, userHooksPath } from '../plugin/lib/tripwire.mjs';
+import { removeTripwire, tripwireInstalled, tripwireRegistered, tripwirePath, userHooksPath } from '../plugin/lib/tripwire.mjs';
+import { autoagyHome as resolveAutoagyHome } from '../plugin/lib/config.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE = path.join(REPO, 'plugin');
@@ -63,14 +64,21 @@ Tip: alias autoagy="node ${BIN}"`);
 }
 
 function uninstall() {
-  // First, and deliberately not gated on the installed copy existing: a tripwire
-  // left behind refuses every tool call, and it is registered in a file `agy
-  // plugin` does not manage — so the install that most needs this is the one
-  // where the plugin directory is already gone. This script runs from the clone,
-  // whose lib is always here, which is why the call can be unconditional.
-  const autoagyHome = path.join(os.homedir(), '.gemini', 'autoagy');
+  // The tripwire first, and deliberately not gated on the installed copy
+  // existing: one left behind refuses every tool call, and it is registered in a
+  // file `agy plugin` does not manage — so the install that most needs this is
+  // the one where the plugin directory is already gone. This script runs from
+  // the clone, whose lib is always here, which is why the call can be
+  // unconditional.
+  //
+  // The home is resolved the way the plugin resolves it rather than assumed: a
+  // user with `AUTOAGY_HOME` set has the tripwire somewhere else. And the two
+  // halves are asked about separately, because `tripwireInstalled` is both at
+  // once while the state that matters most here is the one where they disagree
+  // — a registration whose program is gone, still refusing every tool call.
+  const autoagyHome = resolveAutoagyHome(process.env, os.homedir());
   const tripwire = dryRun
-    ? { script: fs.existsSync(tripwirePath(autoagyHome)), registration: tripwireInstalled({ autoagyHome }) }
+    ? { script: fs.existsSync(tripwirePath(autoagyHome)), registration: tripwireRegistered({}) }
     : removeTripwire({ autoagyHome });
   if (tripwire.script || tripwire.registration) {
     console.log(`${dryRun ? 'Would remove' : 'Removed'} the tripwire${tripwire.script ? ` (${tripwirePath(autoagyHome)})` : ''}${tripwire.registration ? ` from ${userHooksPath()}` : ''}`);
@@ -83,7 +91,7 @@ function uninstall() {
   }
   if (args.has('--purge')) {
     fs.rmSync(autoagyHome, { recursive: true, force: true });
-    console.log('Removed ~/.gemini/autoagy (config, state and logs).');
+    console.log(`Removed ${autoagyHome} (config, state and logs).`);
   }
   // The one thing that would still be refusing every tool call gets said out
   // loud, and "uninstalled" is not printed over it.
