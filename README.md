@@ -27,7 +27,11 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 
 ## 安装
 
-> **装它之前要知道的一件事。** autoagy 要向 Antigravity 申请 `command(*)`、`mcp(*)`、`execute_url(*)` 三条授权，之后 hook 就是唯一的闸门。hook 自己失败是 fail-closed（工具调用报错），但**插件没加载是 fail-open**：`agy plugin disable`、`agy plugin install` 用未钉住的 `hooks.json` 覆盖、或钉住的解释器失效——这三种情况下授权都还在，闸门没了。
+> **装它之前要知道的一件事。** autoagy 要向 Antigravity 申请 `command(*)`、`mcp(*)`、`execute_url(*)` 三条授权，之后 hook 就是唯一的闸门。hook 自己失败是 fail-closed（工具调用报错），而**插件没加载**曾经是 fail-open：`agy plugin disable`、`agy plugin install` 用未钉住的 `hooks.json` 覆盖、或钉住的解释器失效——这三种情况下授权都还在，闸门没了，而且悄无声息。
+>
+> **现在有个哨兵挡着这件事。** `autoagy setup` 会往 `~/.gemini/config/hooks.json` 注册一个独立的 hook（实测：这个位置由 agy 加载，且**不受 `agy plugin disable` 和 `agy plugin install` 影响**）。它每次工具调用只问一句「插件还在不在、还启用着没有」，答案是「在」就什么都不说；答案是「不在」就**拒绝这次工具调用**，并告诉 agent 去看 `autoagy status`。第三种失效（解释器坏了）不用检查——hook 跑不起来时 agy 会让工具调用失败，那本身就是 fail-closed。所以这三条路现在都不再是静默放行。
+>
+> 代价是：**`agy plugin disable autoagy` 之后所有工具调用都会被拒**，而不是悄悄回到无人审核。要暂停用 `autoagy mode off`，要卸载用 `autoagy teardown`（会把哨兵一并撤掉）。
 >
 > **命令这一类可以收窄。** 把 `commandGrant` 设成 `"executor"` 之后，授权从 `command(*)` 变成 `command(<~/.gemini/autoagy/bin/exec-confined.mjs>)`——一个只会兑换 hook 写下的一次性令牌的程序。hook 不跑了就没人写令牌，那条授权拿在手里也没用，**命令这一类因此是 fail-closed 的**。详见下文配置表。`mcp(*)` 和 `execute_url(*)` 没有对应的收窄办法（它们不是命令），所以那两类仍然是上面说的形状。
 >
@@ -58,7 +62,7 @@ node scripts/install.mjs            # 先看会改什么：node scripts/install.
 node scripts/install.mjs --uninstall          # 加 --purge 同时删除 ~/.gemini/autoagy
 ```
 
-> 注意：如果只用 `agy plugin disable autoagy` 停用插件，上面的授权仍然存在，绕过沙箱的命令、MCP 调用和浏览器操作会不经审核、也不弹窗直接执行。请用 `autoagy mode off` 暂停（此时这三类操作会改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
+> 注意：`agy plugin disable autoagy` **不是**停用它的办法——上面的授权仍然存在，而哨兵会因此拒绝所有工具调用。要暂停请用 `autoagy mode off`（此时绕过沙箱的命令、MCP、浏览器操作改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
 
 **Antigravity IDE / Antigravity 2.0**：插件格式相同，但权限在设置界面里（Settings → Permission Grants）。请手动加上同样三条授权并保持终端沙箱开启，然后在 `config.json` 里设 `"sandbox": "on"`（autoagy 只能自动识别 CLI 的沙箱设置）。
 
@@ -72,7 +76,7 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 
 | 命令 | 作用 |
 | --- | --- |
-| `autoagy status` | 查看模式、审核后端、Antigravity 设置与授权是否就绪，以及 **hook 最后一次运行的时间**——插件被 disable、钉子被覆盖、解释器失效，三种失效都只表现为"hooks 不再运行"，这个时间戳是唯一能从内部看到的痕迹（超过一天会明确告警） |
+| `autoagy status` | 查看模式、审核后端、Antigravity 设置与授权是否就绪、**哨兵装没装**，以及 **hook 最后一次运行的时间**——插件被 disable、钉子被覆盖、解释器失效，三种失效都只表现为"hooks 不再运行"，这个时间戳是唯一能从内部看到的痕迹（超过一天会明确告警） |
 | `autoagy log [-n 20]` | 最近的决策（被审核的操作、结论、风险、耗时） |
 | `autoagy denials` | 最近被拒绝的操作及理由 |
 | `autoagy approve <id>` | 对某次拒绝放行**一次重试**（审核模型会看到你的批准；critical 风险仍会拒绝） |

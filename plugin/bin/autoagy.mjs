@@ -23,6 +23,7 @@ import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
 import { listStates, updateState, readState, isUntrusted, readHeartbeat } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, readSetupRecord } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
+import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath } from '../lib/tripwire.mjs';
 
 /**
  * The home directory the account database reports. `HOME` can be set for a
@@ -434,6 +435,10 @@ function status() {
     lines.push(`  terminal sandbox        ${sandbox.active ? 'in force' : 'not in force'} (${sandbox.source}) — ${sandbox.detail}`);
     if (!sandbox.active && config.sandbox !== 'on' && !own.active) lines.push('  ! every command that is not known read-only will be reviewed');
   }
+  // The one thing that still runs when the plugin does not, so whether it is
+  // there is the difference between "fails closed" and "fails silently".
+  const tw = tripwireInstalled({ autoagyHome, home: userHome });
+  lines.push(`  tripwire        ${tw ? `installed (${userHooksPath(userHome)}) — tool calls are refused if the plugin stops loading` : 'NOT installed — if the plugin stops loading, nothing notices and the grants above still apply'}`);
   const record = readSetupRecord(autoagyHome);
   lines.push(`  setup record            ${record ? `${fmtTime(record.time)} (grants added: ${record.addedGrants?.join(', ') || 'none'})` : 'none'}`);
 
@@ -587,6 +592,15 @@ function setup(flags) {
     return;
   }
   const report = applySetup({ dryRun, grants: grantsFor(config, { autoagyHome: home, home: accountHome() }) });
+  // The tripwire exists because those grants do: it is installed where the
+  // grants are, and `--no-settings` (which writes none) gets none.
+  if (!dryRun && PLUGIN_DIR.startsWith(installedRoot)) {
+    const tw = installTripwire({ autoagyHome: home, home: accountHome(), pluginDir: PLUGIN_DIR });
+    console.log(`\nTripwire: ${tw.script}`);
+    console.log(`  registered in ${tw.hooks}, which \`agy plugin\` does not manage — so it keeps running when`);
+    console.log('  the plugin is disabled or its hooks.json is replaced, and refuses tool calls rather than let');
+    console.log('  the grants above apply with nobody reviewing. `autoagy teardown` removes it.');
+  }
   console.log(`\nAntigravity CLI settings: ${report.settingsFile}`);
   if (report.addGrants.length === 0 && report.changes.length === 0) console.log('  already configured');
   for (const g of report.addGrants) console.log(`  ${dryRun ? 'would add' : 'added'} permissions.allow ${g}`);
@@ -598,8 +612,19 @@ function setup(flags) {
 }
 
 function teardown(flags) {
-  const report = applyTeardown({ dryRun: Boolean(flags['dry-run']) });
-  if (!report.found) return console.log('No setup record found; nothing to revert.');
+  const dryRun = Boolean(flags['dry-run']);
+  // Before the grants, and whether or not a setup record exists: a tripwire
+  // left behind refuses every tool call, which is the right failure while
+  // autoagy is installed and the wrong one once it is not.
+  if (!dryRun) {
+    const { autoagyHome: home } = managementContext();
+    const removed = removeTripwire({ autoagyHome: home, home: accountHome() });
+    if (removed.script || removed.registration) console.log(`Removed the tripwire (${tripwirePath(home)}, ${userHooksPath(accountHome())})`);
+  } else {
+    console.log('Would remove the tripwire');
+  }
+  const report = applyTeardown({ dryRun });
+  if (!report.found) return console.log('No setup record found; nothing else to revert.');
   const verb = (done, planned) => (report.dryRun ? planned : done);
   console.log(`${verb('Reverted', 'Would revert')} ${report.settingsFile}`);
   for (const g of report.removedGrants) console.log(`  ${verb('removed', 'would remove')} permissions.allow ${g}`);
