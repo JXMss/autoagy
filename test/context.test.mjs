@@ -105,6 +105,12 @@ test('config is judged by key, not by the word appearing somewhere', () => {
   assert.deepEqual(config('[core]\n\tfsmonitor = /usr/bin/fsmon\n').config, ['fsmonitor']);
   assert.deepEqual(config('[alias]\n\tco = checkout\n').config, ['[alias]']);
   assert.deepEqual(config('[alias "st"]\n\tst = status\n').config, ['[alias]']);
+  // `[include]` is not a key that runs a command, it is a key that changes which
+  // file is read — and that file is not inside a `.git`, so nothing inspects it.
+  // Measured: git honours it (`git config --get core.pager` returns the value
+  // from the included file) while this check saw nothing in either file.
+  assert.deepEqual(config(`[include]\n\tpath = ${path.join(dirs.root, 'evil.cfg')}\n`).config, ['[include]']);
+  assert.deepEqual(config('[includeIf "gitdir:**"]\n\tpath = x.cfg\n').config, ['[includeif]']);
   // A real .git/config, including a remote whose URL carries one of the words.
   assert.equal(
     config('[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n[remote "origin"]\n\turl = https://host/sshCommand\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch "main"]\n\tremote = origin\n'),

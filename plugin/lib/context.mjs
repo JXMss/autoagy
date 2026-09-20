@@ -100,8 +100,20 @@ const GIT_CONFIG_EXEC_KEYS = [
   'clean', 'smudge', 'process', 'textconv', 'command', 'external', 'driver', 'cmd',
   'packObjectsHook',
 ];
-// `[alias]` is a section rather than a key: every name under it is a command.
-const GIT_CONFIG_SECTION_RE = /^[ \t]*\[alias([ \t"\]]|$)/im;
+// Sections, rather than keys, that make git run something: `[alias]` for the
+// reason above, and `[include]`/`[includeIf]` because they make git read a
+// *different* config file — one that is not inside a `.git` and is therefore
+// never inspected, so `[include] path = …/evil.cfg` with the payload in that
+// file walks around the key list entirely. Measured: git honours it
+// (`git config --get core.pager` returns the value from the included file),
+// while `plantedGitContent` saw nothing in either file.
+//
+// A key list cannot cover this, because the escape is not a key that runs a
+// command but a key that changes which file is read. Nothing legitimate puts an
+// include in a `.git/config` that appeared during a single sandboxed command —
+// `git init` writes `core.*` and nothing else — so flagging the section costs
+// no false positives.
+const GIT_CONFIG_SECTION_RE = /^[ \t]*\[(alias|include|includeif)([ \t"\]]|$)/im;
 /** Fresh each call: a `g` regex carries state, and this one is used with matchAll. */
 const gitConfigKeyRe = () => new RegExp(`^[ \\t]*(${GIT_CONFIG_EXEC_KEYS.join('|')})[ \\t]*=`, 'gim');
 
@@ -183,7 +195,10 @@ export function plantedGitContent(gitDir) {
       // reviewer see which door was opened rather than a category.
       for (const match of text.matchAll(gitConfigKeyRe())) keys.add(match[1]);
       for (const key of [...keys].slice(0, GIT_CONFIG_LIST_MAX)) config.push(key);
-      if (GIT_CONFIG_SECTION_RE.test(text)) config.push('[alias]');
+      const section = GIT_CONFIG_SECTION_RE.exec(text);
+      // Named as written, like the keys: the record says which section opened
+      // the door.
+      if (section) config.push(`[${section[1].toLowerCase()}]`);
     }
   } catch {
     // No config, or not a readable regular file: nothing to judge.
