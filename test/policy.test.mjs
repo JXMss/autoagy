@@ -706,3 +706,12 @@ test('a path is rewritten only when it actually resolves somewhere else', () => 
     fs.rmSync(real, { recursive: true, force: true });
   }
 });
+
+test('a command reaching autoagy\'s own files is flagged in all three spellings of the path', () => {
+  const config = configWith({ ownSandbox: 'off' });
+  // `${HOME}` was the one missing. The argument-side checks in policy.mjs have
+  // always expanded it, so a needle list that did not was a hole with no reason.
+  for (const cmd of ['rm -rf ~/.gemini/autoagy/state', 'rm -rf $HOME/.gemini/autoagy/state', 'rm -rf ${HOME}/.gemini/autoagy/state']) {
+    assert.match(verdict('run_command', { CommandLine: cmd, BypassSandbox: true }, { config }).reason, /security controls/, cmd);
+  }
+});

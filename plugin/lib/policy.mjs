@@ -730,8 +730,14 @@ function mentionsSelf(ctx, commandLine) {
   for (const p of ctx.selfPaths) {
     needles.add(p);
     if (p.startsWith(ctx.home)) {
-      needles.add(`~${p.slice(ctx.home.length)}`);
-      needles.add(`$HOME${p.slice(ctx.home.length)}`);
+      const rest = p.slice(ctx.home.length);
+      // All three spellings of the same path. `${HOME}` is the one that was
+      // missing, and the argument-side checks in this file
+      // (`credentialArgument`, `plantedHookTarget`) have always expanded it —
+      // a needle list that is narrower than they are is a hole with no reason.
+      needles.add(`~${rest}`);
+      needles.add(`$HOME${rest}`);
+      needles.add(`\${HOME}${rest}`);
     }
   }
   return [...needles].some((n) => n.length > 3 && commandLine.includes(n));

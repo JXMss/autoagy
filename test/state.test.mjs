@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, touchHeartbeat, readHeartbeat } from '../plugin/lib/state.mjs';
 import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
+import { appendDecision } from '../plugin/lib/log.mjs';
 import { PLUGIN_DIR } from '../plugin/lib/context.mjs';
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-state-')));
@@ -76,4 +77,21 @@ test('a hook leaves a heartbeat, so a plugin that stopped loading is visible', (
   fs.rmSync(path.join(home, 'state', 'last-hook-run.json'));
   fs.mkdirSync(path.join(home, 'state', 'last-hook-run.json'));
   assert.doesNotThrow(() => touchHeartbeat(home, 'post-invocation'));
+});
+
+test("autoagy's own directories are not readable by other users on the machine", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-mode-'));
+  try {
+    updateState(home, 'conv-mode', (s) => {
+      s.turnKey = 1;
+    });
+    appendDecision(home, { conversation: 'conv-mode', verdict: 'allow' });
+    // The decision log holds command lines, and with `log.reviews` whole
+    // transcripts; the state holds the paths this conversation touched.
+    for (const dir of [path.join(home, 'state'), path.join(home, 'logs')]) {
+      assert.equal(fs.statSync(dir).mode & 0o077, 0, dir);
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

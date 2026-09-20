@@ -166,12 +166,31 @@ export function applyTeardown({ home = os.homedir(), env = process.env, dryRun =
   return { found: true, settingsFile, removedGrants, restored, dryRun };
 }
 
+/**
+ * Keeps autoagy's own directory to its owner.
+ *
+ * Everything under it is the record of what an agent did and was allowed to do:
+ * the decision log holds command lines, and with `log.reviews` it holds whole
+ * transcripts. A directory created before these modes were set keeps the mode
+ * it was created with, so this is called from `setup` as well — tightening the
+ * top of the tree is enough, since nothing below it can be reached without it.
+ */
+export function restrictHomePermissions({ home = os.homedir(), env = process.env } = {}) {
+  const dir = resolveAutoagyHome(env, home);
+  try {
+    fs.chmodSync(dir, 0o700);
+    return dir;
+  } catch {
+    return null;
+  }
+}
+
 /** Writes the default config file if none exists. */
 export function ensureConfigFile({ home = os.homedir(), env = process.env, dryRun = false } = {}) {
   const file = configPath(env, home);
   if (fs.existsSync(file)) return { file, created: false };
   if (!dryRun) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     fs.writeFileSync(file, defaultConfigFileText());
   }
   return { file, created: true };

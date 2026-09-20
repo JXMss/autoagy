@@ -16,7 +16,7 @@ export function decisionLogPath(autoagyHome) {
 export function appendDecision(autoagyHome, record) {
   const file = decisionLogPath(autoagyHome);
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     try {
       if (fs.statSync(file).size > MAX_LOG_BYTES) fs.renameSync(file, file.replace(/\.jsonl$/, '.1.jsonl'));
     } catch {
@@ -62,7 +62,7 @@ export function readDecisions(autoagyHome, limit = 50) {
 export function writeReviewRecord(autoagyHome, id, data) {
   try {
     const dir = path.join(logDir(autoagyHome), 'reviews');
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(data, null, 2));
   } catch {
     // best effort

@@ -103,3 +103,20 @@ test('a file that held nothing but the tripwire is taken away with it', () => {
   assert.equal(fs.existsSync(userHooksPath(home)), false);
   assert.equal(tripwireInstalled({ autoagyHome, home }), false);
 });
+
+// This one is structural rather than behavioural, and it earns its place: the
+// wiring was written, verified by hand, and then silently removed by a later
+// commit — leaving a tripwire that every test here passes and that nothing ever
+// installs. A defence nobody calls is not a defence, and nothing else in this
+// file could tell the difference.
+test('setup installs the tripwire and teardown removes it', () => {
+  const bin = fs.readFileSync(new URL('../plugin/bin/autoagy.mjs', import.meta.url), 'utf8');
+  const body = (name) => {
+    const start = bin.indexOf(`function ${name}(`);
+    assert.ok(start > 0, `${name} not found`);
+    return bin.slice(start, bin.indexOf('\n}', start));
+  };
+  assert.match(body('setup'), /installTripwire\(/, 'setup must install it, or the grants it guards stand alone');
+  assert.match(body('teardown'), /removeTripwire\(/, 'teardown must remove it, or every tool call is refused after uninstall');
+  assert.match(body('status'), /tripwireInstalled\(/, 'status must say whether it is there');
+});

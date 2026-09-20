@@ -138,7 +138,7 @@ export function lockIsStale(ageMs) {
  */
 export function withLock(file, fn) {
   const lock = `${file}.lock`;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   for (;;) {
     try {
       fs.closeSync(fs.openSync(lock, 'wx'));
@@ -204,7 +204,7 @@ export function updateState(autoagyHome, conversationId, mutate) {
 export function touchHeartbeat(autoagyHome, event = 'unknown') {
   const file = path.join(stateDir(autoagyHome), 'last-hook-run.json');
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ at: new Date().toISOString(), event }));
     fs.renameSync(tmp, file);
