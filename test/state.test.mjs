@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings } from '../plugin/lib/state.mjs';
+import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, LOCK_WAIT_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings } from '../plugin/lib/state.mjs';
 import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
 import { appendDecision } from '../plugin/lib/log.mjs';
 import { PLUGIN_DIR } from '../plugin/lib/context.mjs';
@@ -27,11 +27,59 @@ test('only a lock older than the staleness limit may be broken', () => {
 test('a lock wait fits inside the tightest hook budget', () => {
   // The post-tool-use hook runs the self-checks, and its watchdog exits before
   // they run — so a wait longer than that budget does not delay the checks, it
-  // removes them. Whatever the limit is, it has to stay under it.
+  // removes them. `LOCK_WAIT_MS` is what actually bounds a wait now (a live
+  // holder is never broken before `LOCK_BREAK_MS`), and it has to leave room for
+  // the work the hook does around the lock — the nested-repository walk, which
+  // costs seconds on a large tree.
   for (const event of ['post-tool-use', 'post-invocation']) {
     const budgetMs = hookBudgetSec(event, { pluginDir: PLUGIN_DIR }) * 1000;
-    assert.ok(LOCK_STALE_MS < budgetMs, `${LOCK_STALE_MS}ms of waiting vs the ${event} budget of ${budgetMs}ms`);
+    assert.ok(LOCK_WAIT_MS * 2 < budgetMs, `${LOCK_WAIT_MS}ms of waiting plus the walk vs the ${event} budget of ${budgetMs}ms`);
   }
+  assert.ok(LOCK_STALE_MS < hookBudgetSec('post-tool-use', { pluginDir: PLUGIN_DIR }) * 1000);
+});
+
+test('a lock whose holder is gone is taken at once, not after a timer', () => {
+  // Liveness is what says the holder is gone, and it is a fact: the pid is not
+  // there. The old rule waited out `LOCK_STALE_MS` before believing it, which a
+  // hook killed by agy's own timeout paid on every following call.
+  const file = path.join(autoagyHome, 'state', 'dead-holder.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: 999_999, start: 1, at: Date.now() }));
+  const started = Date.now();
+  withLock(file, () => {});
+  assert.ok(Date.now() - started < LOCK_STALE_MS, 'no timer is consulted for a holder that does not exist');
+  assert.equal(fs.existsSync(`${file}.lock`), false);
+});
+
+test('a lock whose holder is alive is not broken; the waiter fails closed instead', () => {
+  // The measured lost update: a holder that stayed inside the section longer
+  // than the staleness limit had its lock taken, and whatever it wrote was
+  // overwritten. Here the holder is this process, which is alive by definition.
+  const file = path.join(autoagyHome, 'state', 'live-holder.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: process.pid, at: Date.now() }));
+  const started = Date.now();
+  assert.throws(() => withLock(file, () => assert.fail('the section must not run')), /did not come free/);
+  assert.ok(Date.now() - started >= LOCK_WAIT_MS - 100, 'it waited the deadline rather than breaking in');
+  assert.equal(readState(autoagyHome, 'untouched').untrusted ?? null, null);
+  fs.rmSync(`${file}.lock`, { force: true });
+});
+
+test('a lock whose recorded time is in the future does not spin forever', () => {
+  // The reported wedge: `Date.now() - mtimeMs` is negative, so an age rule never
+  // fires — and the wait is a synchronous `Atomics.wait`, which blocks the event
+  // loop, so the hook's own watchdog could not fire either. agy killed the hook
+  // instead, every tool call in that conversation failed, and the self-checks
+  // never ran. A clock step backwards (WSL2 on resume) is enough to get there.
+  const file = path.join(autoagyHome, 'state', 'future.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(`${file}.lock`, '');
+  const future = new Date(Date.now() + 3_600_000);
+  fs.utimesSync(`${file}.lock`, future, future);
+  const started = Date.now();
+  assert.throws(() => withLock(file, () => {}), /did not come free/);
+  assert.ok(Date.now() - started < LOCK_WAIT_MS + 1_000, 'it gives up on its own instead of hanging');
+  fs.rmSync(`${file}.lock`, { force: true });
 });
 
 test('withLock runs and releases, and breaks a lock nobody is holding', () => {

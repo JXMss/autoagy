@@ -117,12 +117,93 @@ const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),
 /**
  * Whether a lock file of this age may be broken.
  *
- * Age is the whole rule. A waiter's own elapsed time says nothing about whether
- * the holder is alive, so letting a long wait cause a break would take the lock
- * from a process that may be in the middle of a read-modify-write.
+ * This is what is left for a lock whose holder cannot be identified: the
+ * identity is written by the holder, so a lock created by an older version of
+ * this file, or one caught in the instant between creation and that write, has
+ * nothing to check. A waiter's own elapsed time still says nothing about
+ * whether the holder is alive, so age is the fallback and not the rule.
  */
 export function lockIsStale(ageMs) {
   return ageMs > LOCK_STALE_MS;
+}
+
+/**
+ * How long a waiter may wait before it gives up.
+ *
+ * Every caller is a hook with a budget, and the watchdog exits when that budget
+ * runs out — so a wait that outlives the budget does not delay the work, it
+ * deletes it (the self-checks in `handlePostToolUse` are the ones that would
+ * disappear). Giving up is therefore the only safe answer, and it is the
+ * fail-closed one: the caller's error path refuses what it cannot classify.
+ */
+export const LOCK_WAIT_MS = 2_000;
+
+/**
+ * The ceiling for a lock whose holder is *alive*.
+ *
+ * The section is a read, a write and a rename over a small file, so a live
+ * process still inside it after a minute is not going to finish — a debugger
+ * stopped it, or it is wedged in a way that will never release. Waiters reach
+ * `LOCK_WAIT_MS` long before this, so this only decides whether the next call
+ * recovers on its own or needs `autoagy trust`.
+ */
+export const LOCK_BREAK_MS = 60_000;
+
+/** The lock file's holder record, or null when it cannot be read. */
+function readHolder(lock) {
+  try {
+    const text = fs.readFileSync(lock, 'utf8').trim();
+    if (!text) return null;
+    const holder = JSON.parse(text);
+    return holder && typeof holder === 'object' ? holder : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The kernel's start time for a process, which tells two uses of one pid apart.
+ *
+ * Field 22 of `/proc/<pid>/stat`, counted from after the last `)` because
+ * `comm` can hold spaces and parentheses of its own. Null means the process is
+ * gone (or, on a host without /proc, that this cannot be answered).
+ */
+function processStartTime(pid) {
+  if (process.platform !== 'linux') return null;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const value = Number(fields[19]);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the process named in the lock is still the one holding it:
+ * `true`, `false`, or `null` when the record cannot say.
+ *
+ * A pid on its own is not an identity — the kernel reuses them — so on Linux
+ * the start time recorded with it is checked too. With that, "the holder is
+ * gone" becomes a fact rather than an inference from age: a hook killed by
+ * agy's timeout leaves a lock whose owner no longer exists, and the next call
+ * may take it immediately instead of waiting out a timer.
+ */
+function holderIsAlive(holder) {
+  if (!holder || !Number.isInteger(holder.pid) || holder.pid <= 0) return null;
+  if (process.platform === 'linux') {
+    const start = processStartTime(holder.pid);
+    if (start === null) return false;
+    if (Number.isFinite(holder.start) && holder.start > 0 && start !== holder.start) return false;
+    return true;
+  }
+  try {
+    process.kill(holder.pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM'; // alive, but not ours to signal
+  }
 }
 
 /**
@@ -132,28 +213,56 @@ export function lockIsStale(ageMs) {
  * which silently loses whichever wrote first. What is stored here is not just
  * counters: an `untrusted` mark is sticky and cleared only by `autoagy trust`,
  * so losing one to a race would undo a security decision with nothing to show
- * it happened. The critical sections are a read, a write and a rename over a
- * small file, so a lock older than LOCK_STALE_MS belongs to a process that is
- * gone or wedged.
+ * it happened — and losing `plantedHooks` would put a repository the reviewer
+ * was told about back out of its reach.
+ *
+ * Two things this used to get wrong, both measured:
+ *
+ * - age alone broke the lock, so a holder that took longer than
+ *   `LOCK_STALE_MS` inside the section — a slow filesystem (this repository
+ *   lives on a 9p mount where one `readdir` costs ~3ms), a suspended VM, or a
+ *   *forward* clock step — had its lock taken and its write lost;
+ * - a lock whose recorded time was in the future was never stale
+ *   (`Date.now() - mtimeMs` negative), and because the wait is a synchronous
+ *   `Atomics.wait` the hook's watchdog could not fire either, so the hook spun
+ *   until agy killed it: every tool call in that conversation failed, and the
+ *   self-checks never ran at all. A clock step backwards — which WSL2 does on
+ *   resume — is enough.
  */
 export function withLock(file, fn) {
   const lock = `${file}.lock`;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
-      fs.closeSync(fs.openSync(lock, 'wx'));
+      const fd = fs.openSync(lock, 'wx');
+      try {
+        fs.writeSync(fd, JSON.stringify({ pid: process.pid, start: processStartTime(process.pid), at: Date.now() }));
+      } catch {
+        // An unreadable identity is not a reason to refuse the lock: a waiter
+        // treats an empty record as unknown and falls back to age.
+      }
+      fs.closeSync(fd);
       break;
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
+      const holder = readHolder(lock);
+      const alive = holderIsAlive(holder);
       let age;
       try {
-        age = Date.now() - fs.statSync(lock).mtimeMs;
+        age = Number.isFinite(holder?.at) ? Date.now() - holder.at : Date.now() - fs.statSync(lock).mtimeMs;
       } catch {
         continue; // released while we looked; try to take it again
       }
-      if (lockIsStale(age)) {
+      const limit = alive === true ? LOCK_BREAK_MS : LOCK_STALE_MS;
+      if (alive === false || age > limit) {
         fs.rmSync(lock, { force: true });
         continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `autoagy: ${lock} is held by pid ${holder?.pid ?? '?'} and did not come free within ${LOCK_WAIT_MS}ms; refusing to guess which of the two writes to lose`,
+        );
       }
       sleepSync(15);
     }
