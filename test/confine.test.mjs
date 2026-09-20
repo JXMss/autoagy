@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
 import { detectOwnSandbox, confinedCommandLine, scrubbedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath } from '../plugin/lib/confine.mjs';
 import { seccompProgram, seccompSupported } from '../plugin/lib/seccomp.mjs';
-import { HookContext, PROTECTED_WORKSPACE_DIRS } from '../plugin/lib/context.mjs';
+import { HookContext, PROTECTED_WORKSPACE_DIRS, findNestedGitPaths } from '../plugin/lib/context.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
 import { parseShell } from '../plugin/lib/shell.mjs';
 import { classify } from '../plugin/lib/policy.mjs';
@@ -920,4 +920,26 @@ test('a protected name that is a file does not fail every command in the workspa
   assert.notEqual(write.status, 0, 'the gitfile is read-only in the sandbox');
   assert.equal(fs.readFileSync(gitFile, 'utf8'), 'gitdir: /elsewhere/.git/worktrees/linked\n');
   removeControlPlaceholders(placeholders);
+});
+
+test('the walk stops on the clock as well as on the directory count', () => {
+  // The directory bound cannot stand in for a time bound: one `readdir` costs
+  // ~2.4-3.6ms on this machine's 9p mounts against ~0.01ms on ext4, so the same
+  // tree is a five-second walk in one place and fifteen milliseconds in the
+  // other. Two walks are paid per sandboxed command, and the PostToolUse half
+  // sits inside a 10s watchdog — which exits the hook without running the
+  // self-checks at all, so an unbounded walk is not slow, it is absent.
+  const work = path.join(dirs.root, 'walk-clock');
+  fs.mkdirSync(path.join(work, 'sub'), { recursive: true });
+  const readings = [1_000, 1_100, 10_000]; // starts the budget, inside it, then past it
+  let i = 0;
+  const scan = findNestedGitPaths(work, { maxMs: 500, now: () => readings[Math.min(i++, readings.length - 1)] });
+  assert.equal(scan.truncated, true, 'a walk that ran out of time says so');
+  assert.equal(scan.visited, 1, 'and it stops there rather than finishing the tree');
+  assert.deepEqual(scan.paths, []);
+
+  // A tree that fits is not marked, so the two cases cannot be confused.
+  const whole = findNestedGitPaths(path.join(dirs.workspace), { maxMs: 10_000 });
+  assert.equal(whole.truncated, false);
+  assert.ok(whole.visited > 0);
 });

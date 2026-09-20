@@ -25,8 +25,18 @@ export const PROTECTED_WORKSPACE_DIRS = ['.git', '.agents', '.agent', '_agents',
 // A workspace can hold a node_modules tree with tens of thousands of directories,
 // and this runs in a hook that has to answer inside its budget, so the walk is
 // bounded on every axis and skips the directories that are large by convention.
+//
+// The wall-clock bound is the one that was missing, and the directory count
+// cannot stand in for it: measured on this machine's `9p-mount` (a 9p mount), one
+// `readdir` costs ~2.4–3.6ms against ~0.01ms on ext4, so 1500 directories is
+// 5.4s of cold-cache walk in one place and 15ms in the other. Two of those walks
+// are paid per sandboxed command (the bind list in PreToolUse, the planting
+// check in PostToolUse), which put a command's hook overhead at ~8s on this
+// host — the self-check on the PostToolUse side has a 10s watchdog, so it was
+// also one big repository away from quietly ceasing to run at all.
 const NESTED_SCAN_MAX_DEPTH = 5;
 const NESTED_SCAN_MAX_DIRS = 1500;
+const NESTED_SCAN_MAX_MS = 500;
 const NESTED_SCAN_SKIP = new Set([
   'node_modules', 'target', 'dist', 'build', 'out', 'vendor', 'venv', '.venv', 'env',
   '__pycache__', '.cache', '.next', '.nuxt', '.tox', '.gradle', '.mypy_cache', '.pytest_cache',
@@ -41,13 +51,19 @@ const NESTED_SCAN_SKIP = new Set([
  * @param {string} root
  * @returns {string[]}
  */
-export function findNestedGitPaths(root) {
+export function findNestedGitPaths(root, { maxMs = NESTED_SCAN_MAX_MS, now = Date.now } = {}) {
   const out = [];
   const queue = [[root, 0]];
+  const deadline = now() + maxMs;
   let visited = 0;
+  let truncated = false;
   while (queue.length > 0) {
+    if (visited >= NESTED_SCAN_MAX_DIRS || now() > deadline) {
+      truncated = true;
+      break;
+    }
     const [dir, depth] = queue.shift();
-    if (visited++ >= NESTED_SCAN_MAX_DIRS) break;
+    visited++;
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -68,7 +84,7 @@ export function findNestedGitPaths(root) {
       queue.push([child, depth + 1]);
     }
   }
-  return out;
+  return { paths: out, visited, truncated };
 }
 
 // Bounds for judging a `.git` an agent just wrote (see plantedGitContent). The
@@ -707,14 +723,33 @@ export class HookContext {
    * not found. Nothing depends on the list being complete — a missing entry
    * leaves that `.git` as writable as it was before this existed.
    */
-  get nestedGitPaths() {
+  /**
+   * The walk behind `nestedGitPaths`, with what it cost.
+   *
+   * `truncated` is the honest half of "best effort": on a slow filesystem the
+   * time bound, not the directory bound, is what stops the walk, and what it
+   * dropped is `.git` directories that are therefore neither bound read-only nor
+   * looked at afterwards. Kept next to the list so the two cannot be reported
+   * apart — a scan that stops early and a complete one look identical from the
+   * paths alone.
+   */
+  get nestedGitScan() {
     // The declared roots too, for the same reason the mount list now covers
     // their metadata: a hook planted in a repository under one of them runs on
     // the next git command there, and a writing git command has to leave this
     // sandbox to work at all — so it runs outside it.
-    return this.memo('nestedGitPaths', () =>
-      uniquePaths([...this.workspaceRoots, ...this.declaredWritableRoots].flatMap((root) => findNestedGitPaths(root))),
-    );
+    return this.memo('nestedGitScan', () => {
+      const scans = [...this.workspaceRoots, ...this.declaredWritableRoots].map((root) => findNestedGitPaths(root));
+      return {
+        paths: uniquePaths(scans.flatMap((scan) => scan.paths)),
+        visited: scans.reduce((total, scan) => total + scan.visited, 0),
+        truncated: scans.some((scan) => scan.truncated),
+      };
+    });
+  }
+
+  get nestedGitPaths() {
+    return this.nestedGitScan.paths;
   }
 
   /**
