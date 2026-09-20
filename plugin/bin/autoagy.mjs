@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
-import { HookContext, PLUGIN_DIR, detectSandbox } from '../lib/context.mjs';
+import { HookContext, PLUGIN_DIR, detectSandbox, resolveReviewerCommand } from '../lib/context.mjs';
 import { findExecutable } from '../lib/paths.mjs';
 import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath } from '../lib/confine.mjs';
 import { classify, failOpenOutput } from '../lib/policy.mjs';
@@ -347,10 +347,20 @@ function status() {
   }
   if (config.reviewer.backend === 'agy') {
     // Inside a session, reviews run the agy CLI of that session unless reviewer.agy.command is an absolute path.
+    // Resolved by the same function the hook uses: looking it up on the bare
+    // PATH here would report a different program than the one that will run,
+    // because the hook skips the directories an agent can write.
     const command = config.reviewer.agy.command;
-    const exe = path.isAbsolute(command) ? command : findExecutable(command, process.env.PATH);
+    const exe = resolveReviewerCommand(command, { pathVar: env.PATH ?? process.env.PATH, untrustedRoots: config.writableRoots });
     const probe = exe ? spawnSync(exe, ['--version'], { encoding: 'utf8', timeout: 10000, shell: process.platform === 'win32' && !/\.exe$/i.test(exe) }) : null;
-    lines.push(`  agy             ${probe?.status === 0 ? `found at ${exe} (${probe.stdout.trim()})` : `NOT runnable as "${command}"`}`);
+    // Three answers, not two: a setting that cannot name a program at all is a
+    // different problem from one that names a program which will not run, and
+    // saying "NOT runnable as \"null\"" told the user neither.
+    let agyLine;
+    if (probe?.status === 0) agyLine = `found at ${exe} (${probe.stdout.trim()})`;
+    else if (exe) agyLine = `NOT runnable at ${exe}`;
+    else agyLine = `reviewer.agy.command (${JSON.stringify(command)}) does not name a program — use a bare name or an absolute path`;
+    lines.push(`  agy             ${agyLine}`);
   }
   const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath()), autoagyHome: autoagyHome });
   lines.push(`  own sandbox     ${own.active ? 'active' : own.required ? 'REQUIRED BUT UNAVAILABLE (commands are reviewed)' : 'inactive'} — ${own.detail}`);
@@ -540,7 +550,10 @@ function setMode(mode) {
 async function dryRunReview(flags) {
   if (!flags.tool) throw new Error('usage: autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only]');
   const args = flags.args ? JSON.parse(flags.args) : {};
-  const { config } = loadConfig();
+  // The pinned configuration, not the ambient one: this command exists to say
+  // how the hook would judge an action, and the hook reads the pin.
+  const { env, home } = managementContext();
+  const { config } = loadConfig({ env, home });
   const workspace = path.resolve(flags.workspace ?? process.cwd());
   const payload = {
     conversationId: flags.conversation ?? 'autoagy-dry-run',
@@ -548,10 +561,10 @@ async function dryRunReview(flags) {
     toolCall: { name: flags.tool, args },
     transcriptPath: flags.transcript ? path.resolve(flags.transcript) : undefined,
     // Lets sandbox detection find the Antigravity CLI settings.
-    artifactDirectoryPath: path.join(os.homedir(), '.gemini', 'antigravity-cli', 'brain', 'autoagy-dry-run'),
+    artifactDirectoryPath: path.join(home, '.gemini', 'antigravity-cli', 'brain', 'autoagy-dry-run'),
     workspacePaths: [workspace],
   };
-  const ctx = new HookContext(payload, { config, host: null });
+  const ctx = new HookContext(payload, { config, env, home, host: null });
   const classification = classify(ctx);
   console.log(`Layer 1: ${classification.verdict} (${classification.category})${classification.reason ? `\n  ${classification.reason}` : ''}`);
   console.log(`  sandbox: ${ctx.sandbox.active ? 'active' : 'not active'} — ${ctx.sandbox.detail}`);
@@ -581,7 +594,11 @@ function setup(flags) {
     const pin = pinHookCommands(PLUGIN_DIR, { configHome: resolveAutoagyHome(process.env, accountHome()), home: accountHome(), dryRun });
     console.log(pin.changed ? `${dryRun ? 'Would pin' : 'Pinned'} hook interpreter to ${process.execPath}` : 'Hook interpreter already pinned');
   }
-  const { config } = loadConfig();
+  // `accountHome()`, the same home this command pins into hooks.json — a bare
+  // `loadConfig()` would take `$HOME`, which a launcher or `sudo` can have set
+  // to somewhere else, and then the grants would be written from one config
+  // while the hook judged by another.
+  const { config } = loadConfig({ env: process.env, home: accountHome() });
   const home = resolveAutoagyHome(process.env, accountHome());
   if (config.commandGrant === 'executor') {
     if (!dryRun) installExecutor(home);

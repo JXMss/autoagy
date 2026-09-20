@@ -71,3 +71,21 @@ test('a planted-hook record flags the conversation, and `trust` is what releases
   assert.deepEqual(state.pendingNestedGit, {});
   assert.doesNotMatch(status(), /Flagged conversations/);
 });
+
+test('a reviewer command that cannot name a program is reported, not crashed on', () => {
+  // `merge`'s type check lets `null` through, because the default is a string
+  // but the key may be set to null — and `path.isAbsolute(null)` threw, so the
+  // whole command died with `The "path" argument must be of type string.
+  // Received null` and exited 1. A setting nobody can act on is a thing to say,
+  // not a thing to fall over.
+  fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
+  const config = path.join(dirs.env.AUTOAGY_HOME, 'config.json');
+  for (const command of [null, '', './bin/agy']) {
+    fs.writeFileSync(config, JSON.stringify({ reviewer: { backend: 'agy', agy: { command } } }));
+    const out = status();
+    assert.match(out, /reviewer\.agy\.command .* does not name a program/, `for ${JSON.stringify(command)}`);
+  }
+  // And a usable one still reports where it resolved.
+  fs.writeFileSync(config, JSON.stringify({ reviewer: { backend: 'agy', agy: { command: '/nope/agy' } } }));
+  assert.match(status(), /NOT runnable at \/nope\/agy/);
+});

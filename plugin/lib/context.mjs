@@ -362,6 +362,34 @@ function readJson(file) {
   }
 }
 
+/**
+ * The binary an `agy` review would run, or null when the setting cannot name one.
+ *
+ * Shared, because it had two readers that could name two different files:
+ * `status` looked the command up on the bare `PATH` with no filter, while the
+ * hook skipped the directories an agent can write. A `PATH` entry inside the
+ * workspace (`node_modules/.bin`, a virtualenv) is exactly where an unreviewed
+ * edit could put a file called `agy`, so a report that does not apply the same
+ * filter is a report about a different program than the one that will run.
+ * `status` also crashed here on `command: null`, which `merge`'s type check lets
+ * through because the default is a string but the key may be set to null.
+ *
+ * @param {unknown} command `reviewer.agy.command`
+ * @param {{ hostExecutable?: string|null, pathVar?: string, untrustedRoots?: string[] }} where
+ *   `hostExecutable` is the agy running this conversation, which a bare `agy`
+ *   resolves to inside a session; outside one there is none, and the lookup falls
+ *   through to `PATH`.
+ * @returns {string | null} null when unset, empty, not a string, or a relative
+ *   path with a separator (which would name a different file per directory)
+ */
+export function resolveReviewerCommand(command, { hostExecutable = null, pathVar = '', untrustedRoots = [] } = {}) {
+  if (typeof command !== 'string' || command.trim() === '') return null;
+  if (path.isAbsolute(command)) return command;
+  if (/[\\/]/.test(command)) return null;
+  if (/^agy(\.exe)?$/i.test(command) && hostExecutable) return hostExecutable;
+  return findExecutable(command, pathVar, untrustedRoots);
+}
+
 /** Platforms where a hook can read the host process's arguments at all. */
 export const HOST_INSPECTABLE_PLATFORMS = ['linux', 'darwin'];
 
@@ -610,14 +638,13 @@ export class HookContext {
    * @returns {string | null}
    */
   get reviewerExecutable() {
-    return this.memo('reviewerExecutable', () => {
-      const command = this.config.reviewer?.agy?.command;
-      if (typeof command !== 'string' || command.trim() === '') return null;
-      if (path.isAbsolute(command)) return command;
-      if (/[\\/]/.test(command)) return null;
-      if (/^agy(\.exe)?$/i.test(command) && this.hostExecutable) return this.hostExecutable;
-      return findExecutable(command, this.env.PATH, this.writableRoots);
-    });
+    return this.memo('reviewerExecutable', () =>
+      resolveReviewerCommand(this.config.reviewer?.agy?.command, {
+        hostExecutable: this.hostExecutable,
+        pathVar: this.env.PATH,
+        untrustedRoots: this.writableRoots,
+      }),
+    );
   }
 
   /** Agent configuration in the user's home; Antigravity's own artifact dirs live inside ~/.gemini. */
