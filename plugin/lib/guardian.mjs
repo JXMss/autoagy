@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PLUGIN_DIR } from './context.mjs';
 import { plannedAction } from './policy.mjs';
+import { resolveReal, findContainingRoot } from './paths.mjs';
 import {
   readTranscriptRows,
   rowsToEntries,
@@ -64,10 +65,58 @@ function readPrompt(name) {
   return stripComments(fs.readFileSync(path.join(PLUGIN_DIR, 'prompts', name), 'utf8'));
 }
 
-/** The reviewer's policy prompt: template + tenant policy + output contract. */
-export function policyPrompt(config) {
+/**
+ * The policy file that has to be refused, or null.
+ *
+ * `policy.file` is the reviewer's rulebook, and it is a path from a config the
+ * agent cannot write — which makes it worth exactly as much as where it points.
+ * Pointed at the workspace it is a rulebook the agent can rewrite, and a
+ * rewritten rulebook cannot be caught by review: the thing doing the judging is
+ * the thing being changed.
+ *
+ * So the test is where the file really is, not how the path was spelled:
+ * `resolveReal` first, because a symlink is enough to put it inside a writable
+ * root while the setting still reads as somewhere else. `writableRoots` is the
+ * right set because it is exactly "places the agent can write" — the workspace,
+ * the artifact and scratch directories, the temp roots, `writableRoots`. A
+ * policy file in a temp directory is refused too, which is intended.
+ *
+ * @param {object} config
+ * @param {string[]} writableRoots
+ * @returns {{ path: string, real: string, root: string } | null}
+ */
+export function policyFileRefusal(config, writableRoots = []) {
+  const file = config?.policy?.file;
+  if (typeof file !== 'string' || file.trim() === '') return null;
+  // Resolved the way the read below resolves it: `fs.readFileSync` takes the
+  // string as written, so a relative setting is relative to the hook's cwd.
+  const spelled = path.resolve(file);
+  const real = resolveReal(spelled);
+  const root = findContainingRoot(real, writableRoots) ?? findContainingRoot(spelled, writableRoots);
+  return root ? { path: spelled, real, root } : null;
+}
+
+/**
+ * The reviewer's policy prompt: template + tenant policy + output contract.
+ *
+ * A tenant policy the agent could rewrite is not loaded at all: the built-in
+ * one is used instead and the refusal is said out loud. Falling back rather
+ * than throwing is deliberate — a throw here would deny every action that
+ * needs review, for as long as the setting is wrong, which turns a
+ * misconfiguration into a broken install. The built-in policy is autoagy's own
+ * and is the stricter of the two, so the reviews that follow are reviews.
+ */
+export function policyPrompt(config, { writableRoots = [] } = {}) {
   let tenant;
-  if (config.policy?.file) {
+  const refused = policyFileRefusal(config, writableRoots);
+  if (refused) {
+    process.stderr.write(
+      `autoagy: refusing to load the reviewer policy at ${refused.real} — it is inside ${refused.root}, which the agent can write, ` +
+        'so the rules judging it could be rewritten by it. Using the built-in policy instead; move policy.file somewhere the agent cannot ' +
+        'write (e.g. ~/.gemini/autoagy/) and restart.\n',
+    );
+    tenant = readPrompt('policy.md');
+  } else if (config.policy?.file) {
     try {
       tenant = stripComments(fs.readFileSync(config.policy.file, 'utf8'));
     } catch (err) {
@@ -126,7 +175,7 @@ export function gatherEvidence(ctx, hints = {}) {
  * @returns {{ system: string, user: string, action: object }}
  */
 export function buildReviewPrompt(ctx, classification, evidence, extra = {}) {
-  const system = policyPrompt(ctx.config);
+  const system = policyPrompt(ctx.config, { writableRoots: ctx.writableRoots });
   const action = plannedAction(ctx);
   const parts = [];
   parts.push(

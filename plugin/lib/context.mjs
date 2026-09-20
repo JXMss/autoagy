@@ -500,6 +500,13 @@ export class HookContext {
         // enabling step, and two files registering the same name both run.
         userHooksPath(this.home),
         path.join(this.home, '.gemini', 'config', 'plugins'),
+        // The reviewer's rulebook, when the operator supplied one. Second layer
+        // only: `guardian.policyFileRefusal` is what actually refuses to load a
+        // policy the agent could rewrite, and it works on every platform. This
+        // is what buys the edit tools a refusal and, where autoagy's own sandbox
+        // is in force, a read-only bind inside it — neither of which exists on a
+        // host with no own sandbox.
+        this.config.policy?.file ? resolveReal(toAbsolute(this.config.policy.file, null, this.home)) : null,
         this.appDataDir ? path.join(this.appDataDir, 'plugin_data', 'autoagy') : null,
         this.hostExecutable,
         reviewer,

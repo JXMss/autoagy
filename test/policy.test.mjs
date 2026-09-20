@@ -92,6 +92,21 @@ test('file edits: workspace allowed, outside reviewed, self denied', () => {
   assert.equal(verdict('write_to_file', { CodeContent: 'no target' }).category, 'write-unknown-target');
 });
 
+test('a reviewer policy file the operator supplied is refused to the edit tools', () => {
+  // The config table warns against pointing policy.file into the workspace; this
+  // is the layer that turns the warning into a refusal. The guard in guardian.mjs
+  // is the one that decides on every platform — this one buys the edit tools a
+  // flat no, and a read-only bind inside autoagy's own sandbox, neither of which
+  // exists everywhere.
+  const policy = path.join(dirs.workspace, 'policy.md');
+  const config = configWith({ policy: { file: policy, extra: '' } });
+  const out = classify(contextFor(dirs, 'write_to_file', { TargetFile: policy, CodeContent: 'x' }, { config }));
+  assert.equal(out.verdict, 'deny');
+  assert.equal(out.category, 'self-protection');
+  // Nothing changes for the default, where the operator supplied no file.
+  assert.equal(verdict('write_to_file', { TargetFile: policy, CodeContent: 'x' }).verdict, 'allow');
+});
+
 test('edits through a symlink that leaves the workspace are reviewed', () => {
   const outsideDir = path.join(dirs.root, 'outside-target');
   fs.mkdirSync(outsideDir, { recursive: true });
