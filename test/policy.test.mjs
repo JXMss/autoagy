@@ -628,3 +628,17 @@ test('the reason names the repository and says what is in it', () => {
   assert.match(out.reason, /sub/, 'the repository a command would run in');
   assert.match(out.reason, /outside every sandbox/);
 });
+
+test('a builtin that prints one variable is judged by the name it prints', () => {
+  const options = { config: configWith({ ownSandbox: 'off' }), env: secretEnv };
+  // `declare -p NAME` writes no `$NAME`, so the variable rule cannot see it; the
+  // argument is the name, and the same allowlist test answers for it.
+  for (const cmd of ['declare -p OPENAI_API_KEY', 'typeset -p OPENAI_API_KEY', 'export -p OPENAI_API_KEY', 'declare -px OPENAI_API_KEY']) {
+    assert.equal(verdict('run_command', { CommandLine: cmd }, options).category, 'environment-read', cmd);
+  }
+  // A name the sandbox passes through, a shell-local one, and the forms that
+  // print nothing at all stay free — the same three exemptions as the `$NAME` rule.
+  for (const cmd of ['declare -p PATH', 'declare -p myvar', 'declare OPENAI_API_KEY', 'export OPENAI_API_KEY', 'export FOO=bar']) {
+    assert.equal(verdict('run_command', { CommandLine: cmd }, options).verdict, 'allow', cmd);
+  }
+});

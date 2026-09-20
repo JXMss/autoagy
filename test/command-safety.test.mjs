@@ -8,6 +8,7 @@ import {
   unwrapCommand,
   shellScriptOf,
   printsEnvironment,
+  printedVariableNames,
 } from '../plugin/lib/command-safety.mjs';
 import { MAX_NESTING_DEPTH } from '../plugin/lib/shell.mjs';
 
@@ -296,4 +297,21 @@ test('the variables a command line expands are collected through every nesting',
   assert.deepEqual(names(`sudo env A=1 sh -c "printf %s ${'${SECRET}'}"`), ['SECRET']);
   assert.deepEqual(names('cat <<EOF\n$SECRET\nEOF\n'), ['SECRET']);
   assert.deepEqual(names('echo hello'), []);
+});
+
+test('a builtin asked to print one variable names it as a bare argument', () => {
+  const names = (cmd) => printedVariableNames(analyzeCommandLine(cmd).segments[0].argv);
+  // `declare -p NAME` prints `declare -x NAME="<value>"`, and nothing on the
+  // line is a `$NAME` for the variable rule to see.
+  assert.deepEqual(names('declare -p OPENAI_API_KEY'), ['OPENAI_API_KEY']);
+  assert.deepEqual(names('typeset -p OPENAI_API_KEY'), ['OPENAI_API_KEY']);
+  assert.deepEqual(names('export -p OPENAI_API_KEY'), ['OPENAI_API_KEY']);
+  assert.deepEqual(names('declare -px A B'), ['A', 'B']);
+  // Without `-p` they only declare, and the no-argument forms dump everything
+  // and are `printsEnvironment`'s business rather than this one's.
+  assert.deepEqual(names('declare OPENAI_API_KEY'), []);
+  assert.deepEqual(names('export OPENAI_API_KEY'), []);
+  assert.deepEqual(names('export FOO=bar'), []);
+  assert.deepEqual(names('declare -p'), []);
+  assert.deepEqual(names('ls -p'), []);
 });

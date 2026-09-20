@@ -10,7 +10,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, printsEnvironment, executableName } from './command-safety.mjs';
+import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, printsEnvironment, printedVariableNames, executableName } from './command-safety.mjs';
 import { evaluateRules, describeRule } from './exec-rules.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { envNameAllowed } from './confine.mjs';
@@ -547,9 +547,17 @@ export function environmentExposure(ctx, analysis) {
   }
   const passThrough = ctx.config.ownSandboxEnvPassThrough ?? [];
   const env = ctx.env ?? {};
+  const exposed = (name) => !envNameAllowed(name, passThrough) && Object.hasOwn(env, name);
+  // `declare -p NAME` prints that one variable's value. The command line holds
+  // no `$NAME` for the rule below to see — the name is a bare argument — so the
+  // same test is applied to it here.
+  for (const segment of analysis.segments) {
+    for (const name of printedVariableNames(segment.argv)) {
+      if (exposed(name)) return `\`${executableName(segment.argv[0])} -p ${name}\`, which prints that variable's value`;
+    }
+  }
   for (const name of analysis.variables ?? []) {
-    if (envNameAllowed(name, passThrough)) continue;
-    if (!Object.hasOwn(env, name)) continue;
+    if (!exposed(name)) continue;
     return `$${name}, a name the sandbox environment allowlist does not pass through`;
   }
   return null;

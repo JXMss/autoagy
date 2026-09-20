@@ -593,6 +593,28 @@ function inlineEnvironmentRead(argv) {
 }
 
 /**
+ * The variable names a builtin would print the *value* of: `declare -p NAME`,
+ * `typeset -p NAME`, `export -p NAME`.
+ *
+ * Separate from `printsEnvironment` because the answer depends on the caller's
+ * environment, not on the argv alone: the no-argument forms dump everything and
+ * are judged here, while this form names one variable, and whether that name
+ * matters is the same question the `$NAME` rule asks. Nothing on the line is a
+ * `$NAME`, so the variable rule never sees it — the argument *is* the name.
+ *
+ * `-p` is what makes them print; `declare NAME` and `export NAME` only declare.
+ * @param {string[]} argv
+ * @returns {string[]}
+ */
+export function printedVariableNames(argv) {
+  const name = executableName(argv[0]);
+  if (name !== 'declare' && name !== 'typeset' && name !== 'export') return [];
+  const args = argv.slice(1);
+  if (!args.some((a) => /^-[A-Za-z]*p/.test(a))) return [];
+  return args.filter((a) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(a));
+}
+
+/**
  * True when every command in the line is read-only and the line uses no
  * construct that could write files, hide what runs, or name a value the line
  * does not spell out — an environment variable can hold a credential, and the
