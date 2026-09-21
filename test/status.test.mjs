@@ -110,6 +110,27 @@ test('`mode` refuses to rewrite a configuration file it cannot parse', () => {
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+test('`stats` counts the whole log, the rotated file included', () => {
+  // It read the last megabyte of the current file and never the `.1.jsonl`
+  // rotation leaves, so a full log was summarised from its newest tenth.
+  const home = dirs.env.AUTOAGY_HOME;
+  const logs = path.join(home, 'logs');
+  fs.mkdirSync(logs, { recursive: true });
+  const row = (i) => JSON.stringify({ time: new Date(Date.now() - 60_000 + i).toISOString(), conversation: 'c1', tool: 'run_command', verdict: 'allow', category: 'sandboxed-command', note: 'x'.repeat(150) });
+  const rows = (from, n) => `${Array.from({ length: n }, (_, i) => row(from + i)).join('\n')}\n`;
+  fs.writeFileSync(path.join(logs, 'decisions.1.jsonl'), rows(0, 1000));
+  fs.writeFileSync(path.join(logs, 'decisions.jsonl'), rows(1000, 7000));
+  assert.ok(fs.statSync(path.join(logs, 'decisions.jsonl')).size > 1024 * 1024, 'the current file alone is past the old megabyte');
+  try {
+    const res = spawnSync(process.execPath, [BIN, 'stats'], { env: dirs.env, encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /verdicts\s+allow 8000\b/, res.stdout.split('\n').find((l) => l.includes('verdicts')));
+  } finally {
+    fs.rmSync(path.join(logs, 'decisions.1.jsonl'), { force: true });
+    fs.rmSync(path.join(logs, 'decisions.jsonl'), { force: true });
+  }
+});
+
 test('`stats` counts the decisions, and says what the log cannot show', () => {
   const home = dirs.env.AUTOAGY_HOME;
   const logs = path.join(home, 'logs');

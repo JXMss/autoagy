@@ -58,6 +58,40 @@ export function readDecisions(autoagyHome, limit = 50) {
   return records.slice(-limit);
 }
 
+/**
+ * Every record the log still holds, oldest first: the rotated file, then the
+ * current one, each read whole.
+ *
+ * `readDecisions` reads the last megabyte of the current file, which is right for
+ * `autoagy log` and wrong for anything that counts. `stats` used it, so it
+ * summarised whatever fitted in that megabyte — the newest tenth or so of a full
+ * log (an external audit measured 2904 of 30000) — and never opened the
+ * `.1.jsonl` that rotation leaves behind, while reporting its numbers as the
+ * whole picture. Rotation caps each file at `MAX_LOG_BYTES`, so this reads at most
+ * twice that.
+ */
+export function readAllDecisions(autoagyHome) {
+  const current = decisionLogPath(autoagyHome);
+  const records = [];
+  for (const file of [current.replace(/\.jsonl$/, '.1.jsonl'), current]) {
+    let text = '';
+    try {
+      text = fs.readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    for (const line of text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        records.push(JSON.parse(line));
+      } catch {
+        // a line cut short by a crash
+      }
+    }
+  }
+  return records;
+}
+
 /** Keeps the full reviewer exchange when `log.reviews` is enabled. */
 export function writeReviewRecord(autoagyHome, id, data) {
   try {

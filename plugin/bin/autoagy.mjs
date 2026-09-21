@@ -19,7 +19,7 @@ import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INSTRUCTIONS } from '../lib/guardian.mjs';
 import { createReviewer } from '../lib/reviewers.mjs';
-import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
+import { appendDecision, readDecisions, readAllDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
@@ -644,7 +644,8 @@ function printStats(flags) {
   const { autoagyHome } = managementContext();
   const days = Number(flags.days ?? 0);
   const since = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 3600 * 1000 : 0;
-  const records = readDecisions(autoagyHome, 20_000).filter((r) => !since || Date.parse(r.time ?? 0) >= since);
+  // All of it, rotated file included — see readAllDecisions.
+  const records = readAllDecisions(autoagyHome).filter((r) => !since || Date.parse(r.time ?? 0) >= since);
   if (records.length === 0) return console.log(since > 0 ? `No decisions in the last ${days} day(s).` : 'No decisions logged yet.');
 
   const count = (list, key) => {
