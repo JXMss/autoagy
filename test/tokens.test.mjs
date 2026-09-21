@@ -10,7 +10,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { installExecutor, mintToken, sweepTokens, tokenDir, executorPath, executorInstalled, TOKEN_TTL_MS } from '../plugin/lib/tokens.mjs';
+import { installExecutor, mintToken, sweepTokens, tokenDir, executorPath, executorInstalled, executorWord, executorPathIsBare, TOKEN_TTL_MS } from '../plugin/lib/tokens.mjs';
+import { grantsFor } from '../plugin/lib/setup.mjs';
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-token-')));
 const home = path.join(root, 'autoagy');
@@ -143,4 +144,22 @@ test('a claim an executor is reading right now is left alone', () => {
   fs.utimesSync(claim, new Date(Date.now() - TOKEN_TTL_MS - 1000), new Date(Date.now() - TOKEN_TTL_MS - 1000));
   sweepTokens(home, { all: true, conversation: 'conv-a' });
   assert.ok(!fs.existsSync(claim));
+});
+
+test('the redeeming command line starts with exactly the text the grant names', () => {
+  // Found on the first real install (agy 1.2.7): with `command(<executor>)`
+  // granted, every `'<executor>' <token>` call still prompted, and the prefix
+  // agy offered to remember began with the quote. agy matches the grant against
+  // the command line as written, so the executor goes in bare.
+  const { commandLine } = mintToken(home, { commandLine: 'true' });
+  const grant = grantsFor({ commandGrant: 'executor' }, { autoagyHome: home, home: root })[0];
+  assert.equal(grant, `command(${executorPath(home)})`);
+  assert.ok(commandLine.startsWith(`${executorPath(home)} `), commandLine);
+  assert.ok(executorPathIsBare(home));
+
+  // A path the shell would split still has to be quoted to run at all; that
+  // install cannot match its grant as written, which `status` says.
+  const spaced = path.join(root, 'with space', 'autoagy');
+  assert.equal(executorWord(spaced), `'${executorPath(spaced)}'`);
+  assert.equal(executorPathIsBare(spaced), false);
 });

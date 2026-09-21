@@ -936,9 +936,11 @@ test('executor mode hands agy a token instead of the command, and will not fall 
     assert.equal(out.decision, 'allow');
     assert.equal(out.overwrite.BypassSandbox, true);
     // What agy runs is one program and a name — nothing an agent could aim.
-    const match = /^'([^']+)' ([0-9a-f]{32})$/.exec(out.overwrite.CommandLine);
+    // Unquoted: agy matches `command(<executor>)` against the text as written,
+    // and a quoted path prompted on every call (first real install, agy 1.2.7).
+    const match = /^(\S+) ([0-9a-f]{32})$/.exec(out.overwrite.CommandLine);
     assert.ok(match, out.overwrite.CommandLine);
-    assert.equal(match[1], executorPath(home));
+    assert.equal(match[1], executorPath(home), 'the command line starts with exactly the text the grant names');
 
     const token = JSON.parse(fs.readFileSync(path.join(tokenDir(home), `${match[2]}.json`), 'utf8'));
     assert.match(token.commandLine, /bwrap/, 'the bwrap line is what the token carries');
@@ -961,7 +963,7 @@ test('executor mode hands agy a token instead of the command, and will not fall 
       opts,
     );
     assert.equal(escalated.decision, 'allow');
-    const hit = /^'([^']+)' ([0-9a-f]{32})$/.exec(escalated.overwrite.CommandLine);
+    const hit = /^(\S+) ([0-9a-f]{32})$/.exec(escalated.overwrite.CommandLine);
     assert.ok(hit, escalated.overwrite.CommandLine);
     assert.equal(hit[1], executorPath(home), 'what agy is asked to run is the one program the grant names');
     const escalatedToken = JSON.parse(fs.readFileSync(path.join(tokenDir(home), `${hit[2]}.json`), 'utf8'));

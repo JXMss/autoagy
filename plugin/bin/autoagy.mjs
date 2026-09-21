@@ -22,7 +22,7 @@ import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, readAllDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins, effectiveSetting } from '../lib/setup.mjs';
-import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
+import { installExecutor, executorPath, executorInstalled, executorPathIsBare } from '../lib/tokens.mjs';
 import { installTripwire, tripwireInstallable, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, installedPluginDir } from '../lib/tripwire.mjs';
 import { scanMcpServers, readMcpCache, readMcpServers, mcpConfigFiles, MCP_CACHE_FILE } from '../lib/mcp.mjs';
 
@@ -412,6 +412,12 @@ function status() {
   // reason the executor exists, so say which of the two shapes is in force.
   if (config.commandGrant === 'executor') {
     lines.push(`  command grant   one program (${executorPath(autoagyHome)})${executorInstalled(autoagyHome) ? '' : ' — NOT INSTALLED, run `autoagy setup`'}`);
+    // agy matches the grant against the command line as written, and a path the
+    // shell needs quoted cannot be written the way the grant names it.
+    if (!executorPathIsBare(autoagyHome)) {
+      lines.push('  ! that path needs shell quoting, and agy matches the grant against the command as written,');
+      lines.push('    so every command will prompt. Use an AUTOAGY_HOME without spaces or shell characters, or commandGrant "wildcard".');
+    }
     const settingsNow = readJsonQuiet(cliSettingsPath(userHome));
     if (settingsNow && effectiveSetting(settingsNow, 'allowNonWorkspaceAccess') !== false) {
       lines.push('  ! that grant only stays narrow while the executor cannot be overwritten. A file-editing');

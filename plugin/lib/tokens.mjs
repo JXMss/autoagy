@@ -85,7 +85,30 @@ export function mintToken(autoagyHome, { commandLine, cwd = null, conversation =
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
   fs.renameSync(tmp, file);
-  return { name, file, commandLine: `${quote(executorPath(autoagyHome))} ${name}` };
+  return { name, file, commandLine: `${executorWord(autoagyHome)} ${name}` };
+}
+
+// Characters a POSIX shell reads literally in an unquoted word.
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/**
+ * The executor as the first word of the redeeming command line: bare whenever
+ * the shell needs no quotes for it.
+ *
+ * The grant `setup` writes is `command(<executor path>)`, unquoted, and agy
+ * matches it against the command line as written, quotes included. Seen on the
+ * first real install (agy 1.2.7): every `'<executor>' <token>` call prompted
+ * despite that grant, and the prefix agy offered to remember began with the
+ * quote. Written bare, the command line starts with exactly the grant's text.
+ */
+export function executorWord(autoagyHome) {
+  const file = executorPath(autoagyHome);
+  return SHELL_SAFE.test(file) ? file : quote(file);
+}
+
+/** False when the executor path needs quoting, so its grant cannot match as written. */
+export function executorPathIsBare(autoagyHome) {
+  return SHELL_SAFE.test(executorPath(autoagyHome));
 }
 
 /** A token as written, or null when it cannot be read. */
