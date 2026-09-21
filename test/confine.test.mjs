@@ -128,6 +128,17 @@ test('allowed sandboxed commands are rewritten into the own sandbox; escalations
   const denied = await run({ CommandLine: 'rm -rf build' }, 'deny');
   assert.equal(denied.decision, 'deny');
   assert.equal(denied.overwrite, undefined);
+
+  // What the nested-repository walk cost is recorded with the rest of the
+  // command's facts. It was computed and returned from the moment the walk got a
+  // time bound, and read by nothing — so a truncated scan, which is the state a
+  // slow filesystem is permanently in, left the protection partial with no way to
+  // find out. `autoagy status` reports it from here.
+  const scan = readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).nestedScan;
+  assert.equal(typeof scan.visited, 'number');
+  assert.ok(scan.visited > 0, 'the walk that built the mount list is the one reported');
+  assert.equal(typeof scan.truncated, 'boolean');
+  assert.match(scan.at, /^\d{4}-\d\d-\d\dT/);
   fs.rmSync(path.join(dirs.env.AUTOAGY_HOME, 'config.json'));
 });
 

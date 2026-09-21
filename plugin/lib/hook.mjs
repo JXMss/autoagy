@@ -140,6 +140,14 @@ export function withOwnSandbox(output, ctx) {
       // directories and each one yields at most one `.git`, so its own budget
       // is the bound.
       s.pendingNestedGit[ctx.stepIdx] = ctx.nestedGitPaths;
+      // What that walk cost and whether it finished. `nestedGitScan` has carried
+      // both since the time bound was added, and nothing read them — so on a
+      // filesystem where the walk truncates (measured: ~300 of 1269 directories
+      // in 0.5s on a 9p mount) the protection was partial with no way to find
+      // out. Written here because the scan already happened for the mount list;
+      // `status` reports it, so a reader does not have to run a command to learn
+      // that nested repositories below the cut are not mounted read-only.
+      s.nestedScan = { ...ctx.nestedGitScan, paths: undefined, at: new Date().toISOString() };
       if (placeholders.length) {
         s.pendingPlaceholders[ctx.stepIdx] = placeholders;
         // Recorded rather than recomputed: if the workspace roots this hook

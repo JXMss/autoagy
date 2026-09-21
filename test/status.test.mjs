@@ -179,6 +179,28 @@ test('status says when a conversation\'s state file cannot be read', () => {
   assert.match(out, /autoagy trust/);
 });
 
+test('status says when a protection is only partial', () => {
+  // Both of these were computed and reported to nobody. A truncated walk is the
+  // state a 9p or network workspace is permanently in (measured here: 361 of
+  // ~1269 directories), and an entry whose shape can never be mounted is
+  // review-only on every host — neither is guessable from the outside.
+  const dir = path.join(dirs.env.AUTOAGY_HOME, 'state');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'conv-scan.json'), JSON.stringify({ version: 1, conversationId: 'conv-scan', nestedScan: { visited: 361, truncated: true, at: '2026-09-21T00:46:28.673Z' } }));
+  fs.writeFileSync(path.join(dirs.env.AUTOAGY_HOME, 'config.json'), JSON.stringify({ protectedPaths: ['**/.husky/**', '/abs/src/**/gen*'] }));
+  const out = status();
+  assert.match(out, /nested scan\s+361 directories in the last run — TRUNCATED/);
+  assert.match(out, /not mounted/);
+  assert.match(out, /protectedPaths "\/abs\/src\/\*\*\/gen\*" is reviewed but never mounted read-only/);
+  assert.doesNotMatch(out, /protectedPaths "\*\*\/\.husky/, 'a mountable entry is not reported as a problem');
+
+  // A walk that finished says so without the warning.
+  fs.writeFileSync(path.join(dir, 'conv-scan.json'), JSON.stringify({ version: 1, conversationId: 'conv-scan', nestedScan: { visited: 18, truncated: false, at: '2026-09-21T00:46:28.673Z' } }));
+  const done = status();
+  assert.match(done, /nested scan\s+18 directories in the last run \(/);
+  assert.doesNotMatch(done, /TRUNCATED/);
+});
+
 test('status says how many domains the fetch prompt is off for, and what that costs', () => {
   // The prompt for an ungranted domain is the one autoagy cannot answer, so the
   // count is the answer to "why am I still being asked". Both directions are

@@ -43,6 +43,51 @@ const NESTED_SCAN_SKIP = new Set([
 ]);
 
 /**
+ * Whether a `protectedPaths` entry can name a mount point, and what it names.
+ *
+ * Extracted so the two questions cannot drift apart: `protectedControlPaths`
+ * decides what to mount, and `autoagy status` has to be able to tell the user
+ * which of their entries will never be mounted at all. The answer depends only on
+ * the entry, never on the workspace, which is what makes the second one
+ * answerable without a conversation.
+ *
+ * @returns {{ core: string, absolute: boolean, anywhere: boolean, mountable: boolean, why: string }}
+ *   `why` is empty when it is mountable, and otherwise says what stopped it.
+ */
+export function protectedEntryShape(raw, home) {
+  const empty = { core: '', absolute: false, anywhere: false, mountable: false };
+  if (typeof raw !== 'string' || raw === '') return { ...empty, why: 'not a non-empty string' };
+  let core = expandHome(raw, home).replace(/\\/g, '/');
+  const anywhere = core.startsWith('**/');
+  if (anywhere) core = core.slice(3);
+  if (core.endsWith('/**')) core = core.slice(0, -3);
+  const absolute = path.isAbsolute(core);
+  const shape = { core, absolute, anywhere };
+  if (core === '') return { ...shape, mountable: false, why: 'names nothing once `**/` and `/**` are removed' };
+  // A `**` anywhere but at the ends cannot name a mount point: the expansion
+  // stops at the directory holding the subtree, so this would mount that whole
+  // directory read-only instead of what the entry asked for.
+  if (core.includes('**')) return { ...shape, mountable: false, why: 'has a `**` in the middle, which would name the directory above the subtree' };
+  // A pattern containing `/` is matched against the whole absolute path, so a
+  // relative one matches nothing today (`loadConfig` drops it with a warning);
+  // mounting it would make the mount and the review disagree.
+  if (!absolute && !anywhere && core.includes('/')) return { ...shape, mountable: false, why: 'is relative and contains `/`, so it never matches an absolute path (prefix it with `**/`)' };
+  return { ...shape, mountable: true, why: '' };
+}
+
+/**
+ * Each `protectedPaths` entry with the shape answer, for reporting.
+ *
+ * Whether an entry is *currently* mounted also depends on the workspace — the
+ * file has to exist inside a writable root — and `status` has no workspace. The
+ * half it can answer is the half people get wrong: an entry whose shape can never
+ * become a mount is review-only everywhere, forever, and nothing said so.
+ */
+export function protectedPathShapes(config, home = os.homedir()) {
+  return (config?.protectedPaths ?? []).map((raw) => ({ entry: raw, ...protectedEntryShape(raw, home) }));
+}
+
+/**
  * `.git` entries below `root` (not the one at `root` itself, which the protected
  * workspace directories already cover): submodules and nested repositories.
  *
@@ -894,14 +939,8 @@ export class HookContext {
       if (roots.length === 0) return [];
       const out = [];
       for (const raw of this.config.protectedPaths ?? []) {
-        if (typeof raw !== 'string' || raw === '') continue;
-        let core = expandHome(raw, this.home).replace(/\\/g, '/');
-        const anywhere = core.startsWith('**/');
-        if (anywhere) core = core.slice(3);
-        if (core.endsWith('/**')) core = core.slice(0, -3);
-        if (core === '' || core.includes('**')) continue;
-        const absolute = path.isAbsolute(core);
-        if (!absolute && !anywhere && core.includes('/')) continue;
+        const { core, absolute, mountable } = protectedEntryShape(raw, this.home);
+        if (!mountable) continue;
         if (absolute) {
           // An absolute entry names a place, not a position in `writableRoots`,
           // and that list is the workspace roots first, then the declared ones

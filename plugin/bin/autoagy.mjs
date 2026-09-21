@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
-import { HookContext, PLUGIN_DIR, detectSandbox, resolveReviewerCommand } from '../lib/context.mjs';
+import { HookContext, PLUGIN_DIR, detectSandbox, resolveReviewerCommand, protectedPathShapes } from '../lib/context.mjs';
 import { findExecutable } from '../lib/paths.mjs';
 import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath } from '../lib/confine.mjs';
 import { classify, failOpenOutput } from '../lib/policy.mjs';
@@ -351,6 +351,33 @@ function status() {
     }
   } else {
     lines.push('  command grant   command(*) — a standing licence to run anything, which keeps working if the hook stops (see commandGrant: "executor")');
+  }
+  // Two protections that are partial without saying so.
+  //
+  // The nested-repository walk is bounded by wall clock as well as by directory
+  // count, and on a slow filesystem the clock is what stops it — so the `.git`
+  // directories below the cut are neither mounted read-only nor looked at
+  // afterwards. The scan has carried `visited`/`truncated` since that bound was
+  // added and nothing read them; this is where they arrive.
+  const scanned = listStates(autoagyHome)
+    .map(({ state }) => state.nestedScan)
+    .find((scan) => scan && Number.isFinite(scan.visited));
+  if (scanned) {
+    lines.push(`  nested scan     ${scanned.visited} director${scanned.visited === 1 ? 'y' : 'ies'} in the last run${scanned.truncated ? ' — TRUNCATED' : ''} (${fmtTime(scanned.at)})`);
+    if (scanned.truncated) {
+      lines.push('                  it stopped on its budget, so nested `.git` below that point are not mounted');
+      lines.push('                  read-only and a hook planted there is not detected. Slow filesystems (9p/drvfs,');
+      lines.push('                  network mounts) hit this; a workspace on a local disk does not.');
+    }
+  }
+  // And a `protectedPaths` entry whose shape can never become a mount: it is
+  // reviewed but never enforced, on every host, which the setting does not say.
+  // The relative-with-a-slash shape does not reach here — `loadConfig` drops it
+  // with its own warning — so in practice this is the absolute entry with a `**`
+  // in the middle, the one shape that survives validation and still names nothing.
+  for (const shape of protectedPathShapes(config, userHome)) {
+    if (shape.mountable) continue;
+    lines.push(`  ! protectedPaths ${JSON.stringify(shape.entry)} is reviewed but never mounted read-only: it ${shape.why}.`);
   }
   // A fetch of a domain agy has no rule for reaches the user however the reviewer
   // judged it — a hook `allow` does not override that prompt — so how many
