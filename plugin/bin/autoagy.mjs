@@ -301,6 +301,20 @@ function status() {
   // the two disagree, this report describes a different configuration than the
   // one that is actually judging tool calls.
   const installed = PLUGIN_DIR.includes(path.join('.gemini', 'config', 'plugins'));
+  // `autoagy setup` writes the grants wherever it is run from, while agy loads
+  // plugin hooks from one directory only — so "setup ran out of a checkout" is a
+  // state a person reaches by following half the README, and it is the fail-open
+  // in full: the three standing grants live, nothing loaded, nothing watching.
+  // Said here, at the top, because every line below would otherwise describe a
+  // supervised system — this report was measured doing exactly that.
+  const setupRecord = readSetupRecord(autoagyHome);
+  if (!installed && setupRecord?.addedGrants?.length) {
+    lines.push('  ! NOT INSTALLED — but `autoagy setup` has run, so its grants are live with nothing behind them');
+    lines.push(`    grants added ${setupRecord.addedGrants.join(', ')} (${fmtTime(setupRecord.time)})`);
+    lines.push(`    agy loads plugin hooks only from ${path.join(userHome, '.gemini', 'config', 'plugins', 'autoagy')},`);
+    lines.push(`    and this is ${PLUGIN_DIR}. Nothing below is in force.`);
+    lines.push('    Finish with `agy plugin install ./plugin` then `autoagy setup`, or undo with `autoagy teardown`.');
+  }
   if (pins.pinned) {
     lines.push(`  home            ${pins.home}   (pinned by autoagy setup)`);
     const ambientHome = resolveAutoagyHome();
@@ -523,8 +537,11 @@ function status() {
       lines.push('    (`agy plugin list`, `agy plugin enable autoagy`). Until then no tool call is being');
       lines.push('    reviewed, while the permission grants from `autoagy setup` still apply.');
     }
-  } else if (installed) {
-    lines.push('  ! hooks         plugin installed but no hook has ever run: nothing is being reviewed');
+  } else {
+    // Unconditional now. This is the line that was absent on a machine whose
+    // grants were live and whose plugin was never installed: the `installed`
+    // guard made it silent in exactly that case.
+    lines.push(`  ! hooks         no hook has ever run${installed ? ', though the plugin is installed' : ' (see NOT INSTALLED above)'}: nothing is being reviewed`);
   }
 
   const recent = readDecisions(autoagyHome, 500).filter((r) => r.review);
@@ -760,13 +777,26 @@ function setup(flags) {
   }
   const report = applySetup({ dryRun, env, home, grants: grantsFor(config, { autoagyHome, home }) });
   // The tripwire exists because those grants do: it is installed where the
-  // grants are, and `--no-settings` (which writes none) gets none.
-  if (!dryRun && PLUGIN_DIR.startsWith(installedRoot)) {
-    const tw = installTripwire({ autoagyHome, home, pluginDir: PLUGIN_DIR });
+  // grants are, and `--no-settings` (which writes none) returns above, so
+  // reaching here means grants were written. It used to be conditional on this
+  // command running from the installed plugin directory — which is the one case
+  // where it is least needed, and skipping it left the other case (grants
+  // written, plugin never installed) with nothing watching at all.
+  if (!dryRun) {
+    const tw = installTripwire({ autoagyHome, home });
     console.log(`\nTripwire: ${tw.script}`);
     console.log(`  registered in ${tw.hooks}, which \`agy plugin\` does not manage — so it keeps running when`);
     console.log('  the plugin is disabled or its hooks.json is replaced, and refuses tool calls rather than let');
     console.log('  the grants above apply with nobody reviewing. `autoagy teardown` removes it.');
+    if (!PLUGIN_DIR.startsWith(installedRoot)) {
+      console.log('');
+      console.log(`! The plugin is NOT installed at ${path.join(installedRoot, 'autoagy')}, and that is the only place`);
+      console.log(`  agy loads plugin hooks from — this command ran from ${PLUGIN_DIR}.`);
+      console.log('  So the grants above are live and no hook will run. The tripwire just installed refuses every');
+      console.log('  tool call until you finish the job:');
+      console.log('      agy plugin install ./plugin   (then re-run `autoagy setup` to pin it)');
+      console.log('  or take the grants back with `autoagy teardown`.');
+    }
   }
   console.log(`\nAntigravity CLI settings: ${report.settingsFile}`);
   if (report.addGrants.length === 0 && report.changes.length === 0) console.log('  already configured');

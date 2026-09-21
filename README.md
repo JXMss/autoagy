@@ -40,6 +40,8 @@ git clone <this repo> autoagy && cd autoagy
 node scripts/install.mjs            # 先看会改什么：node scripts/install.mjs --dry-run
 ```
 
+**用 `node scripts/install.mjs`，不要只跑 `autoagy setup`。** 两者不是一回事：`setup` 只改 Antigravity 的设置（写那三条授权、钉住配置目录），它**不会把插件装到 agy 会加载的位置**。只跑 `setup` 的结果是三条授权生效、而一个 hook 都不会运行——正是本节开头那条 fail-open，自己造出来的。真发生了也能兜住：`setup` 写授权的同时一定会装哨兵，而哨兵盯的是 `~/.gemini/config/plugins/autoagy`（agy 唯一加载插件 hook 的位置），插件不在那儿就拒绝一切工具调用；`autoagy status` 也会在第一行喊出来。补救是 `agy plugin install ./plugin` 然后重跑 `autoagy setup`，或者 `autoagy teardown` 把授权收回去。
+
 安装脚本会：
 
 1. `agy plugin install ./plugin`，插件装到 `~/.gemini/config/plugins/autoagy`；

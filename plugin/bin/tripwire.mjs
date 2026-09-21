@@ -56,6 +56,11 @@ function whatIsWrong() {
   const enabled = readJson(CONFIG_JSON)?.plugins?.[PLUGIN_NAME]?.enabled;
   if (enabled === false) return `the ${PLUGIN_NAME} plugin is disabled (\`agy plugin enable ${PLUGIN_NAME}\`)`;
 
+  // The plugin directory itself, before its contents: `autoagy setup` writes the
+  // grants wherever it is run from, so "setup ran but the plugin was never
+  // installed" is a state a person can reach by following half the README — and
+  // it is the fail-open in full, grants live with nothing loaded.
+  if (!fs.existsSync(PLUGIN_DIR)) return `the ${PLUGIN_NAME} plugin is not installed at ${PLUGIN_DIR} (\`agy plugin install ./plugin\`)`;
   const hooks = readJson(`${PLUGIN_DIR}/hooks.json`);
   if (!hooks) return `${PLUGIN_DIR}/hooks.json is missing or unreadable`;
   // `agy plugin install` writes the source tree's copy over the installed one,

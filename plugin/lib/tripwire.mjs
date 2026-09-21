@@ -115,12 +115,29 @@ export function tripwireInstalled({ autoagyHome, home = os.homedir() }) {
  * then registers it.
  * @returns {{ script: string, hooks: string }}
  */
-export function installTripwire({ autoagyHome, home = os.homedir(), pluginDir, nodePath = process.execPath }) {
+/**
+ * The only directory agy loads plugin hooks from (measured, design.md §2: the CLI
+ * ignores workspace-level `.agents/plugins`).
+ *
+ * The tripwire has to watch *this* path and not the directory `autoagy setup`
+ * happened to run in, and the difference is not theoretical: `setup` writes the
+ * grants wherever it is run, so running it from a checkout used to bake the
+ * checkout's path into the tripwire — which exists, so the tripwire concluded all
+ * was well while agy loaded nothing at all. The grants were live and the one
+ * mechanism whose whole job is to catch that was watching the wrong place.
+ */
+export function installedPluginDir(home = os.homedir()) {
+  return path.join(home, '.gemini', 'config', 'plugins', 'autoagy');
+}
+
+export function installTripwire({ autoagyHome, home = os.homedir(), nodePath = process.execPath }) {
   const script = tripwirePath(autoagyHome);
   const source = fs
     .readFileSync(SOURCE, 'utf8')
     .replace(/^#![^\n]*\n/, `#!${nodePath}\n`)
-    .replace('__PLUGIN_DIR__', pluginDir)
+    // Derived here rather than taken from the caller: a caller that passes the
+    // wrong directory turns this program into one that always says "fine".
+    .replace('__PLUGIN_DIR__', installedPluginDir(home))
     .replace('__CONFIG_JSON__', path.join(home, '.gemini', 'config', 'config.json'))
     // Where it is registered, so a refusal can name the one way out that needs
     // no command to run.

@@ -179,6 +179,28 @@ test('status says when a conversation\'s state file cannot be read', () => {
   assert.match(out, /autoagy trust/);
 });
 
+test('status shouts when setup ran but the plugin was never installed', () => {
+  // Found on a real machine: `autoagy setup` had run from a checkout, so
+  // `command(*)`, `mcp(*)` and `execute_url(*)` were live in agy's settings while
+  // ~/.gemini/config/plugins was empty and no hook could ever run — and this
+  // report described a healthy supervised system, down to "own sandbox active"
+  // and "terminal sandbox in force (autoagy)". Two lines could have caught it: the
+  // tripwire line, easy to read past, and the heartbeat line, which was guarded by
+  // `installed` and therefore silent in exactly this case.
+  fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
+  fs.writeFileSync(
+    path.join(dirs.env.AUTOAGY_HOME, 'setup.json'),
+    JSON.stringify({ time: '2026-09-21T02:10:05.946Z', addedGrants: ['command(*)', 'mcp(*)', 'execute_url(*)'] }),
+  );
+  const out = status();
+  assert.match(out, /NOT INSTALLED — but `autoagy setup` has run/);
+  assert.match(out, /grants added command\(\*\), mcp\(\*\), execute_url\(\*\)/);
+  assert.match(out, /Nothing below is in force/);
+  assert.match(out, /agy plugin install \.\/plugin/);
+  // And the heartbeat line is no longer conditional on being installed.
+  assert.match(out, /no hook has ever run \(see NOT INSTALLED above\)/);
+});
+
 test('status says what the MCP annotations are worth here', () => {
   // Both halves are silent failures otherwise: trusting the annotations without a
   // scan reviews every call anyway, and a scan without the setting changes nothing.

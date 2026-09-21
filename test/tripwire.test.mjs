@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { installTripwire, removeTripwire, tripwireInstalled, tripwireRegistered, tripwirePath, userHooksPath, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
+import { installTripwire, removeTripwire, tripwireInstalled, tripwireRegistered, tripwirePath, userHooksPath, installedPluginDir, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-tripwire-')));
 const home = path.join(root, 'home');
@@ -92,7 +92,10 @@ test('the refusal names the way out that does not need a command', () => {
   fs.rmSync(pluginDir, { recursive: true, force: true });
   const out = run();
   assert.equal(out.decision, 'deny');
-  assert.match(out.reason, /missing or unreadable/);
+  // A directory deleted by hand is the not-installed case, and it is named as
+  // that now; `missing or unreadable` belongs to the narrower one above, where the
+  // directory is there and its hooks.json is not.
+  assert.match(out.reason, /plugin is not installed at/);
   assert.ok(out.reason.includes(userHooksPath(home)), 'the file to edit');
   assert.ok(out.reason.includes(TRIPWIRE_KEY), 'and the key to delete from it');
   setPlugin();
@@ -129,6 +132,36 @@ test('a file that held nothing but the tripwire is taken away with it', () => {
 // commit — leaving a tripwire that every test here passes and that nothing ever
 // installs. A defence nobody calls is not a defence, and nothing else in this
 // file could tell the difference.
+test('it watches the directory agy loads from, not the one setup ran in', () => {
+  // The failure this closes was found on a real machine: `autoagy setup` writes
+  // the grants wherever it is run, so running it from a checkout baked the
+  // checkout's path in here. That directory exists, so the tripwire answered
+  // "all is well" while agy — which loads plugin hooks from one place only —
+  // loaded nothing at all. Grants live, nothing reviewing, and the mechanism whose
+  // whole job is to notice that was looking somewhere else.
+  const checkout = path.join(root, 'some', 'checkout', 'plugin');
+  fs.mkdirSync(checkout, { recursive: true });
+  fs.writeFileSync(path.join(checkout, 'hooks.json'), healthyHooks());
+  setPlugin();
+  installTripwire({ autoagyHome, home, pluginDir: checkout });
+  assert.equal(installedPluginDir(home), pluginDir);
+  const text = fs.readFileSync(tripwirePath(autoagyHome), 'utf8');
+  assert.ok(text.includes(pluginDir), 'the installed location is baked in');
+  assert.ok(!text.includes(checkout), 'the caller does not get to name a different one');
+  assert.equal(run(), null, 'and with a real plugin there it still says nothing');
+
+  // With nothing installed there it refuses, and names that rather than blaming
+  // the hooks file inside a directory that is not there.
+  fs.rmSync(pluginDir, { recursive: true, force: true });
+  const refused = run();
+  assert.equal(refused.decision, 'deny');
+  assert.match(refused.reason, /plugin is not installed at/);
+  assert.match(refused.reason, new RegExp(pluginDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(refused.reason, /agy plugin install/);
+  setPlugin();
+  installTripwire({ autoagyHome, home });
+});
+
 test('setup installs the tripwire and teardown removes it', () => {
   const bin = fs.readFileSync(new URL('../plugin/bin/autoagy.mjs', import.meta.url), 'utf8');
   const body = (name) => {
@@ -137,6 +170,11 @@ test('setup installs the tripwire and teardown removes it', () => {
     return bin.slice(start, bin.indexOf('\n}', start));
   };
   assert.match(body('setup'), /installTripwire\(/, 'setup must install it, or the grants it guards stand alone');
+  // And unconditionally on where this command runs from. It used to be guarded by
+  // `PLUGIN_DIR.startsWith(installedRoot)` — the one case where the tripwire is
+  // least needed — so the case that needed it (grants written, plugin never
+  // installed) got nothing.
+  assert.doesNotMatch(body('setup'), /if \(!dryRun && PLUGIN_DIR\.startsWith/, 'the tripwire must not be conditional on the plugin already being installed');
   assert.match(body('teardown'), /removeTripwire\(/, 'teardown must remove it, or every tool call is refused after uninstall');
   assert.match(body('status'), /tripwireInstalled\(/, 'status must say whether it is there');
 });
