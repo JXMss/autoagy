@@ -19,6 +19,7 @@ import path from 'node:path';
 import { autoagyHome as resolveAutoagyHome, defaultConfigFileText, configPath, resolveConfigPath } from './config.mjs';
 import { expandHome } from './paths.mjs';
 import { executorPath } from './tokens.mjs';
+import { installedPluginDir } from './tripwire.mjs';
 
 export const RECOMMENDED_GRANTS = ['command(*)', 'mcp(*)', 'execute_url(*)'];
 // `allowNonWorkspaceAccess: false` is the one check that happens at the moment
@@ -112,6 +113,23 @@ export function trustedDomainGrants(config) {
 export function grantsFor(config, { autoagyHome, home = os.homedir() }) {
   const command = config?.commandGrant === 'executor' ? `command(${executorPath(autoagyHome)})` : 'command(*)';
   return [command, 'mcp(*)', 'execute_url(*)', ...writableRootGrants(config, home), ...trustedDomainGrants(config).grants];
+}
+
+/**
+ * The setup record, when `autoagy setup` has written grants and there is no
+ * plugin where agy loads plugins from — or null.
+ *
+ * That combination is the fail-open in full: standing grants, nothing loaded,
+ * nothing watching. It is reached by running `setup` and skipping `agy plugin
+ * install`, which is following half the README. The question is asked of the
+ * install location and never of where the asking code runs: a `status` run from a
+ * checkout beside a real install would otherwise report a plugin that is there as
+ * missing, which is the false positive the first version of this check had.
+ */
+export function halfInstalledRecord({ autoagyHome, home = os.homedir() }) {
+  const record = readSetupRecord(autoagyHome);
+  if (!record?.addedGrants?.length) return null;
+  return fs.existsSync(path.join(installedPluginDir(home), 'hooks.json')) ? null : record;
 }
 
 export function cliSettingsPath(home = os.homedir()) {

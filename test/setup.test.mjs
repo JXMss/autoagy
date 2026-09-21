@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS } from '../plugin/lib/setup.mjs';
+import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord } from '../plugin/lib/setup.mjs';
 import { executorPath } from '../plugin/lib/tokens.mjs';
 import { configPath, loadConfig } from '../plugin/lib/config.mjs';
 import { removeTripwire, tripwireInstalled, tripwireRegistered, userHooksPath, registeredTripwirePath, registeredAutoagyHome, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
@@ -50,6 +50,31 @@ test('setup adds grants and sandbox settings, teardown restores them', () => {
   assert.equal(teardown.found, true);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { ...original, permissions: { ...original.permissions } });
   assert.equal(applyTeardown({ home, env }).found, false);
+});
+
+test('setup without the plugin installed is recognised, from wherever the question is asked', () => {
+  // Found on a real machine: grants written by `autoagy setup`, nothing in
+  // ~/.gemini/config/plugins, no hook able to run. The first version of this
+  // check asked "is this command running from the install location", which a
+  // status run from a checkout beside a real install answers "no" — shouting NOT
+  // INSTALLED at a plugin that is there. The question belongs to the install
+  // location, which is why it takes a home and not a directory.
+  const home = path.join(root, 'half-home');
+  const autoagyHome = path.join(home, '.gemini', 'autoagy');
+  fs.mkdirSync(autoagyHome, { recursive: true });
+  assert.equal(halfInstalledRecord({ autoagyHome, home }), null, 'no setup record, nothing to say');
+
+  fs.writeFileSync(path.join(autoagyHome, 'setup.json'), JSON.stringify({ time: '2026-09-21T02:10:05.946Z', addedGrants: ['command(*)', 'mcp(*)', 'execute_url(*)'] }));
+  assert.deepEqual(halfInstalledRecord({ autoagyHome, home }).addedGrants, ['command(*)', 'mcp(*)', 'execute_url(*)'], 'grants and no plugin: the fail-open');
+
+  const installed = path.join(home, '.gemini', 'config', 'plugins', 'autoagy');
+  fs.mkdirSync(installed, { recursive: true });
+  fs.writeFileSync(path.join(installed, 'hooks.json'), '{}');
+  assert.equal(halfInstalledRecord({ autoagyHome, home }), null, 'a plugin at the install location answers it, whoever is asking');
+
+  fs.writeFileSync(path.join(autoagyHome, 'setup.json'), JSON.stringify({ time: 'x', addedGrants: [] }));
+  fs.rmSync(installed, { recursive: true, force: true });
+  assert.equal(halfInstalledRecord({ autoagyHome, home }), null, 'setup --no-settings wrote no grants, so there is nothing live');
 });
 
 test('planSetup reports grants that permissions.deny would override', () => {

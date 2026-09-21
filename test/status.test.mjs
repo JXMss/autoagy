@@ -6,6 +6,7 @@
 import { test, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -179,7 +180,12 @@ test('status says when a conversation\'s state file cannot be read', () => {
   assert.match(out, /autoagy trust/);
 });
 
-test('status shouts when setup ran but the plugin was never installed', () => {
+// `status` reads the *account* home by design (see accountHome), so whether this
+// machine has a real install decides what it prints; the predicate itself is
+// pinned with a fixture home in setup.test.mjs. Skipped rather than faked where a
+// real install exists — there the correct output is the other one.
+const realInstall = fs.existsSync(path.join(os.userInfo().homedir, '.gemini', 'config', 'plugins', 'autoagy', 'hooks.json'));
+test('status shouts when setup ran but the plugin was never installed', { skip: realInstall ? 'autoagy is really installed on this machine' : false }, () => {
   // Found on a real machine: `autoagy setup` had run from a checkout, so
   // `command(*)`, `mcp(*)` and `execute_url(*)` were live in agy's settings while
   // ~/.gemini/config/plugins was empty and no hook could ever run — and this
@@ -198,7 +204,7 @@ test('status shouts when setup ran but the plugin was never installed', () => {
   assert.match(out, /Nothing below is in force/);
   assert.match(out, /agy plugin install \.\/plugin/);
   // And the heartbeat line is no longer conditional on being installed.
-  assert.match(out, /no hook has ever run \(see NOT INSTALLED above\)/);
+  assert.match(out, /no hook has ever run \(the plugin is not installed\)/);
 });
 
 test('status says what the MCP annotations are worth here', () => {

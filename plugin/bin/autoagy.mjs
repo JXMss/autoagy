@@ -21,9 +21,9 @@ import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INST
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
-import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath } from '../lib/tripwire.mjs';
+import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, installedPluginDir } from '../lib/tripwire.mjs';
 import { scanMcpServers, readMcpCache, readMcpServers, mcpConfigFiles, MCP_CACHE_FILE } from '../lib/mcp.mjs';
 
 /**
@@ -307,8 +307,11 @@ function status() {
   // in full: the three standing grants live, nothing loaded, nothing watching.
   // Said here, at the top, because every line below would otherwise describe a
   // supervised system — this report was measured doing exactly that.
-  const setupRecord = readSetupRecord(autoagyHome);
-  if (!installed && setupRecord?.addedGrants?.length) {
+  // Asked of the directory agy loads from, never of where this command runs —
+  // see halfInstalledRecord.
+  const setupRecord = halfInstalledRecord({ autoagyHome, home: userHome });
+  const pluginPresent = fs.existsSync(path.join(installedPluginDir(userHome), 'hooks.json'));
+  if (setupRecord) {
     lines.push('  ! NOT INSTALLED — but `autoagy setup` has run, so its grants are live with nothing behind them');
     lines.push(`    grants added ${setupRecord.addedGrants.join(', ')} (${fmtTime(setupRecord.time)})`);
     lines.push(`    agy loads plugin hooks only from ${path.join(userHome, '.gemini', 'config', 'plugins', 'autoagy')},`);
@@ -541,7 +544,7 @@ function status() {
     // Unconditional now. This is the line that was absent on a machine whose
     // grants were live and whose plugin was never installed: the `installed`
     // guard made it silent in exactly that case.
-    lines.push(`  ! hooks         no hook has ever run${installed ? ', though the plugin is installed' : ' (see NOT INSTALLED above)'}: nothing is being reviewed`);
+    lines.push(`  ! hooks         no hook has ever run${pluginPresent ? ', though the plugin is installed' : ' (the plugin is not installed)'}: nothing is being reviewed`);
   }
 
   const recent = readDecisions(autoagyHome, 500).filter((r) => r.review);
