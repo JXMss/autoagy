@@ -704,7 +704,14 @@ test('no number of planted repositories pushes one out of the record', { skip: l
     assert.ok(prompt.includes(JSON.stringify(path.join(first, '.git')).slice(1, -1)), 'the oldest repository is still the one named');
     // Bounded where it is shown: eight in full, the rest named.
     assert.equal((prompt.match(/hook \\"pre-commit\\"/g) ?? []).length, 8);
-    assert.match(prompt, /14 more, contents not shown/);
+    assert.match(prompt, /14 more whose contents are not kept/);
+    assert.match(prompt, /treat every one of them as holding something git will run/, 'no contents is not read as nothing runnable');
+    // In the state file too: every path, and contents only for the newest.
+    const kept = readState(home, conversationId).plantedHooks;
+    assert.equal(kept.length, 22);
+    assert.ok(kept.slice(0, -8).every((p) => p.contentsDropped && !p.hooks && p.path), 'older ones keep their path, not their hooks');
+    assert.ok(kept.slice(-8).every((p) => p.hooks?.length > 0), 'the newest keep what they hold');
+    assert.ok(JSON.stringify(kept[0]).length < 300, 'an older record costs a path, not a hook file');
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
     fs.rmSync(capture, { force: true });

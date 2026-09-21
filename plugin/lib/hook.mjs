@@ -13,7 +13,7 @@ import { HookContext, HOST_INSPECTABLE_PLATFORMS, newNestedGitPlantings } from '
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets, readTargets, canonicalPathArgs, classifyWriteTarget, isCredentialPath } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
-import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
+import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, PLANTED_DETAIL } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
 import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat, takeConfigWarnings } from './state.mjs';
 import { appendDecision, writeReviewRecord } from './log.mjs';
@@ -355,6 +355,18 @@ function recordPlantedHooks(state, findings, step) {
     // buildReviewPrompt instead.
     state.plantedHooks = [...(state.plantedHooks ?? []), step === null ? finding : { ...finding, step }];
   }
+  // Every repository stays — its path is what gets a later command there
+  // reviewed, and a hook call remembers nothing the state file does not hold, so
+  // dropping one would be the bug the missing cap fixed. What goes is what each
+  // hook holds, for all but the newest: that is nearly all of the size, and all
+  // the reviewer is shown of the older ones anyway. Without this a `git clone`
+  // loop under a global `init.templateDir` with hooks (`git secrets --install`)
+  // grew the file by the hook text of every repository, read on every hook call.
+  const all = state.plantedHooks ?? [];
+  state.plantedHooks = all.map((p, i) => {
+    if (i >= all.length - PLANTED_DETAIL || p.contentsDropped || p.unchecked) return p;
+    return { path: p.path, dir: p.dir, ...(p.step !== undefined ? { step: p.step } : {}), contentsDropped: true };
+  });
 }
 
 /**

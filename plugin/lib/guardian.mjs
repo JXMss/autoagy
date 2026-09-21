@@ -206,7 +206,8 @@ export function gatherEvidence(ctx, hints = {}) {
  * @returns {{ system: string, user: string, action: object }}
  */
 // How many planted repositories the prompt shows in full, and how many more it names.
-const PLANTED_DETAIL = 8;
+// The state file keeps hook contents for the same newest few (recordPlantedHooks).
+export const PLANTED_DETAIL = 8;
 const PLANTED_NAMED = 50;
 
 export function buildReviewPrompt(ctx, classification, evidence, extra = {}) {
@@ -304,8 +305,16 @@ export function buildReviewPrompt(ctx, classification, evidence, extra = {}) {
       }
       if (planted.config?.length) parts.push(`  config keys: ${JSON.stringify(planted.config)}\n`);
     }
-    if (named.length > 0) parts.push(`${named.length} more, contents not shown: ${named.map((p) => JSON.stringify(p.dir)).join(', ')}\n`);
-    if (unnamed > 0) parts.push(`and ${unnamed} earlier ones not listed.\n`);
+    // "No contents" must not read as "nothing runnable": every one of these was
+    // recorded because it held something git will run, or could not be read in
+    // time, which is treated the same way (see the `not read` line above).
+    if (named.length > 0) {
+      parts.push(
+        `${named.length} more whose contents are not kept (only the newest ${PLANTED_DETAIL} are): ${named.map((p) => JSON.stringify(p.dir)).join(', ')}. ` +
+          'Each was recorded because it held something git will run, or could not be read in time — treat every one of them as holding something git will run.\n',
+      );
+    }
+    if (unnamed > 0) parts.push(`and ${unnamed} earlier ones like them, not listed.\n`);
     parts.push('>>> PLANTED GIT HOOKS END\n\n');
   }
   parts.push('The Antigravity agent has requested the following action:\n');
