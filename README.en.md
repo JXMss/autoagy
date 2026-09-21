@@ -159,7 +159,72 @@ what you experience:
 Also: `writableRoots` (outside directories editable without review — re-run
 `autoagy setup` after changing it), `protectedPaths`, `credentialPaths`,
 `mcp.allow`, `rules` (Codex-style prefix rules), `webSearch`, `browser`, and the
-reviewer backend (`agy` by default; any OpenAI-compatible endpoint otherwise).
+reviewer backend (next section).
+
+## Reviewer backend
+
+By default (`backend: "agy"`) the plugin's tool-less `autoagy-guardian` agent runs
+headless under your own Antigravity login — no extra API key. It uses your agy's
+current default model at reasoning effort `low`. A review takes 4–12 seconds and
+each one spends your Antigravity quota. Review sessions show up in `agy`'s
+history under the `~/.gemini/autoagy/guardian` workspace, so they do not hijack
+`agy -c` in your projects.
+
+To change the model or the effort:
+
+```json
+{ "reviewer": { "agy": { "model": "gemini-3.8-flash-low", "effort": "low" } } }
+```
+
+`model` takes a name from the first column of `agy models` (the one above is only
+an example); a wrong name makes every review fail, which counts as a refusal.
+`effort` is `low`, `medium` or `high`.
+
+Or use any **OpenAI-compatible** Chat Completions endpoint (faster, but billed
+per use), for example Gemini:
+
+```json
+{
+  "reviewer": {
+    "backend": "openai",
+    "openai": {
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "apiKeyEnv": "GEMINI_API_KEY",
+      "model": "gemini-flash-latest"
+    }
+  }
+}
+```
+
+OpenAI, DeepSeek and others work the same way: change `baseUrl`, `apiKeyEnv` and
+`model`. Things to know:
+
+- **The key is read from an environment variable; the config only names it.** It
+  is read from the hook's environment, which is the one agy was started with, so
+  `export GEMINI_API_KEY=...` in the terminal you start agy from (or in your shell
+  startup file), then restart agy. The `api key … is set` line in `autoagy status`,
+  and `autoagy review`, look at the terminal you run them in, not at agy's. Inside
+  autoagy's own sandbox commands cannot see the variable (the environment is
+  cleared); without that sandbox, the known ways of reading it are reviewed, but
+  not every way — see the environment limit in the
+  [Chinese README](README.md#已知限制).
+- A missing key, an unreachable endpoint or a wrong model name makes every review
+  fail, which counts as a refusal; three in a row stop the turn, and the agent
+  points you at `autoagy status`.
+- Local Ollama: `baseUrl` is `http://localhost:11434/v1`. Ollama does not check
+  the key, but autoagy always sends an `Authorization` header, so set the variable
+  `apiKeyEnv` names to any non-empty value.
+- If the endpoint rejects `response_format: {"type": "json_object"}`, set
+  `jsonMode` to `false`. Extra request headers a gateway needs go in `headers`.
+- What each review sends is listed under [Privacy](#privacy): trimmed for length,
+  never redacted.
+
+A config change applies from the next tool call. To try it without starting an
+agent, review a single command:
+
+```bash
+autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandbox":true}'
+```
 
 ## What it does not protect against
 

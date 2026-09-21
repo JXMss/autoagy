@@ -148,9 +148,17 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 
 ## 审核后端
 
-默认用 **agy**：插件自带一个无工具的 `autoagy-guardian` agent，用你的 Antigravity 登录态以 headless 方式运行，无需额外 API key。实测每次审核约 4～12 秒。审核会话会出现在 `agy` 的历史里，归在 `~/.gemini/autoagy/guardian` 这个工作区下，不影响你项目里的 `agy -c`。
+默认用 **agy**：插件自带一个无工具的 `autoagy-guardian` agent，用你的 Antigravity 登录态以 headless 方式运行，无需额外 API key。模型是你 agy 当前的默认模型，推理强度 `low`。实测每次审核约 4～12 秒，每次都花你的 Antigravity 额度。审核会话会出现在 `agy` 的历史里，归在 `~/.gemini/autoagy/guardian` 这个工作区下，不影响你项目里的 `agy -c`。
 
-也可以用任意 **OpenAI 兼容**接口（更快，需要 API key），例如 Gemini：
+换审核用的模型或推理强度：
+
+```json
+{ "reviewer": { "agy": { "model": "gemini-3.8-flash-low", "effort": "low" } } }
+```
+
+`model` 填 `agy models` 输出的第一列（上面只是示例）；填错了每次审核都会失败，按拒绝处理。`effort` 可选 `low` / `medium` / `high`。
+
+也可以用任意 **OpenAI 兼容**接口（Chat Completions；更快，但按量付费），例如 Gemini：
 
 ```json
 {
@@ -165,7 +173,19 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 }
 ```
 
-OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `model` 即可。
+OpenAI、DeepSeek 等同理，改 `baseUrl` / `apiKeyEnv` / `model` 即可。需要注意：
+
+- **密钥只从环境变量读，配置文件里只写变量名。** 读的是 hook 的环境，也就是 agy 启动时的环境，所以要在**启动 agy 的那个终端**里先 `export GEMINI_API_KEY=...`（或写进 shell 的启动文件），之后重启 agy。`autoagy status` 里的 `api key … is set`、以及 `autoagy review`，看的都是你运行它们的那个终端，不代表 agy 那边也有。这个变量在 autoagy 自己的沙箱里对命令不可见（环境会被清空）；没有自带沙箱时，读它的已知写法会送审，但拦不全，见「已知限制」。
+- 密钥没读到、地址不通或模型名写错时，每次审核都会失败并按拒绝处理；连续 3 次会中断本轮，agent 会让你去看 `autoagy status`。
+- 本地 Ollama：`baseUrl` 写 `http://localhost:11434/v1`。Ollama 不校验密钥，但 autoagy 总会带上 `Authorization` 头，所以 `apiKeyEnv` 指向的变量设成任意非空值即可。
+- 接口不支持 `response_format: {"type": "json_object"}` 时，把 `jsonMode` 设为 `false`；网关要求额外的请求头时写在 `headers` 里。
+- 每次审核发出去的内容见「隐私与数据流向」：只截断，不脱敏。
+
+配置改完，下一次工具调用就生效。想先试一下，可以不启动 agent，单独审一条命令：
+
+```bash
+autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandbox":true}'
+```
 
 ## 配置（`~/.gemini/autoagy/config.json`）
 
@@ -177,7 +197,9 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `ownSandbox` | `"auto"` | autoagy 自己的 bubblewrap 沙箱（见上文）：`auto` 满足条件时启用，`on` 强制启用（不可用时命令送审），`off` 不使用 |
 | `reviewer.backend` | `"agy"` | `agy` / `openai` / `none`（`none` 等同 `ask`） |
 | `reviewer.timeoutSec` / `maxAttempts` | `90` / `3` | Codex 的审核期限与重试次数 |
-| `reviewer.agy.model` / `effort` | 默认模型 / `"low"` | 审核用的 agy 模型与推理强度 |
+| `reviewer.agy.model` / `effort` | 默认模型 / `"low"` | 审核用的 agy 模型（`agy models` 的第一列）与推理强度（`low` / `medium` / `high`） |
+| `reviewer.openai.baseUrl` / `apiKeyEnv` / `model` | `https://api.openai.com/v1` / `OPENAI_API_KEY` / `gpt-5-mini` | `backend: "openai"` 时用的接口地址、存密钥的环境变量名、模型名，见「审核后端」 |
+| `reviewer.openai.headers` / `jsonMode` | `{}` / `true` | 额外请求头；是否要求接口按 JSON 格式回答（接口不支持时设为 `false`） |
 | `onDenied` / `onTimeout` / `onError` | `"deny"` | 改为 `"ask"` 时，审核拒绝/超时/出错会转为弹窗让你决定 |
 | `trustedDomains` | `localhost` 等 | **抓取**网页到这些域名（含子域名）免审 |
 | `networkGrants` | `"none"` | `"trusted-domains"` 时，`autoagy setup` 为 `trustedDomains` 每一项写一条 `read_url(<域名>)` 授权，于是这些域名的抓取不再由 Antigravity 弹窗询问（那是 hook 的 `allow` 盖不过去的唯一一类弹窗）。代价：`read_url` 规则同时是**终端沙箱**的出网白名单，所以在 autoagy 自己的沙箱**没有**生效的机器上（macOS、Windows、无 bwrap、`ownSandbox: "off"`），沙箱内免审的命令也能访问这些域名；自带沙箱生效时代价为零（那里没有网络）。`*.x.com` 按 `x.com` 授予；去掉 `*.` 后仍含通配符的条目跳过并在 `status` 里点名——`read_url(*)` 不会被生成 |
