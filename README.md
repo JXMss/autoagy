@@ -27,11 +27,15 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 
 ## 安装
 
-> **装它之前要知道的一件事。** autoagy 要向 Antigravity 申请 `command(*)`、`mcp(*)`、`execute_url(*)` 三条授权，之后 hook 就是唯一的闸门。hook 自己失败是 fail-closed（工具调用报错），但**插件没加载是 fail-open**：`agy plugin disable`、`agy plugin install` 用未钉住的 `hooks.json` 覆盖、或钉住的解释器失效——这三种情况下授权都还在，闸门没了。
+> **装它之前要知道的一件事。** autoagy 要向 Antigravity 申请 `command(*)`、`mcp(*)`、`execute_url(*)` 三条授权，之后 hook 就是唯一的闸门。这些授权**不会跟着插件一起消失**：插件被 `agy plugin disable`、被 `agy plugin install` 用未钉住的 `hooks.json` 覆盖、或者根本没装到 agy 加载插件的位置，授权都还在。所以 `setup` 写授权的同时，会在 `~/.gemini/config/hooks.json` 里登记一个**哨兵**（键名 `autoagy-tripwire`）。这个文件不归 `agy plugin` 管，上面几种情况下它照样运行（agy 1.2.7 CLI 实测）；它发现插件不在、被停用或没钉住时，**拒绝每一次工具调用**，而不是让授权在没人审的情况下生效。钉住的解释器失效时，hook 本身跑不起来，工具调用同样失败。所以在 CLI 上这几种失效是 **fail-closed** 的——代价是发生时 agy 什么都做不了，直到你处理。
 >
-> **命令这一类可以收窄。** 把 `commandGrant` 设成 `"executor"` 之后，授权从 `command(*)` 变成 `command(<~/.gemini/autoagy/bin/exec-confined.mjs>)`——一个只会兑换 hook 写下的一次性令牌的程序。hook 不跑了就没人写令牌，那条授权拿在手里也没用，**命令这一类因此是 fail-closed 的**。详见下文配置表。`mcp(*)` 和 `execute_url(*)` 没有对应的收窄办法（它们不是命令），所以那两类仍然是上面说的形状。
+> **如果 agy 突然什么工具都用不了**，提示里说 autoagy 没在审核：按提示跑 `autoagy status`，然后重装（`node scripts/install.mjs`）或卸载（`node scripts/install.mjs --uninstall`）。连这些命令都跑不了时，**不需要任何命令的出路**是删掉 `~/.gemini/config/hooks.json` 里 `autoagy-tripwire` 这一个键——同一个文件里别的键属于别人，别动。删掉之后授权重新无人把守，所以要紧接着卸载或重装。
 >
-> 这跟 Codex 的形状不同，而且方向是反的：Codex 关掉 auto 模式会回到更严格的状态（它本来不需要放宽任何宿主权限），autoagy 关掉会回到**比从未安装更宽松**的状态。`autoagy status` 会报「hooks 最后一次运行」的时间，据此可以查（这一节末尾那条 `agy plugin disable` 的说明是同一件事的另一种说法）。彻底的解法是不授予这三条通配，代价是 autoagy 大部分能力失效。
+> 仍然 fail-open 的只剩两种：哨兵被人删掉而授权还在；以及 Antigravity IDE／2.0——那里的授权是你在设置界面里手动加的，`setup` 不写它们、也不为它们登记哨兵（IDE 是否加载这个文件也没有实测过）。
+>
+> **命令这一类可以收窄。** 把 `commandGrant` 设成 `"executor"` 之后，授权从 `command(*)` 变成 `command(<~/.gemini/autoagy/bin/exec-confined.mjs>)`——一个只会兑换 hook 写下的一次性令牌的程序。hook 不跑了就没人写令牌，那条授权拿在手里也没用，**命令这一类因此是 fail-closed 的**。详见下文配置表。`mcp(*)` 和 `execute_url(*)` 没有对应的收窄办法（它们不是命令），那两类只靠哨兵兜底。
+>
+> 这跟 Codex 的形状仍然不同：Codex 本来不需要放宽任何宿主权限，关掉 auto 模式就回到更严格的状态；autoagy 需要先放宽宿主权限，所以「插件还在不在」这件事本身得有东西盯着——哨兵就是它。`autoagy status` 会报哨兵在不在，以及「hooks 最后一次运行」的时间。彻底的解法是不授予这三条通配，代价是 autoagy 大部分能力失效。
 
 要求：Node.js ≥ 20，Antigravity CLI（`agy`）≥ 1.2。
 
@@ -51,6 +55,8 @@ node scripts/install.mjs            # 先看会改什么：node scripts/install.
    - `permissions.allow` 加入 `command(*)`、`mcp(*)`、`execute_url(*)`——否则被 autoagy 批准的操作仍会被 Antigravity 自己再弹窗；
    - 确保 `enableTerminalSandbox: true`、`toolPermission: "proceed-in-sandbox"`；
    - 设 `allowNonWorkspaceAccess: false`——这是**唯一一道在写入那一刻生效**的检查（agy 会跟着符号链接判落点），堵的是「autoagy 检查完、agy 落笔前路径被换掉」那条缝。`writableRoots` 里列的目录会各自拿到一条 `write_file(<目录>)` 授权，照常免审编辑；没事先声明的临时区外编辑则会多一次确认（headless 下失败）。
+5. 在 `~/.gemini/config/hooks.json` 里登记哨兵，并把它的程序装到 `~/.gemini/autoagy/bin/tripwire.mjs`（见本节开头）。这是 `agy plugin` 之外、你自己的文件；登记是合并进去的，里面原有的 hook 不动，文件读不懂时 `setup` 整个停下、一条授权也不写；
+6. `commandGrant: "executor"` 时，把执行器装到 `~/.gemini/autoagy/bin/exec-confined.mjs`。
 
 **永不授予 `read_url(*)`**：Antigravity 会把 `read_url` 规则同时当作终端沙箱的网络白名单，授予后沙箱内未经审核的命令就能访问任意网络（等于关掉 Codex 的“沙箱无网络”这一层）。这条通配符授权不会由任何配置生成。
 
@@ -64,7 +70,7 @@ node scripts/install.mjs --uninstall          # 加 --purge 同时删除 ~/.gemi
 
 卸载先撤授权，撤成功了才拆别的。撤不回来的时候（通常是 `settings.json` 不是合法 JSON）它会整个停下、退出码 1：插件、哨兵和 setup 记录都原样保留——它们正是站在那几条授权后面的东西，而 setup 记录是日后还能撤回授权的唯一依据，`--purge` 也不例外。修好文件再跑一次即可。`autoagy teardown` 同理。
 
-> 注意：如果只用 `agy plugin disable autoagy` 停用插件，上面的授权仍然存在，绕过沙箱的命令、MCP 调用和浏览器操作会不经审核、也不弹窗直接执行。请用 `autoagy mode off` 暂停（此时这三类操作会改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
+> 注意：不要用 `agy plugin disable autoagy` 来暂停。授权不会跟着消失，所以哨兵会因此拒绝**每一次**工具调用——这是故意的，否则绕过沙箱的命令、MCP 调用和浏览器操作会不经审核、也不弹窗直接执行。要暂停用 `autoagy mode off`（此时这三类操作会改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
 
 **Antigravity IDE / Antigravity 2.0**：插件格式相同，但权限在设置界面里（Settings → Permission Grants）。请手动加上同样三条授权并保持终端沙箱开启，然后在 `config.json` 里设 `"sandbox": "on"`（autoagy 只能自动识别 CLI 的沙箱设置）。这是一句声明，不是观测：能观测到 `--dangerously-skip-permissions` 时（它会让 Antigravity 的沙箱失效），以那个标志为准。
 
