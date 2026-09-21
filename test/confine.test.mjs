@@ -860,10 +860,59 @@ test('executor mode hands agy a token instead of the command, and will not fall 
     assert.equal(token.cwd, dirs.workspace, 'the working directory is recorded, not left to be inherited');
     assert.equal(token.conversation, conversationId);
 
+    // An escalation the agent asked for itself goes through a token too, and this
+    // is the case the narrow grant used to break. Measured on agy 1.2.7: a
+    // `command(...)` grant matches the command's *content*, so with
+    // `command(<executor>)` the content `whoami` matched nothing and agy refused
+    // it outright in print mode — the mode that closes the fail-open was the mode
+    // in which the agent could not escalate at all.
+    // An escalation is reviewed, so these calls need a reviewer; the mock is
+    // selected from the config file, never from the environment.
+    const withReviewer = (response, extra = {}) =>
+      fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ...config, ...extra, reviewer: { backend: 'mock', mock: { response } } }));
+    withReviewer('allow');
+    const escalated = await handlePreToolUse(
+      payloadFor(dirs, 'run_command', { CommandLine: 'git push', BypassSandbox: true, Cwd: dirs.workspace }, { conversationId, stepIdx: 6 }),
+      opts,
+    );
+    assert.equal(escalated.decision, 'allow');
+    const hit = /^'([^']+)' ([0-9a-f]{32})$/.exec(escalated.overwrite.CommandLine);
+    assert.ok(hit, escalated.overwrite.CommandLine);
+    assert.equal(hit[1], executorPath(home), 'what agy is asked to run is the one program the grant names');
+    const escalatedToken = JSON.parse(fs.readFileSync(path.join(tokenDir(home), `${hit[2]}.json`), 'utf8'));
+    assert.equal(escalatedToken.commandLine, 'git push', 'unconfined, which is what approving an escalation meant');
+    assert.doesNotMatch(escalatedToken.commandLine, /bwrap/);
+    assert.equal(escalatedToken.cwd, dirs.workspace);
+    // And nothing is recorded for the sandbox self-check: there was no bwrap
+    // rewrite to verify, and comparing against one would mark the conversation
+    // untrusted for a command that ran exactly as approved.
+    assert.equal(readState(home, conversationId).pendingConfined[6], undefined);
+
+    // Denied, nothing is minted: a token is a decision already made.
+    withReviewer('deny');
+    const refused = await handlePreToolUse(
+      payloadFor(dirs, 'run_command', { CommandLine: 'rm -rf /', BypassSandbox: true }, { conversationId, stepIdx: 7 }),
+      opts,
+    );
+    assert.equal(refused.decision, 'deny');
+    assert.equal(refused.overwrite, undefined);
+
+    // With the wildcard grant there is nothing to work around, so the call is
+    // left alone — `command(*)` already covers any content.
+    withReviewer('allow', { commandGrant: 'wildcard' });
+    const wildcard = await handlePreToolUse(
+      payloadFor(dirs, 'run_command', { CommandLine: 'git push', BypassSandbox: true }, { conversationId, stepIdx: 8 }),
+      opts,
+    );
+    assert.equal(wildcard.decision, 'allow');
+    assert.equal(wildcard.overwrite, undefined);
+    fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(config));
+
     // The turn ending takes away whatever nobody redeemed: a surviving token is
     // a retry, and autoagy's retries are deliberately one-shot.
     handlePostInvocation({ conversationId }, opts);
     assert.equal(fs.existsSync(path.join(tokenDir(home), `${match[2]}.json`)), false);
+    assert.equal(fs.existsSync(path.join(tokenDir(home), `${hit[2]}.json`)), false);
   } finally {
     fs.rmSync(path.join(home, 'config.json'), { force: true });
   }

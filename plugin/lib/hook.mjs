@@ -18,7 +18,7 @@ import { createReviewer } from './reviewers.mjs';
 import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat, takeConfigWarnings } from './state.mjs';
 import { appendDecision, writeReviewRecord } from './log.mjs';
 import { readTranscriptRows } from './transcript.mjs';
-import { mintToken, sweepTokens } from './tokens.mjs';
+import { mintToken, sweepTokens, executorInstalled } from './tokens.mjs';
 import { toAbsolute } from './paths.mjs';
 
 const SUMMARY_MAX = 300;
@@ -102,7 +102,10 @@ export function offModeOutput(ctx, state = {}) {
  */
 export function withOwnSandbox(output, ctx) {
   if (output?.decision !== 'allow' && output?.decision !== 'force_ask') return output;
-  if (ctx.toolName !== 'run_command' || ctx.args.BypassSandbox === true || typeof ctx.args.CommandLine !== 'string') return output;
+  if (ctx.toolName !== 'run_command' || typeof ctx.args.CommandLine !== 'string') return output;
+  // An escalation is not confined — that is what it means — but under the narrow
+  // command grant it still has to be rewritten, or agy refuses it. See below.
+  if (ctx.args.BypassSandbox === true) return withEscalationToken(output, ctx);
   if (!ctx.ownSandbox.active) return withScrubbedEnv(output, ctx);
   const placeholders = [];
   const confined = confinedCommandLine(ctx, ctx.args.CommandLine, { placeholders });
@@ -170,6 +173,52 @@ export function withOwnSandbox(output, ctx) {
     removeControlPlaceholders(placeholders);
   }
   return { ...output, overwrite: { BypassSandbox: true, CommandLine: commandLine } };
+}
+
+/**
+ * An approved escalation, behind the same one-shot token, so the narrow command
+ * grant covers it.
+ *
+ * Measured on agy 1.2.7, which is what makes this necessary: a `command(...)`
+ * grant is matched against the *content* of the command. With
+ * `permissions.allow: ["command(echo)"]`, `echo probe-granted` with
+ * `BypassSandbox: true` ran, and `whoami` with `BypassSandbox: true` was refused
+ * — "a tool required the \"command\" permission that headless mode cannot prompt
+ * for, so it was auto-denied".
+ *
+ * So under `commandGrant: "executor"`, where the standing grant names one program
+ * instead of `command(*)`, an escalation the agent asks for itself could never
+ * match it: its content is `git push`, not the executor's path. Interactively that
+ * is a prompt on every escalation; in print mode it is an outright denial, so the
+ * agent cannot escalate at all. The mode that closes autoagy's fail-open was the
+ * mode that broke escalation.
+ *
+ * Rewriting it to redeem a token fixes that and widens nothing. The executor runs
+ * `sh -c <the token's command line>` — it never assumed bwrap — and the token is
+ * one-shot, expires, and is written to a directory only the hook can write. Which
+ * means the grant still says exactly what it said: "the only program that may run
+ * is the one that redeems a line autoagy wrote down". The line, this time, is the
+ * command the reviewer approved, unconfined, which is what approving an escalation
+ * already meant.
+ *
+ * Only on `allow`: a `force_ask` or a denial has approved nothing, and a token is
+ * a decision already made.
+ *
+ * No self-check for this one, deliberately. If agy ignored the rewrite the
+ * original `git push` would run — which is what was approved — and then fail its
+ * own permission check, because the grant does not name it. The failure is visible
+ * to the agent and nothing ran that was not approved, so there is no silent
+ * weakening for a check to catch; the unredeemed token expires and is swept.
+ */
+function withEscalationToken(output, ctx) {
+  if (output.decision !== 'allow') return output;
+  // `command(*)` already covers any content, so there is nothing to work around.
+  if (ctx.config.commandGrant !== 'executor') return output;
+  // Without the program there is nothing to redeem the token; leaving the call
+  // alone means agy refuses it, which is the fail-closed direction, and `status`
+  // already says the executor is missing.
+  if (!executorInstalled(ctx.autoagyHome)) return output;
+  return { ...output, overwrite: { CommandLine: issueToken(ctx, ctx.args.CommandLine) } };
 }
 
 /**
