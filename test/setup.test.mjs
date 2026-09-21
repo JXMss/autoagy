@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord, staleGrants } from '../plugin/lib/setup.mjs';
+import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord, staleGrants, effectiveSetting } from '../plugin/lib/setup.mjs';
 import { executorPath } from '../plugin/lib/tokens.mjs';
 import { configPath, loadConfig } from '../plugin/lib/config.mjs';
 import { configWith } from './helpers.mjs';
@@ -38,8 +38,10 @@ test('setup adds grants and sandbox settings, teardown restores them', () => {
   assert.equal(after1.enableTerminalSandbox, true);
   assert.equal(after1.toolPermission, 'proceed-in-sandbox');
   // The one check that happens at the moment of the write, and follows
-  // symlinks to decide where that write lands.
-  assert.equal(after1.allowNonWorkspaceAccess, false);
+  // symlinks to decide where that write lands. A missing key is agy's own
+  // false, so nothing is written for it.
+  assert.equal(effectiveSetting(after1, 'allowNonWorkspaceAccess'), false);
+  assert.equal('allowNonWorkspaceAccess' in after1, false);
   assert.ok(fs.existsSync(report.backup));
   assert.ok(!after1.permissions.allow.includes('read_url(*)'));
 
@@ -175,6 +177,39 @@ test('setup writes the read_url grants, and teardown takes exactly those away', 
   assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).permissions.allow, ['read_url(mine.example)']);
 });
 
+test('a missing allowNonWorkspaceAccess is agy\'s own false, and a true is still turned off and put back', () => {
+  // The sequence from a real install, agy 1.2.7: the user had `true`, setup
+  // wrote `false`, and trusting a new folder made agy save its settings without
+  // the key — it drops false booleans. A headless write outside the workspace
+  // was refused all the same, so missing means false.
+  const home = path.join(root, 'nonworkspace-home');
+  const env = { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy') };
+  const file = cliSettingsPath(home);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const read = () => JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify({ enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox', allowNonWorkspaceAccess: true }));
+
+  // An explicit true is a real opening, and setup still closes it.
+  const first = applySetup({ home, env, grants: [] });
+  assert.deepEqual(first.changes, [{ key: 'allowNonWorkspaceAccess', from: true, to: false }]);
+  assert.equal(read().allowNonWorkspaceAccess, false);
+
+  // agy saves the file and the key is gone. Nothing is open, so a later setup
+  // has nothing to change and takes no backup.
+  const { allowNonWorkspaceAccess, ...dropped } = read();
+  fs.writeFileSync(file, JSON.stringify(dropped));
+  const again = applySetup({ home, env, grants: [] });
+  assert.deepEqual(again.changes, []);
+  assert.equal(again.backup, null);
+
+  // Teardown still puts back what the user had before the first setup.
+  applyTeardown({ home, env });
+  assert.equal(read().allowNonWorkspaceAccess, true);
+
+  // A file that cannot be read says nothing about what agy will do.
+  assert.equal(effectiveSetting(null, 'allowNonWorkspaceAccess'), undefined);
+});
+
 test('setup writes a write_file grant for each writable root', () => {
   const home = path.join(root, 'roots-home');
   const env = { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy') };
@@ -185,7 +220,7 @@ test('setup writes a write_file grant for each writable root', () => {
   applySetup({ home, env, grants });
   const written = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.ok(written.permissions.allow.includes(`write_file(${path.join(home, 'shared-lib')})`));
-  assert.equal(written.allowNonWorkspaceAccess, false);
+  assert.equal(effectiveSetting(written, 'allowNonWorkspaceAccess'), false);
   assert.equal(RECOMMENDED_SETTINGS.allowNonWorkspaceAccess, false);
   // Teardown puts the setting back where it found it rather than at the default.
   applyTeardown({ home, env });

@@ -91,7 +91,11 @@ and reverted by `teardown` / `--uninstall`.
    - `enableTerminalSandbox: true`, `toolPermission: "proceed-in-sandbox"`;
    - `allowNonWorkspaceAccess: false` — the one check that happens at the moment
      agy writes, which is what caps an edit whose path was swapped after autoagy
-     checked it.
+     checked it. agy removes this key whenever it saves its settings (trusting a
+     new folder is enough), and a missing key means `false` (measured on agy
+     1.2.7), so not seeing it in the file is normal; `autoagy status` shows
+     `false (not in the file…)`. Setup only changes it when it was `true`, and
+     teardown puts that back.
 3. **`~/.gemini/config/hooks.json`** — the sentinel registration, merged in. Your
    own hooks in that file are left alone; if the file is not valid JSON, `setup`
    writes **nothing at all** (no grants either) and tells you to fix it.

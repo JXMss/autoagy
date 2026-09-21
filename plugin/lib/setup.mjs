@@ -32,6 +32,27 @@ export const RECOMMENDED_GRANTS = ['command(*)', 'mcp(*)', 'execute_url(*)'];
 // narrow grants instead; see `writableRootGrants`.
 export const RECOMMENDED_SETTINGS = { enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox', allowNonWorkspaceAccess: false };
 
+// What agy applies when a key is missing from its settings file. agy saves that
+// file without false booleans (the field is tagged `omitempty` in the binary),
+// so the `allowNonWorkspaceAccess: false` setup writes is gone the next time agy
+// saves anything — trusting a new folder is enough. Measured on agy 1.2.7: right
+// after such a save removed the key, a headless write outside the workspace was
+// still refused ("a tool required the "write_file" permission that headless mode
+// cannot prompt for"), after autoagy's own review had approved it. So a missing
+// key is false. Read as "not false", it made `status` warn about a cap that was
+// in force, and made the policy spend a review on an edit agy then refused.
+export const AGY_SETTING_DEFAULTS = Object.freeze({ allowNonWorkspaceAccess: false });
+
+/**
+ * A setting as agy applies it: the file's value, or agy's own default when the
+ * key is missing. Undefined when the settings could not be read at all, which
+ * says nothing about what agy will do.
+ */
+export function effectiveSetting(settings, key) {
+  if (!settings || typeof settings !== 'object') return undefined;
+  return settings[key] ?? AGY_SETTING_DEFAULTS[key];
+}
+
 /**
  * A `write_file(...)` grant for each directory `writableRoots` names.
  *
@@ -184,8 +205,11 @@ export function planSetup(settings, { grants = RECOMMENDED_GRANTS, settingsChang
   const conflicting = grants.filter((g) => deny.includes(g));
   const changes = [];
   if (settingsChanges) {
+    // Compared as agy applies them: writing a key agy already defaults to the
+    // same value is a change that agy undoes at its next save, and it made every
+    // later `setup` report a change and take a backup for nothing.
     for (const [key, value] of Object.entries(RECOMMENDED_SETTINGS)) {
-      if (settings[key] !== value) changes.push({ key, from: settings[key], to: value });
+      if (effectiveSetting(settings, key) !== value) changes.push({ key, from: settings[key], to: value });
     }
   }
   return { addGrants, removeGrants, changes, conflicting };

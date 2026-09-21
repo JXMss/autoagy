@@ -13,6 +13,7 @@ import { autoagyHome, resolveConfigPath } from './config.mjs';
 import { toAbsolute, uniquePaths, expandHome, expandAnchoredGlob, resolveReal, findExecutable, isWithin } from './paths.mjs';
 import { detectOwnSandbox, probeBwrap, hostBuildId, envBinaryPath, envScrubDisabled } from './confine.mjs';
 import { userHooksPath } from './tripwire.mjs';
+import { effectiveSetting } from './setup.mjs';
 import { readMcpCache } from './mcp.mjs';
 
 export const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -744,9 +745,9 @@ export class HookContext {
     );
   }
 
-  /** The Antigravity CLI settings, as agy read them at startup. */
+  /** The Antigravity CLI settings, as agy read them at startup; null when unreadable. */
   get cliSettings() {
-    return this.memo('cliSettings', () => (this.appDataDir ? readJson(path.join(this.appDataDir, 'settings.json')) : null) ?? {});
+    return this.memo('cliSettings', () => (this.appDataDir ? readJson(path.join(this.appDataDir, 'settings.json')) : null));
   }
 
   /**
@@ -762,10 +763,15 @@ export class HookContext {
    *
    * Only the grants decide, not `writableRoots`: an operator may have written a
    * `write_file(...)` by hand, and a target it covers is one agy will write.
+   *
+   * A missing key is agy's default, false (see `AGY_SETTING_DEFAULTS`): agy
+   * drops the key whenever it saves the file. A file that cannot be read settles
+   * nothing, so the edit is reviewed as usual.
    */
   outsideWriteNeedsGrant(abs) {
-    if (this.cliSettings.allowNonWorkspaceAccess !== false) return false;
-    const allow = Array.isArray(this.cliSettings.permissions?.allow) ? this.cliSettings.permissions.allow : [];
+    const settings = this.cliSettings;
+    if (effectiveSetting(settings, 'allowNonWorkspaceAccess') !== false) return false;
+    const allow = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow : [];
     const granted = allow.flatMap((rule) => {
       const match = /^write_file\((.+)\)$/.exec(String(rule).trim());
       return match ? [match[1]] : [];

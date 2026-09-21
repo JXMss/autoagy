@@ -21,7 +21,7 @@ import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INST
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, readAllDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins, effectiveSetting } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
 import { installTripwire, tripwireInstallable, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, installedPluginDir } from '../lib/tripwire.mjs';
 import { scanMcpServers, readMcpCache, readMcpServers, mcpConfigFiles, MCP_CACHE_FILE } from '../lib/mcp.mjs';
@@ -413,7 +413,7 @@ function status() {
   if (config.commandGrant === 'executor') {
     lines.push(`  command grant   one program (${executorPath(autoagyHome)})${executorInstalled(autoagyHome) ? '' : ' — NOT INSTALLED, run `autoagy setup`'}`);
     const settingsNow = readJsonQuiet(cliSettingsPath(userHome));
-    if (settingsNow && settingsNow.allowNonWorkspaceAccess !== false) {
+    if (settingsNow && effectiveSetting(settingsNow, 'allowNonWorkspaceAccess') !== false) {
       lines.push('  ! that grant only stays narrow while the executor cannot be overwritten. A file-editing');
       lines.push('    tool can still write outside the workspace here (allowNonWorkspaceAccess is not false),');
       lines.push('    and a hook that is not running refuses nothing. Set it to false to close that.');
@@ -543,7 +543,10 @@ function status() {
     const allow = settings.permissions?.allow ?? [];
     lines.push(`  enableTerminalSandbox   ${settings.enableTerminalSandbox}`);
     lines.push(`  toolPermission          ${settings.toolPermission}`);
-    lines.push(`  allowNonWorkspaceAccess ${settings.allowNonWorkspaceAccess}`);
+    // agy drops a false boolean whenever it saves this file, so a missing key is
+    // the normal state of a working install; printing "undefined" read as broken.
+    const nonWorkspace = settings.allowNonWorkspaceAccess === undefined ? `${effectiveSetting(settings, 'allowNonWorkspaceAccess')} (not in the file: agy's default, and agy drops the key when it saves)` : settings.allowNonWorkspaceAccess;
+    lines.push(`  allowNonWorkspaceAccess ${nonWorkspace}`);
     lines.push(`  permissions.allow       ${JSON.stringify(allow)}`);
     const wanted = grantsFor(config, { autoagyHome, home: userHome });
     const missing = wanted.filter((g) => !allow.includes(g));

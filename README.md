@@ -58,7 +58,7 @@ node scripts/install.mjs            # 先看会改什么：node scripts/install.
 4. 修改 `~/.gemini/antigravity-cli/settings.json`（先备份）：
    - `permissions.allow` 加入 `command(*)`、`mcp(*)`、`execute_url(*)`——否则被 autoagy 批准的操作仍会被 Antigravity 自己再弹窗；
    - 确保 `enableTerminalSandbox: true`、`toolPermission: "proceed-in-sandbox"`；
-   - 设 `allowNonWorkspaceAccess: false`——这是**唯一一道在写入那一刻生效**的检查（agy 会跟着符号链接判落点），堵的是「autoagy 检查完、agy 落笔前路径被换掉」那条缝。`writableRoots` 里列的目录会各自拿到一条 `write_file(<目录>)` 授权，照常免审编辑；没事先声明的临时区外编辑则会多一次确认（headless 下失败）。
+   - 设 `allowNonWorkspaceAccess: false`——这是**唯一一道在写入那一刻生效**的检查（agy 会跟着符号链接判落点），堵的是「autoagy 检查完、agy 落笔前路径被换掉」那条缝。`writableRoots` 里列的目录会各自拿到一条 `write_file(<目录>)` 授权，照常免审编辑；没事先声明的临时区外编辑则会多一次确认（headless 下失败）。agy 保存设置时会把值为 `false` 的这一项删掉（比如你信任一个新目录时），而**没写就等于 `false`**（agy 1.2.7 实测），所以文件里看不到它是正常的，`autoagy status` 会显示 `false (not in the file…)`。只有原来是 `true` 时 setup 才会改它，卸载时再改回去。
 5. 在 `~/.gemini/config/hooks.json` 里登记哨兵，并把它的程序装到 `~/.gemini/autoagy/bin/tripwire.mjs`（见本节开头）。这是 `agy plugin` 之外、你自己的文件；登记是合并进去的，里面原有的 hook 不动，文件读不懂时 `setup` 整个停下、一条授权也不写；
 6. `commandGrant: "executor"` 时，把执行器装到 `~/.gemini/autoagy/bin/exec-confined.mjs`。
 

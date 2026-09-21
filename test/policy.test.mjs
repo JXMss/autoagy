@@ -922,5 +922,15 @@ test('an outside-workspace edit is only refused early where agy has already deci
   // And without the setting, agy writes outside the workspace on its own.
   write({ allowNonWorkspaceAccess: true });
   assert.equal(at(headless).verdict, 'review');
+  // agy drops a false boolean whenever it saves the file, and a missing key is
+  // its own false: measured on agy 1.2.7, a headless write outside the
+  // workspace was refused right after trusting a folder removed the key — once
+  // autoagy's review had already spent four seconds approving it.
+  write({ enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox' });
+  assert.equal(at(headless).verdict, 'deny');
+  assert.equal(at(interactive).verdict, 'review');
+  // A file that cannot be read settles nothing, so the edit is reviewed.
+  fs.writeFileSync(settings, '{ not json');
+  assert.equal(at(headless).verdict, 'review');
   write({ enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox' });
 });
