@@ -193,7 +193,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `browser` | `"review"` | 浏览器点击/输入/执行 JS，以及 `browser_subagent` 是否审核 |
 | `policy.file` / `policy.extra` | — | 替换/追加组织安全策略（对应 Codex 的 tenant policy），例如声明哪些仓库、域名是可信的。**必须是绝对路径**（`~` 会被展开，相对路径不接受——那样它会按进程所在的目录解析，同一个值在不同场合指向不同文件）。**写在 agent 能写的地方等于没写**：指到工作区里，agent 就能免审改写审核所依据的策略本身。这两种情况都**不会被加载**，autoagy 退回内置策略并在 stderr 上说明原因。放在 `~/.gemini/autoagy/` 下或别的 agent 写不到的位置 |
 | `circuitBreaker` | `3 / 10 / 50` | 连续拒绝次数 / 窗口内拒绝次数 / 窗口大小 |
-| `log.allowed` / `log.reviews` | `false` | 记录所有放行的操作 / 保存完整审核 prompt 与回复 |
+| `log.allowed` / `log.reviews` | `false` | 记录所有放行的操作 / 保存完整审核 prompt 与回复（`logs/reviews/` 下只保留最近 200 份，每份是一整个 prompt，合计几十 MB 以内） |
 
 配置只从全局文件读取：工作区里的文件 agent 自己能改，所以不接受工作区级配置。环境变量也不能改变策略（hook 继承 agy 的环境变量，而一条获批的越权命令可以给它启动的 agy 设任意环境变量）。
 

@@ -2,8 +2,12 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
+// Full review records kept under logs/reviews/. Each holds a whole prompt (tens to
+// a couple of hundred kilobytes), so this bounds the directory at tens of megabytes.
+export const MAX_REVIEW_RECORDS = 200;
 
 export function logDir(autoagyHome) {
   return path.join(autoagyHome, 'logs');
@@ -92,12 +96,24 @@ export function readAllDecisions(autoagyHome) {
   return records;
 }
 
-/** Keeps the full reviewer exchange when `log.reviews` is enabled. */
-export function writeReviewRecord(autoagyHome, id, data) {
+/**
+ * Keeps the full reviewer exchange when `log.reviews` is enabled.
+ *
+ * Two things this did not do. The name was `<ms>-<conversation prefix>`, so two
+ * reviews in one millisecond — parallel tool calls in one conversation — wrote
+ * the same file and one record silently replaced the other; a random suffix and
+ * an exclusive create make that impossible. And nothing ever removed a record,
+ * so with the setting on the directory grew by a whole prompt per review for as
+ * long as it stayed on. The newest `MAX_REVIEW_RECORDS` are kept; the names start
+ * with the time, so the oldest sort first.
+ */
+export function writeReviewRecord(autoagyHome, id, data, { keep = MAX_REVIEW_RECORDS } = {}) {
   try {
     const dir = path.join(logDir(autoagyHome), 'reviews');
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify(data, null, 2));
+    fs.writeFileSync(path.join(dir, `${id}-${crypto.randomBytes(4).toString('hex')}.json`), JSON.stringify(data, null, 2), { flag: 'wx' });
+    const records = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+    for (const old of records.slice(0, Math.max(0, records.length - keep))) fs.rmSync(path.join(dir, old), { force: true });
   } catch {
     // best effort
   }

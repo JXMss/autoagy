@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, LOCK_WAIT_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings, recordReviewOutcome, listStates, unreadableStateFiles, reservedStateFile, isConversationStateFile } from '../plugin/lib/state.mjs';
 import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
-import { appendDecision } from '../plugin/lib/log.mjs';
+import { appendDecision, writeReviewRecord } from '../plugin/lib/log.mjs';
 import { PLUGIN_DIR } from '../plugin/lib/context.mjs';
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-state-')));
@@ -314,4 +314,17 @@ test('the files under state/ that are not conversations are not read as conversa
   // that `status` reports and `trust` cannot clear.
   assert.equal(reservedStateFile(home, 'bwrap-probe.json'), path.join(dir, 'bwrap-probe.json'));
   assert.throws(() => reservedStateFile(home, 'something-new.json'), /not a registered/);
+});
+
+test('review records neither overwrite each other nor pile up without end', () => {
+  const home = path.join(root, 'reviews-home');
+  const dir = path.join(home, 'logs', 'reviews');
+  // Same id twice: two reviews in one millisecond of one conversation.
+  writeReviewRecord(home, '1700000000000-abcdef12', { n: 1 });
+  writeReviewRecord(home, '1700000000000-abcdef12', { n: 2 });
+  assert.equal(fs.readdirSync(dir).length, 2, 'the second does not replace the first');
+  for (let i = 0; i < 12; i++) writeReviewRecord(home, `17000000${String(10000 + i)}-abcdef12`, { n: i }, { keep: 5 });
+  const left = fs.readdirSync(dir).sort();
+  assert.equal(left.length, 5, 'only the newest are kept');
+  assert.ok(left.every((f) => f.startsWith('1700000010')), 'and they are the newest');
 });
