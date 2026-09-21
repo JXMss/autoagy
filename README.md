@@ -62,6 +62,8 @@ node scripts/install.mjs            # 先看会改什么：node scripts/install.
 node scripts/install.mjs --uninstall          # 加 --purge 同时删除 ~/.gemini/autoagy
 ```
 
+卸载先撤授权，撤成功了才拆别的。撤不回来的时候（通常是 `settings.json` 不是合法 JSON）它会整个停下、退出码 1：插件、哨兵和 setup 记录都原样保留——它们正是站在那几条授权后面的东西，而 setup 记录是日后还能撤回授权的唯一依据，`--purge` 也不例外。修好文件再跑一次即可。`autoagy teardown` 同理。
+
 > 注意：如果只用 `agy plugin disable autoagy` 停用插件，上面的授权仍然存在，绕过沙箱的命令、MCP 调用和浏览器操作会不经审核、也不弹窗直接执行。请用 `autoagy mode off` 暂停（此时这三类操作会改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
 
 **Antigravity IDE / Antigravity 2.0**：插件格式相同，但权限在设置界面里（Settings → Permission Grants）。请手动加上同样三条授权并保持终端沙箱开启，然后在 `config.json` 里设 `"sandbox": "on"`（autoagy 只能自动识别 CLI 的沙箱设置）。

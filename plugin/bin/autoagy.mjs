@@ -842,24 +842,31 @@ function teardown(flags) {
   // tripwire that would have refused tool calls once the plugin was gone. That
   // is the fail-open the README opens with, manufactured on the way out.
   const { env, home, autoagyHome } = managementContext();
-  // Before the grants, and whether or not a setup record exists: a tripwire
-  // left behind refuses every tool call, which is the right failure while
-  // autoagy is installed and the wrong one once it is not.
+  // The grants first, and the tripwire only once they are gone. It used to be
+  // the other way round, on the reasoning that a tripwire left behind refuses
+  // every tool call — the right failure while autoagy is installed, the wrong
+  // one once it is not. But a revert that fails leaves autoagy's grants in
+  // place, so autoagy is still installed in the only sense that matters, and
+  // the tripwire is the one thing still standing behind them. Removing it first
+  // made a failed teardown say "nothing was removed" right after removing it.
+  // With no setup record there is nothing of autoagy's to revert, and the
+  // tripwire goes as before.
+  const report = applyTeardown({ dryRun, env, home });
+  if (report.unreadable) {
+    console.error(`autoagy: ${report.settingsFile} is not valid JSON, so nothing was changed and nothing was removed.`);
+    console.error('  The grants are still in that file, the setup record is still here, and so is the tripwire, which keeps');
+    console.error('  refusing tool calls if the plugin stops loading. So this is fixable: repair the file, then run');
+    console.error('  `autoagy teardown` again.');
+    process.exitCode = 1;
+    return;
+  }
   if (!dryRun) {
     const removed = removeTripwire({ autoagyHome, home });
     if (removed.script || removed.registration) console.log(`Removed the tripwire (${removed.path ?? tripwirePath(autoagyHome)}, ${userHooksPath(home)})`);
   } else {
     console.log('Would remove the tripwire');
   }
-  const report = applyTeardown({ dryRun, env, home });
   if (!report.found) return console.log('No setup record found; nothing else to revert.');
-  if (report.unreadable) {
-    console.error(`autoagy: ${report.settingsFile} is not valid JSON, so nothing was changed and nothing was removed.`);
-    console.error('  The grants are still in that file and the setup record is still here, so this is fixable:');
-    console.error('  repair the file, then run `autoagy teardown` again.');
-    process.exitCode = 1;
-    return;
-  }
   const verb = (done, planned) => (report.dryRun ? planned : done);
   console.log(`${verb('Reverted', 'Would revert')} ${report.settingsFile}`);
   for (const g of report.removedGrants) console.log(`  ${verb('removed', 'would remove')} permissions.allow ${g}`);

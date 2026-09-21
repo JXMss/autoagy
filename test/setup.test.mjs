@@ -256,6 +256,43 @@ test('setup writes no grant when the file its tripwire registers in cannot be re
   }
 });
 
+test('a teardown that cannot revert the grants keeps the tripwire that stands behind them', () => {
+  // It used to remove the tripwire first and then report "nothing was changed
+  // and nothing was removed" — with the grants still in place and nothing left
+  // to notice if the plugin stopped loading.
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-td-'));
+  try {
+    const pinned = path.join(root2, 'pinned-autoagy-home');
+    const userHome = path.join(root2, 'user-home');
+    fs.mkdirSync(userHome, { recursive: true });
+    const pluginDir = pinnedPlugin({ root: root2, configHome: pinned, home: userHome });
+    const settingsFile = cliSettingsPath(userHome);
+    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+    fs.writeFileSync(settingsFile, JSON.stringify({ permissions: { allow: [] } }));
+    const run = (...argv) => spawnSync(process.execPath, [path.join(pluginDir, 'bin', 'autoagy.mjs'), ...argv], { env: { HOME: userHome, PATH: process.env.PATH }, encoding: 'utf8' });
+    assert.equal(run('setup').status, 0);
+    assert.ok(tripwireInstalled({ autoagyHome: pinned, home: userHome }));
+
+    const good = fs.readFileSync(settingsFile, 'utf8');
+    fs.writeFileSync(settingsFile, `${good.trimEnd().slice(0, -1)}, }`);
+    const refused = run('teardown');
+    assert.equal(refused.status, 1, refused.stdout);
+    assert.match(refused.stderr, /not valid JSON/);
+    assert.doesNotMatch(refused.stdout, /Removed the tripwire/);
+    assert.ok(tripwireInstalled({ autoagyHome: pinned, home: userHome }), 'the tripwire is still there');
+    assert.ok(fs.existsSync(path.join(pinned, 'setup.json')), 'and so is the record');
+
+    fs.writeFileSync(settingsFile, good);
+    const removed = run('teardown');
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.match(removed.stdout, /Removed the tripwire/);
+    assert.equal(tripwireInstalled({ autoagyHome: pinned, home: userHome }), false);
+    assert.ok(!JSON.parse(fs.readFileSync(settingsFile, 'utf8')).permissions.allow.includes('command(*)'));
+  } finally {
+    fs.rmSync(root2, { recursive: true, force: true });
+  }
+});
+
 test('teardown reverts through the pin, not through the environment', () => {
   // The bug this covers was in the wiring, not in the library: `setup` wrote the
   // record into the pinned home while `teardown` looked for it in whatever

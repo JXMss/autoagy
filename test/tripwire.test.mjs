@@ -194,20 +194,58 @@ test('setup installs the tripwire and teardown removes it', () => {
   assert.match(body('status'), /tripwireInstalled\(/, 'status must say whether it is there');
 });
 
-// The other half of the same failure, in the uninstaller. The call used to sit
-// inside `if (fs.existsSync(BIN))`, so the case that needed it most — the plugin
-// directory already gone — skipped it, and the script said "uninstalled"
-// anyway. The invariant is the position, which is why it is asserted rather
-// than described.
-test('the uninstaller removes the tripwire before it asks for an installed copy', () => {
+// The other half of the same failure, in the uninstaller, and two invariants
+// about where the removal sits. It once lived inside `if (fs.existsSync(BIN))`,
+// so the case that needed it most — the plugin directory already gone — skipped
+// it. It then moved to the very top, before the grants were reverted, so a
+// revert that failed had already taken away the one thing standing behind the
+// grants it left. Both are positions, which is why they are asserted rather than
+// described; the tests below check the behaviour.
+test('the uninstaller removes the tripwire only after the grants are out, and whether or not an installed copy exists', () => {
   const text = fs.readFileSync(new URL('../scripts/install.mjs', import.meta.url), 'utf8');
   const start = text.indexOf('function uninstall(');
   assert.ok(start > 0, 'uninstall() not found');
   const body = text.slice(start, text.indexOf('\n}', start));
   const removal = body.indexOf('removeTripwire(');
   assert.ok(removal > 0, 'uninstall must remove it, or a half-removed install has no way back');
-  const guard = body.indexOf('existsSync(BIN)');
-  assert.ok(guard > 0 && removal < guard, 'and outside the existsSync(BIN) branch, which is the case it exists for');
+  const stop = body.indexOf('if (!reverted)');
+  assert.ok(stop > 0, 'uninstall must stop when the grants did not come out');
+  assert.ok(body.indexOf('existsSync(BIN)') < stop && body.indexOf('applyTeardown(') < stop, 'both ways of reverting come before that check');
+  assert.ok(removal > stop, 'and the removal after it — outside the existsSync(BIN) branch, and only once the grants are gone');
+});
+
+test('an uninstall whose grants cannot be reverted keeps everything, --purge included', () => {
+  // The reported failure: a revert refused (settings not valid JSON), then the
+  // tripwire and the plugin removed anyway, and `--purge` deleting the record
+  // that makes the grants revertable at all. A second run found no record and
+  // printed "autoagy uninstalled." with exit 0 over grants nobody could revert.
+  const script = fileURLToPath(new URL('../scripts/install.mjs', import.meta.url));
+  const custom = path.join(root, 'unrevertable');
+  installTripwire({ autoagyHome: custom, home, pluginDir });
+  const settingsFile = path.join(home, '.gemini', 'antigravity-cli', 'settings.json');
+  fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+  fs.writeFileSync(path.join(custom, 'setup.json'), JSON.stringify({ time: new Date().toISOString(), settingsFile, addedGrants: ['command(*)'], priorValues: {} }));
+  fs.writeFileSync(settingsFile, '{ "permissions": { "allow": ["command(*)"] }, }');
+  fs.rmSync(pluginDir, { recursive: true, force: true });
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const res = spawnSync(process.execPath, [script, '--uninstall', '--purge'], { encoding: 'utf8', env: { HOME: home, PATH: '/nonexistent' } });
+    assert.equal(res.status, 1, `attempt ${attempt}: ${res.stdout}`);
+    assert.doesNotMatch(res.stdout, /autoagy uninstalled\./, `attempt ${attempt}`);
+    assert.match(res.stderr, /could not be taken out/);
+    assert.ok(fs.existsSync(path.join(custom, 'setup.json')), `attempt ${attempt}: the record that makes the grants revertable survives --purge`);
+    assert.ok(tripwireInstalled({ autoagyHome: custom, home }), `attempt ${attempt}: and so does the tripwire standing behind them`);
+  }
+
+  // Once the file is repaired, the same command finishes the job.
+  fs.writeFileSync(settingsFile, JSON.stringify({ permissions: { allow: ['command(*)'] } }));
+  const res = spawnSync(process.execPath, [script, '--uninstall', '--purge'], { encoding: 'utf8', env: { HOME: home, PATH: '/nonexistent' } });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /autoagy uninstalled\./);
+  assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).permissions.allow, []);
+  assert.equal(tripwireInstalled({ autoagyHome: custom, home }), false);
+  assert.equal(fs.existsSync(custom), false, 'and --purge now removes the state');
+  fs.rmSync(settingsFile, { force: true });
 });
 
 test('an install whose plugin directory was deleted by hand still uninstalls', () => {

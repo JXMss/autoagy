@@ -65,13 +65,6 @@ Tip: alias autoagy="node ${BIN}"`);
 }
 
 function uninstall() {
-  // The tripwire first, and deliberately not gated on the installed copy
-  // existing: one left behind refuses every tool call, and it is registered in a
-  // file `agy plugin` does not manage — so the install that most needs this is
-  // the one where the plugin directory is already gone. This script runs from
-  // the clone, whose lib is always here, which is why the call can be
-  // unconditional.
-  //
   // `$HOME`, the same home this script installs into (INSTALLED is built from
   // it) and the one `os.homedir()` reports. The plugin itself prefers the
   // account database's home for anything the policy reads, so an install made
@@ -82,38 +75,55 @@ function uninstall() {
   // when the plugin directory is the thing that went missing, the tripwire's
   // own registration carries it instead (the registered program is
   // `<autoagyHome>/bin/tripwire.mjs`), and only then does the environment get a
-  // say. Both halves are asked about separately, because `tripwireInstalled` is
-  // both at once while the state that matters most here is the one where they
-  // disagree — a registration whose program is gone, still refusing every call.
+  // say.
   const installedPin = hookPins(INSTALLED);
   const env = { ...process.env };
   const pinnedHome = installedPin.configHome ?? registeredAutoagyHome(userHome);
   if (pinnedHome) env.AUTOAGY_HOME = pinnedHome;
   const autoagyHome = resolveAutoagyHome(env, userHome);
+
+  // The grants come out first, and nothing else is taken away unless they did.
+  // They have to come out even when the installed copy is gone — this script
+  // runs from the clone, whose lib is always here — because the record `setup`
+  // wrote is what makes `command(*)`, `mcp(*)` and `execute_url(*)` revertable
+  // at all. And when they could not come out, everything that stands behind
+  // them stays: the tripwire, the plugin, and the record itself. This used to
+  // carry on regardless, so a failed revert still removed the tripwire and the
+  // plugin, and `--purge` then deleted the record — leaving grants that no
+  // command could revert any more, and a second run that printed
+  // "autoagy uninstalled." with exit 0.
+  let reverted;
+  if (fs.existsSync(BIN)) {
+    // The exit status is the only word on whether the grants came back out, and
+    // the installed command refuses (status 1) exactly when it could not. It
+    // also removes the tripwire when it succeeds; the call below covers the
+    // homes it cannot see.
+    reverted = run(process.execPath, [BIN, 'teardown', ...(dryRun ? ['--dry-run'] : [])], { allowFailure: true });
+  } else {
+    const report = applyTeardown({ dryRun, env, home: userHome });
+    reverted = !report.unreadable;
+    if (reverted) console.log(report.found ? `${dryRun ? 'Would revert' : 'Reverted'} ${report.settingsFile}` : `No setup record found in ${autoagyHome}; nothing else to revert.`);
+  }
+  if (!reverted) {
+    console.error(`autoagy: the permission grants could not be taken out of ${cliSettingsPath(userHome)} (is it valid JSON?), so nothing else was removed either:`);
+    console.error('  the plugin, its tripwire and the setup record are all still in place, because each of them is what stands');
+    console.error('  behind those grants — and the record is what lets them be reverted at all. Repair the file and run this again.');
+    process.exitCode = 1;
+    return;
+  }
+
+  // Deliberately not gated on the installed copy existing: a tripwire left
+  // behind refuses every tool call, and it is registered in a file `agy plugin`
+  // does not manage — so the install that most needs this is the one where the
+  // plugin directory is already gone. Both halves are asked about separately,
+  // because `tripwireInstalled` is both at once while the state that matters
+  // most here is the one where they disagree — a registration whose program is
+  // gone, still refusing every call.
   const tripwire = dryRun
     ? { script: fs.existsSync(registeredTripwirePath(userHome) ?? tripwirePath(autoagyHome)), registration: tripwireRegistered({ home: userHome }) }
     : removeTripwire({ autoagyHome, home: userHome });
   if (tripwire.script || tripwire.registration) {
     console.log(`${dryRun ? 'Would remove' : 'Removed'} the tripwire${tripwire.script ? ` (${tripwire.path ?? registeredTripwirePath(userHome) ?? tripwirePath(autoagyHome)})` : ''}${tripwire.registration ? ` from ${userHooksPath(userHome)}` : ''}`);
-  }
-
-  // The grants have to come back out even when the installed copy is gone. That
-  // is the same argument the tripwire removal above makes — this script runs
-  // from the clone, whose lib is always here — and it is the difference between
-  // "uninstalled" and a silent fail-open: the record `setup` wrote is what makes
-  // `command(*)`, `mcp(*)` and `execute_url(*)` revertable at all.
-  const warnings = [];
-  if (fs.existsSync(BIN)) {
-    // The exit status is the only word on whether the grants came back out, and
-    // the installed command refuses (status 1) exactly when it could not — so
-    // it is checked rather than discarded.
-    if (!run(process.execPath, [BIN, 'teardown', ...(dryRun ? ['--dry-run'] : [])], { allowFailure: true })) {
-      warnings.push(`\`autoagy teardown\` could not revert ${cliSettingsPath(userHome)}; the permission grants may still be in it. Run it again and follow what it says.`);
-    }
-  } else {
-    const report = applyTeardown({ dryRun, env, home: userHome });
-    if (report.unreadable) warnings.push(`${report.settingsFile} is not valid JSON, so the permission grants are still in it. Repair the file, then run \`autoagy teardown\`.`);
-    console.log(report.found ? `${dryRun ? 'Would revert' : 'Reverted'} ${report.settingsFile}` : `No setup record found in ${autoagyHome}; nothing else to revert.`);
   }
   if (dryRun) return console.log(`(dry run) would remove ${INSTALLED}`);
   if (!(agyAvailable() && run('agy', ['plugin', 'uninstall', 'autoagy'], { allowFailure: true }))) {
@@ -124,13 +134,9 @@ function uninstall() {
     console.log(`Removed ${autoagyHome} (config, state and logs).`);
   }
   // Anything that is still in place gets said out loud, and "uninstalled" is not
-  // printed over it: a tripwire still registered keeps refusing every tool call,
-  // and grants that could not be reverted keep applying with nobody reviewing.
+  // printed over it: a tripwire still registered keeps refusing every tool call.
   if (tripwireInstalled({ autoagyHome, home: userHome })) {
-    warnings.push(`the tripwire is still registered in ${userHooksPath(userHome)} — delete its \`autoagy-tripwire\` key there, or every tool call stays refused.`);
-  }
-  if (warnings.length > 0) {
-    for (const warning of warnings) console.error(`autoagy: ${warning}`);
+    console.error(`autoagy: the tripwire is still registered in ${userHooksPath(userHome)} — delete its \`autoagy-tripwire\` key there, or every tool call stays refused.`);
     process.exitCode = 1;
     return;
   }
