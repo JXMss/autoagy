@@ -187,7 +187,10 @@ These are documented, accepted limits — the full reasoning is in the
 ## Privacy
 
 With the default reviewer (`backend: "agy"`) a headless agent runs locally under
-your own Antigravity login and **nothing is sent to any third party**.
+your own Antigravity login and **nothing is sent to any third party**. It is a
+real Antigravity session, though, so **each review spends your quota** — at
+4–12 seconds a review, a day of heavy reviewing is not free. An OpenAI-compatible
+backend trades that for API cost and for sending the material described below.
 
 With an OpenAI-compatible backend, each review POSTs: the policy text, a
 budget-trimmed transcript (length caps only — **no redaction**, so anything
