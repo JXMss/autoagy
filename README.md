@@ -1,5 +1,9 @@
 # autoagy — 给 Antigravity 的 Codex 式 Auto 模式
 
+[English](README.en.md) ｜ [设计依据与实测记录](docs/design.md)
+
+> **非官方项目**：与 Google（Antigravity）和 OpenAI（Codex）都没有关联，也未获其背书。
+
 autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 OpenAI Codex 的 **“Approve for me”（auto-review）** 模式实现了 Antigravity 的 auto 模式：
 
 - 安全的操作（读文件、改工作区内的文件、在终端沙箱里跑命令……）**直接执行**，不打断你；
@@ -40,7 +44,7 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 要求：Node.js ≥ 20，Antigravity CLI（`agy`）≥ 1.2。
 
 ```bash
-git clone <this repo> autoagy && cd autoagy
+git clone https://github.com/JXMss/autoagy autoagy && cd autoagy
 node scripts/install.mjs            # 先看会改什么：node scripts/install.mjs --dry-run
 ```
 
