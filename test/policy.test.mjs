@@ -433,6 +433,27 @@ test('deletion targets follow symlinks the way rm does', () => {
   assert.deepEqual([nested.inside_workspace, nested.resolves_to, nested.type], [false, path.join(outside, 'data.db'), 'file']);
 });
 
+test('a command reading a credential through a symlink is reviewed, as the read tools are', () => {
+  const env = path.join(dirs.workspace, '.env');
+  fs.writeFileSync(env, 'API_KEY=placeholder');
+  fs.symlinkSync(env, path.join(dirs.workspace, 'settings.txt'));
+  fs.symlinkSync(path.join(dirs.home, '.ssh'), path.join(dirs.workspace, 'keys'));
+  try {
+    assert.equal(verdict('view_file', { AbsolutePath: path.join(dirs.workspace, 'settings.txt') }).category, 'credential-read', 'the read tool has always followed the link');
+    const outside = configWith({ ownSandbox: 'off' });
+    assert.equal(verdict('run_command', { CommandLine: 'cat settings.txt' }, { config: outside }).category, 'credential-read');
+    // A name that matches no pattern, through a link into a store that does.
+    assert.equal(verdict('run_command', { CommandLine: 'cat keys/config' }, { config: outside }).category, 'credential-read');
+    // Inside the own sandbox a workspace `.env` is not hidden, so the link still
+    // reaches it; a link into `~/.ssh` reaches the masked directory and does not.
+    const own = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe };
+    assert.equal(verdict('run_command', { CommandLine: 'cat settings.txt' }, own).category, 'credential-read');
+    assert.equal(verdict('run_command', { CommandLine: 'cat keys/config' }, own).category, 'sandboxed-command');
+  } finally {
+    for (const f of ['.env', 'settings.txt', 'keys']) fs.rmSync(path.join(dirs.workspace, f), { force: true });
+  }
+});
+
 test('credential reads: symlinks, searches over credential stores, and commands that name them', () => {
   const key = path.join(dirs.home, '.ssh', 'id_ed25519');
   fs.writeFileSync(key, 'placeholder');

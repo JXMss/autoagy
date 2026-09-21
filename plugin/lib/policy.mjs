@@ -593,12 +593,17 @@ function credentialArgument(ctx, analysis, cwd, { hiddenBySandbox = false } = {}
     if (wildcard >= 0) value = value.slice(0, wildcard).replace(/[^\\/]*$/, '') || '.';
     const abs = toAbsolute(value, base, ctx.home);
     if (!abs) continue;
-    // A credential store by name, or a path under /proc a walk would take into
-    // one. `/proc/cpuinfo` is neither and stays allowed.
-    const credential = isCredentialPath(ctx, abs);
-    if (!credential && !(isProcessTreePath(abs) && walkReachesProcessInfo(abs))) continue;
-    if (hiddenBySandbox && hiddenByOwnSandbox(ctx, abs)) continue;
-    return abs;
+    // Both spellings, as `classifyRead` judges them: `cat notes.txt` where
+    // `notes.txt` links to `.env` reads `.env`. Only the spelling was checked
+    // here, so the read tools reviewed a read that a command made without one.
+    for (const p of new Set([abs, resolveReal(abs)])) {
+      // A credential store by name, or a path under /proc a walk would take
+      // into one. `/proc/cpuinfo` is neither and stays allowed.
+      const credential = isCredentialPath(ctx, p);
+      if (!credential && !(isProcessTreePath(p) && walkReachesProcessInfo(p))) continue;
+      if (hiddenBySandbox && hiddenByOwnSandbox(ctx, p)) continue;
+      return p;
+    }
   }
   return null;
 }
