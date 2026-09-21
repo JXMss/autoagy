@@ -408,7 +408,14 @@ export function readOnlyPaths(ctx) {
  */
 /** The protected workspace directories this command could create, given its writable roots. */
 export function writableControlPaths(ctx) {
-  return ctx.metadataControlPaths.filter((p) => ctx.writableRoots.some((root) => isWithin(p, root)) && tmpfsMountable(p));
+  // The parent has to be there. A declared root that does not exist yet has no
+  // `.git` to protect, and mounting one anyway failed every command where the
+  // root sits under the read-only / (`Can't mkdir parents …: Read-only file
+  // system`), or had bwrap make the mount points on the host and leave them
+  // there where it sits under a writable root. `missingControlPaths` has always
+  // asked the same thing; the protection starts with the first command after the
+  // root exists.
+  return ctx.metadataControlPaths.filter((p) => ctx.writableRoots.some((root) => isWithin(p, root)) && fs.existsSync(path.dirname(p)) && tmpfsMountable(p));
 }
 
 /**
@@ -506,8 +513,19 @@ export function removeControlPlaceholders(paths) {
  */
 export function confinedCommandLine(ctx, commandLine, { placeholders } = {}) {
   const args = [...BASE_ARGS];
+  // Every mount goes where the path really lands. bwrap resolves a destination
+  // inside the new root, where an absolute symlink points at nothing yet, so a
+  // link in any component of the path — `~/.gemini` kept in a dotfiles
+  // repository, a workspace `.codex` pointing out of it — failed the mount and
+  // with it every command (`Can't mount tmpfs on /newroot/…: No such file or
+  // directory`), while the self-check still recorded `verified`. The same trap
+  // as a protected name that is a file (see tmpfsMountable), for links. Mounted
+  // at the real path, the link still leads there from inside the sandbox, so the
+  // protection holds however the command spells the path. The credential mounts
+  // below already did this.
+  const real = (paths) => uniquePaths(paths.map(resolveReal));
   // Later mounts win, so the read-only paths go on top of the writable roots.
-  for (const root of ctx.writableRoots) args.push('--bind-try', root, root);
+  for (const root of real(ctx.writableRoots)) args.push('--bind-try', root, root);
   // Protected workspace directories are mounted twice, in this order. The empty
   // read-only mount comes first; the bind of the real directory comes after and
   // therefore wins when the directory is there. That gives the conditional the
@@ -518,8 +536,8 @@ export function confinedCommandLine(ctx, commandLine, { placeholders } = {}) {
   // `--ro-bind-try` would silently skip a missing path, and a single `--tmpfs`
   // would hide the real directory. Measured on bwrap 0.9.0: the source of the
   // later bind resolves against the original root, not the fresh tmpfs.
-  for (const p of writableControlPaths(ctx)) args.push('--perms', '555', '--tmpfs', p, '--remount-ro', p);
-  for (const p of readOnlyPaths(ctx)) args.push('--ro-bind-try', p, p);
+  for (const p of real(writableControlPaths(ctx))) args.push('--perms', '555', '--tmpfs', p, '--remount-ro', p);
+  for (const p of real(readOnlyPaths(ctx))) args.push('--ro-bind-try', p, p);
   // The mount points also have to exist on the host, so bwrap has somewhere to
   // mount and so they can be recorded and cleaned up afterwards.
   const made = controlPlaceholders(ctx);

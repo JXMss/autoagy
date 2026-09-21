@@ -977,6 +977,73 @@ test('a declared writable root gets the same read-only metadata as the workspace
   assert.ok(!ro.includes(declared), 'the declared root itself stays writable');
 });
 
+// bwrap resolves a mount destination inside the new root, where an absolute
+// symlink points at nothing yet: `Can't mount tmpfs on /newroot/…: No such file
+// or directory`, exit 1, before the command starts. That is any component of the
+// path, not only the last — so `~/.gemini` kept in a dotfiles repository, which is
+// how stow and chezmoi lay it out, failed every sandboxed command through the
+// mount of autoagy's own directory, while the self-check still said `verified`.
+test('an absolute symlink anywhere in a mounted path does not fail every command', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  const d = makeSandboxDirs();
+  try {
+    const dotfiles = path.join(d.root, 'dotfiles');
+    fs.mkdirSync(path.join(dotfiles, 'codex'), { recursive: true });
+    fs.symlinkSync(path.join(dotfiles, 'codex'), path.join(d.workspace, '.codex'));
+    fs.renameSync(path.join(d.home, '.gemini'), path.join(dotfiles, 'gemini'));
+    fs.symlinkSync(path.join(dotfiles, 'gemini'), path.join(d.home, '.gemini'));
+    fs.mkdirSync(d.env.AUTOAGY_HOME, { recursive: true });
+    const ctx = new HookContext(payloadFor(d, 'run_command', { CommandLine: 'true' }), {
+      config: configWith({ ownSandbox: 'on' }),
+      env: d.env,
+      home: d.home,
+      host: { kind: 'cli', cwd: d.workspace, argv: ['agy'], flags: { skipPermissions: false, sandbox: false, addDirs: [] } },
+      tempRoots: [d.tmp],
+      bwrapProbe: () => real,
+    });
+    const script = [
+      'echo ran',
+      `touch ${JSON.stringify(path.join(d.workspace, '.codex', 'x'))} 2>/dev/null`,
+      `touch ${JSON.stringify(path.join(d.env.AUTOAGY_HOME, 'x'))} 2>/dev/null`,
+      'true',
+    ].join('; ');
+    const res = spawnSync('/bin/sh', ['-c', confinedCommandLine(ctx, script)], { cwd: d.workspace, encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /ran/);
+    // Mounted where the link lands, and still read-only through the link.
+    assert.equal(fs.existsSync(path.join(dotfiles, 'codex', 'x')), false, 'the workspace .codex behind its symlink stays read-only');
+    assert.equal(fs.existsSync(path.join(dotfiles, 'gemini', 'autoagy', 'x')), false, "and so does autoagy's own directory");
+  } finally {
+    d.cleanup();
+  }
+});
+
+// A declared root that does not exist yet has no `.git` to protect, and the
+// mount of one either failed every command (`Can't mkdir parents …: Read-only
+// file system`, where the root sits under the read-only /) or had bwrap create
+// the empty mount points on the host and leave them there (where it sits under a
+// writable root).
+test('a declared writable root that does not exist yet neither fails commands nor gets directories made in it', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  const d = makeSandboxDirs();
+  try {
+    const underRo = path.join(d.root, 'not-yet');
+    const underRw = path.join(d.tmp, 'not-yet');
+    const ctx = new HookContext(payloadFor(d, 'run_command', { CommandLine: 'true' }), {
+      config: configWith({ ownSandbox: 'on', writableRoots: [underRo, underRw] }),
+      env: d.env,
+      home: d.home,
+      host: { kind: 'cli', cwd: d.workspace, argv: ['agy'], flags: { skipPermissions: false, sandbox: false, addDirs: [] } },
+      tempRoots: [d.tmp],
+      bwrapProbe: () => real,
+    });
+    const res = spawnSync('/bin/sh', ['-c', confinedCommandLine(ctx, 'echo ran')], { cwd: d.workspace, encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /ran/);
+    assert.equal(fs.existsSync(underRw), false, 'nothing is created on the host where the root will be');
+  } finally {
+    d.cleanup();
+  }
+});
+
 test('a protected name that is a file does not fail every command in the workspace', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
   // `git worktree add` and a checked-out submodule leave `.git` as a *file*
   // holding `gitdir: …`, and `--tmpfs` cannot mount on a file: measured, bwrap
