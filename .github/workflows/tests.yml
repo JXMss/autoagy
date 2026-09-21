@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor, and
+      # bubblewrap needs them. Without this line every real-sandbox test skips —
+      # and the ones that skip are the layer commands run *unreviewed* inside, so
+      # the suite would report success while that layer was never started. The
+      # last step turns exactly that silence into a failure.
+      - name: allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: install bubblewrap and util-linux flock
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap util-linux
+
+      - name: bubblewrap actually starts here
+        run: bwrap --ro-bind / / --dev /dev true && echo "bubblewrap starts"
+
+      - name: tests
+        run: |
+          set -o pipefail
+          node --test --test-reporter=tap test/*.test.mjs | tee tap.txt
+
+      - name: no test may skip in CI
+        run: node scripts/assert-no-skips.mjs tap.txt
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: tap-output
+          path: tap.txt
+
+# `npm run validate` (agy plugin validate) is not run here: it needs the
+# Antigravity CLI, which this runner does not have. It is a local check — see
+# README's 开发 section.
