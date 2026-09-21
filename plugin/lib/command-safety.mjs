@@ -166,9 +166,35 @@ export function shellScriptOf(argv) {
     const idx = argv.findIndex((a) => a === '-S' || a === '--split-string');
     if (idx >= 0) return argv.slice(idx + 1).join(' ');
   }
-  if (name === 'su') {
-    const idx = argv.findIndex((a) => a === '-c' || a === '--command');
-    if (idx >= 0) return argv[idx + 1] ?? '';
+  // `su -c` and util-linux `script -c` both run their argument as a shell
+  // command, and both parse with getopt_long: `su -lc CMD`, `su --comm=CMD` and
+  // `script -qc CMD` are the same option. Only the exact `-c`/`--command` were
+  // found, and `script` not at all — so `script -qc 'rm -rf …' /dev/null` was
+  // judged as `script` alone.
+  if (name === 'su' || name === 'script') return optionValue(argv.slice(1), 'c', '--command');
+  return null;
+}
+
+/**
+ * The value of a getopt-style option that takes one, however it is spelled, or
+ * null: `-c V`, `-cV`, a cluster ending in it (`-qc V`), `--command V`,
+ * `--command=V`, and any prefix of the long name (`--comm=V`), which
+ * getopt_long accepts when it is unambiguous and refuses otherwise.
+ */
+function optionValue(args, letter, long) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') return null;
+    if (arg.startsWith('--')) {
+      const eq = arg.indexOf('=');
+      const name = eq >= 0 ? arg.slice(0, eq) : arg;
+      if (name.length >= 3 && long.startsWith(name)) return eq >= 0 ? arg.slice(eq + 1) : (args[i + 1] ?? '');
+      continue;
+    }
+    if (arg.startsWith('-') && arg.length > 1) {
+      const at = arg.indexOf(letter, 1);
+      if (at > 0) return at === arg.length - 1 ? (args[i + 1] ?? '') : arg.slice(at + 1);
+    }
   }
   return null;
 }
@@ -309,7 +335,7 @@ export function dangerousArgv(argv) {
       if (args.some((a) => a.startsWith('of='))) return hit('dd-write', '`dd of=...` overwrites its target');
       return null;
     case 'truncate':
-      if (args.some((a) => a === '-s' || a.startsWith('--size') || /^-s\S/.test(a))) return hit('truncate', '`truncate` discards file contents');
+      if (hasShortFlag(args, 's') || hasLongFlag(args, '--size')) return hit('truncate', '`truncate` discards file contents');
       return null;
     // Windows (PowerShell / cmd.exe) equivalents.
     case 'Remove-Item':
@@ -333,10 +359,9 @@ export function dangerousArgv(argv) {
 function rmArgsIncludeForce(args) {
   for (const arg of args) {
     if (arg === '--') break;
-    if (arg === '--force') return true;
     if (arg.startsWith('-') && !arg.startsWith('--') && arg.slice(1).includes('f')) return true;
   }
-  return false;
+  return hasLongFlag(args, '--force');
 }
 
 function windowsRemoveIsForced(name, args) {
@@ -372,35 +397,56 @@ function hasShortFlag(args, letter) {
   return args.some((a) => a.startsWith('-') && !a.startsWith('--') && a.slice(1).includes(letter));
 }
 
+/**
+ * Whether `args` holds the long option `full`, however it is spelled. GNU
+ * getopt_long and git's parse-options both accept any unambiguous prefix, so
+ * `rm --forc`, `git reset --har` and `git clean --f` are `--force`, `--hard`
+ * and `--force`; an ambiguous prefix is an error, not some other option, so
+ * every prefix counts here and the cost of a wrong match is one review.
+ * `--name=value` is the option too. Stops at `--`.
+ */
+function hasLongFlag(args, full) {
+  for (const arg of args) {
+    if (arg === '--') return false;
+    if (!arg.startsWith('--') || arg.length < 3) continue;
+    const eq = arg.indexOf('=');
+    if (full.startsWith(eq >= 0 ? arg.slice(0, eq) : arg)) return true;
+  }
+  return false;
+}
+
+/** A short flag in any cluster, or its long name in any spelling. */
+const hasFlag = (args, letter, long) => (letter !== null && hasShortFlag(args, letter)) || hasLongFlag(args, long);
+
 function gitDangerous(argv) {
   const { subcommand, args } = gitSubcommand(argv);
   const hit = (description) => ({ kind: 'git-destructive', argv, description });
   switch (subcommand) {
     case 'reset':
-      if (args.some((a) => a === '--hard' || a === '--merge' || a === '--keep')) return hit('`git reset --hard` discards uncommitted work');
+      if (hasLongFlag(args, '--hard') || hasLongFlag(args, '--merge') || hasLongFlag(args, '--keep')) return hit('`git reset --hard` discards uncommitted work');
       return null;
     case 'clean':
-      if (args.includes('--force') || hasShortFlag(args, 'f')) return hit('`git clean -f` deletes untracked files');
+      if (hasFlag(args, 'f', '--force')) return hit('`git clean -f` deletes untracked files');
       return null;
     case 'checkout':
-      if (args.includes('-f') || args.includes('--force') || args.includes('--') || args.includes('.') || args.includes('--ours') || args.includes('--theirs')) {
+      if (hasFlag(args, 'f', '--force') || args.includes('--') || args.includes('.') || hasLongFlag(args, '--ours') || hasLongFlag(args, '--theirs')) {
         return hit('`git checkout` that overwrites working-tree changes');
       }
       return null;
     case 'restore': {
-      const staged = args.includes('--staged') || args.includes('-S');
-      const worktree = args.includes('--worktree') || args.includes('-W');
+      const staged = hasFlag(args, 'S', '--staged');
+      const worktree = hasFlag(args, 'W', '--worktree');
       if (!staged || worktree) return hit('`git restore` discards working-tree changes');
       return null;
     }
     case 'switch':
-      if (args.includes('--discard-changes') || args.includes('-f') || args.includes('--force')) return hit('`git switch --discard-changes`');
+      if (hasLongFlag(args, '--discard-changes') || hasFlag(args, 'f', '--force')) return hit('`git switch --discard-changes`');
       return null;
     case 'stash':
       if (args[0] === 'drop' || args[0] === 'clear') return hit(`\`git stash ${args[0]}\` deletes stashed work`);
       return null;
     case 'branch':
-      if (args.includes('-D') || ((args.includes('-d') || args.includes('--delete')) && (args.includes('-f') || args.includes('--force')))) {
+      if (hasShortFlag(args, 'D') || (hasFlag(args, 'd', '--delete') && hasFlag(args, 'f', '--force'))) {
         return hit('`git branch -D` force-deletes a branch');
       }
       return null;
@@ -409,7 +455,7 @@ function gitDangerous(argv) {
       return null;
     case 'gc':
     case 'prune':
-      if (subcommand === 'prune' || args.some((a) => a.startsWith('--prune'))) return hit('git pruning destroys unreachable objects');
+      if (subcommand === 'prune' || hasLongFlag(args, '--prune')) return hit('git pruning destroys unreachable objects');
       return null;
     case 'update-ref':
       if (args.includes('-d')) return hit('`git update-ref -d` deletes a ref');
@@ -418,13 +464,15 @@ function gitDangerous(argv) {
     case 'filter-repo':
       return hit(`\`git ${subcommand}\` rewrites history`);
     case 'worktree':
-      if (args[0] === 'remove' && (args.includes('-f') || args.includes('--force'))) return hit('`git worktree remove --force`');
+      if (args[0] === 'remove' && hasFlag(args, 'f', '--force')) return hit('`git worktree remove --force`');
       return null;
     case 'rm':
-      if (args.includes('-f') || args.includes('--force')) return hit('`git rm -f` deletes files with local changes');
+      if (hasFlag(args, 'f', '--force')) return hit('`git rm -f` deletes files with local changes');
       return null;
     case 'push':
-      if (args.some((a) => a === '--force' || a === '-f' || a === '--mirror' || a === '--delete' || a === '-d' || /^\+/.test(a) || /^:/.test(a))) {
+      // `--force` by prefix only: `--force-with-lease` is not a prefix of it, and
+      // stays the lease-checked push it is.
+      if (hasFlag(args, 'f', '--force') || hasLongFlag(args, '--mirror') || hasFlag(args, 'd', '--delete') || args.some((a) => /^\+/.test(a) || /^:/.test(a))) {
         return hit('`git push` that overwrites or deletes remote refs');
       }
       return null;
@@ -445,12 +493,31 @@ const SIMPLE_SAFE = new Set([
   'groups', 'tty', 'locale', 'getconf', 'lscpu', 'sleep', 'where',
 ]);
 
+// Version and help probes, allowed without a sandbox: a dashed flag is parsed by
+// the tool before it reads anything else, so `node --version` runs nothing the
+// workspace controls. This list is what that sentence has to be true of. It is
+// not for the tools whose probe starts from a project file: `mvn` reads
+// `.mvn/jvm.config` (JVM options, `-javaagent` included), `yarn` runs the
+// `yarnPath` its rc file names, `cargo`/`rustc`/`rustup` go through rustup,
+// which follows a `rust-toolchain.toml` `path` to a toolchain the project
+// chose, `dotnet` resolves its SDK through `global.json`, and `gradle.properties`
+// can name the JDK `gradle` runs. They are reviewed where nothing confines them.
 const VERSION_PROBE_TOOLS = new Set([
-  'node', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'deno', 'python', 'python3', 'pip', 'pip3', 'uv', 'poetry', 'go',
-  'cargo', 'rustc', 'rustup', 'java', 'javac', 'gcc', 'g++', 'clang', 'make', 'cmake', 'git', 'docker', 'kubectl',
-  'ruby', 'gem', 'php', 'dotnet', 'swift', 'gradle', 'mvn', 'terraform', 'conda', 'gh', 'agy', 'codex', 'tsc',
+  'node', 'npm', 'npx', 'pnpm', 'bun', 'deno', 'python', 'python3', 'pip', 'pip3', 'uv', 'poetry', 'go',
+  'java', 'javac', 'gcc', 'g++', 'clang', 'make', 'cmake', 'git', 'docker', 'kubectl',
+  'ruby', 'gem', 'php', 'swift', 'terraform', 'conda', 'gh', 'agy', 'codex', 'tsc',
 ]);
-const VERSION_FLAGS = new Set(['--version', '-V', 'version', '--help', '-h', 'help']);
+const VERSION_FLAGS = new Set(['--version', '-V', '--help', '-h']);
+// A bare `version` or `help` is the tool's own subcommand for a few tools, and a
+// file name or a build target for the rest: `node help` runs `./help`,
+// `python3 version` runs `./version` (measured, both), `make help` runs the
+// Makefile's `help` target and `gradle help` evaluates the build script. Those
+// files are ordinary workspace files, edited without review. So a bare probe
+// counts only where it is a built-in that takes no project input.
+const BARE_PROBES = new Map([
+  ['version', new Set(['go', 'docker', 'terraform'])],
+  ['help', new Set(['go', 'docker', 'kubectl', 'gh', 'terraform', 'npm', 'pip', 'pip3', 'gem', 'deno'])],
+]);
 
 const UNSAFE_FIND_OPTIONS = new Set(['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fls', '-fprint', '-fprint0', '-fprintf']);
 
@@ -651,7 +718,8 @@ export function isKnownSafeCommandLine(analysisOrSource) {
 export function isSafeArgv(argv) {
   const name = executableName(argv[0]);
   const args = argv.slice(1);
-  if (VERSION_PROBE_TOOLS.has(name) && args.length === 1 && VERSION_FLAGS.has(args[0])) return true;
+  if (args.length === 1 && VERSION_PROBE_TOOLS.has(name) && VERSION_FLAGS.has(args[0])) return true;
+  if (args.length === 1 && BARE_PROBES.get(args[0])?.has(name)) return true;
   const script = shellScriptOf(argv);
   if (script !== null && SHELLS.has(name)) return script.trim() !== '' && isKnownSafeCommandLine(script);
   if (name === 'timeout' || name === 'nice' || name === 'time' || name === 'nohup' || name === 'env') {
@@ -699,17 +767,23 @@ export function isSafeArgv(argv) {
       return isSafeSed(args);
     case 'git':
       return isSafeGit(argv);
-    case 'cargo':
-      return args[0] === 'check' || args[0] === 'tree' || args[0] === 'metadata';
+    // No `cargo` case: `cargo check` compiles the crate, which runs its
+    // `build.rs` and proc macros, and every cargo command goes through rustup and
+    // `.cargo/config.toml` (`rustc-wrapper`) first — all of it workspace files.
+    // Nor `pnpm`/`yarn`: yarn runs the `yarnPath` its rc file names for any
+    // command, and pnpm loads `.pnpmfile.cjs` when it resolves.
     case 'npm':
-    case 'pnpm':
-    case 'yarn':
       return ['ls', 'list', 'view', 'outdated', 'why', 'config'].includes(args[0]) && (args[0] !== 'config' || ['get', 'list'].includes(args[1]));
     case 'pip':
     case 'pip3':
       return ['list', 'show', 'freeze'].includes(args[0]);
     case 'go':
-      return ['env', 'list', 'vet', 'doc'].includes(args[0]);
+      // `-toolexec`, `-vettool` and `-exec` name a program for go to run (and
+      // `go list -export` builds). `go env -w`/`-u` write the user's go env
+      // file, and a `GOFLAGS` put there reaches every later go command.
+      if (args.some((a) => /^--?(toolexec|vettool|exec)(=|$)/.test(a))) return false;
+      if (args[0] === 'env') return !args.includes('-w') && !args.includes('-u');
+      return ['list', 'vet', 'doc'].includes(args[0]);
     default:
       return false;
   }

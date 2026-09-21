@@ -109,6 +109,50 @@ test('other destructive tools are flagged', () => {
   assert.equal(kind('eval "rm -rf /tmp/x"'), 'forced-rm');
 });
 
+// GNU getopt_long and git's parse-options accept clustered short flags and any
+// unambiguous prefix of a long option. The table compared exact strings, so the
+// everyday `git rm -rf src` and the deliberate `rm --forc -r src` both ran
+// inside the sandbox without a review, as did the rest of this list.
+test('a destructive flag is found however it is clustered or abbreviated', () => {
+  for (const [cmd, expected] of [
+    ['rm --forc -r src', 'forced-rm'],
+    ['rm --f x', 'forced-rm'],
+    ['git rm -rf src', 'git-destructive'],
+    ['git reset --har', 'git-destructive'],
+    ['git clean --forc', 'git-destructive'],
+    ['git branch -df old', 'git-destructive'],
+    ['git branch --del --forc old', 'git-destructive'],
+    ['git push -fu origin main', 'git-destructive'],
+    ['git switch -fc topic', 'git-destructive'],
+    ['git checkout -fq main', 'git-destructive'],
+    ['git restore --work f', 'git-destructive'],
+    ['git gc --pru=now', 'git-destructive'],
+    ['truncate --siz 0 app.log', 'truncate'],
+    ['truncate -cs 0 app.log', 'truncate'],
+    // Value-taking options that run a command, in the same spellings.
+    ['su -lc "rm -rf /x"', 'forced-rm'],
+    ['su --comm="rm -rf /x"', 'forced-rm'],
+    ["script -qc 'rm -rf /x' /dev/null", 'forced-rm'],
+    ["script --command='rm -rf /x' /dev/null", 'forced-rm'],
+  ]) {
+    assert.equal(kind(cmd), expected, cmd);
+  }
+  // And nothing that was not destructive becomes so.
+  for (const cmd of [
+    'git push --force-with-lease',
+    'git push origin main',
+    'git restore --sta f',
+    'git reset --mixed',
+    'git branch -d merged',
+    'git checkout -b feature',
+    'git clean -n',
+    'rm -r build',
+    "script -c 'ls' /dev/null",
+  ]) {
+    assert.equal(kind(cmd), null, cmd);
+  }
+});
+
 test('Windows removal commands are flagged', () => {
   assert.equal(kind('Remove-Item -Recurse -Force .\\build'), 'forced-rm');
   assert.equal(kind('rd /s /q build'), 'forced-rm');
@@ -216,6 +260,27 @@ test('commands that are not known-safe', () => {
     'Get-Content Env:PATH',
   ]) {
     assert.equal(isKnownSafeCommandLine(cmd), false, cmd);
+  }
+});
+
+// Where nothing confines a command, this list is what runs unreviewed, so it
+// has to run nothing the workspace controls — and a workspace file is edited
+// without review. `node help` and `python3 version` execute a file of that name
+// (measured), `make help` a Makefile target, `cargo check` the crate's
+// `build.rs`, and each of the others starts from a project file or names a
+// program to run.
+test('probes that run workspace content are not known-safe', () => {
+  for (const cmd of [
+    'node help', 'python3 version', 'ruby help', 'php version', 'java help',
+    'make help', 'gradle help', 'gradle --version', 'mvn --version',
+    'cargo check', 'cargo --version', 'rustc --version', 'dotnet --version',
+    'yarn --version', 'yarn version', 'pnpm ls',
+    'go env -w GOFLAGS=-toolexec=./x', 'go env -u GOFLAGS', 'go vet -vettool=./x ./...', 'go list -export -toolexec=./x ./...',
+  ]) {
+    assert.equal(isKnownSafeCommandLine(cmd), false, cmd);
+  }
+  for (const cmd of ['node --version', 'python3 -V', 'make --version', 'git --version', 'go version', 'go help', 'go env GOPATH', 'go vet ./...', 'docker version', 'npm help', 'npm ls', 'gh help']) {
+    assert.equal(isKnownSafeCommandLine(cmd), true, cmd);
   }
 });
 
