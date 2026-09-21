@@ -28,7 +28,7 @@ export const PROTECTED_WORKSPACE_DIRS = ['.git', '.agents', '.agent', '_agents',
 // bounded on every axis and skips the directories that are large by convention.
 //
 // The wall-clock bound is the one that was missing, and the directory count
-// cannot stand in for it: measured on this machine's `9p-mount` (a 9p mount), one
+// cannot stand in for it: measured on a 9p mount (a WSL drive) on this machine, one
 // `readdir` costs ~2.4–3.6ms against ~0.01ms on ext4, so 1500 directories is
 // 5.4s of cold-cache walk in one place and 15ms in the other. Two of those walks
 // are paid per sandboxed command (the bind list in PreToolUse, the planting
