@@ -475,11 +475,17 @@ export function detectSandbox({ config, host, appDataDir, own, platform = proces
     return { active: true, source: 'autoagy', detail: `${own.detail}; workspace and temp dirs writable, .git and agent metadata read-only, no network` };
   }
   if (own?.required) return { active: false, source: 'autoagy', detail: `ownSandbox is "on" but unavailable: ${own.detail}` };
-  if (config.sandbox === 'on') return { active: true, source: 'config', detail: 'sandbox: "on" in autoagy config' };
-  if (config.sandbox === 'off') return { active: false, source: 'config', detail: 'sandbox: "off" in autoagy config' };
+  // Before the config. `sandbox: "on"` declares that Antigravity's sandbox is in
+  // force — the README asks IDE users to set it — and this flag is the one thing
+  // known to take that sandbox away (measured, design.md §2.2). When both are
+  // present the observed fact wins over the declaration; it used to be the
+  // other way round, so the pair ran every sandboxed command unreviewed and
+  // unconfined.
   if (host?.flags?.skipPermissions) {
     return { active: false, source: 'flag', detail: 'agy was started with --dangerously-skip-permissions (terminal sandbox bypassed)' };
   }
+  if (config.sandbox === 'on') return { active: true, source: 'config', detail: 'sandbox: "on" in autoagy config' };
+  if (config.sandbox === 'off') return { active: false, source: 'config', detail: 'sandbox: "off" in autoagy config' };
   if (host?.flags?.sandbox) return { active: true, source: 'flag', detail: 'agy was started with --sandbox' };
   const settings = appDataDir ? readJson(path.join(appDataDir, 'settings.json')) : null;
   // The settings file records what the CLI was configured to do, not what it is

@@ -36,6 +36,9 @@ test('detected flags and an explicit config still decide the answer', () => {
   assert.equal(detect({ platform: 'win32', config: configWith({ sandbox: 'on' }) }).active, true, 'config.sandbox "on" is the documented escape hatch');
   assert.equal(detect({ platform: 'linux', host: cliHost({ skipPermissions: true }) }).active, false);
   assert.equal(detect({ platform: 'linux', host: cliHost({ skipPermissions: true }) }).source, 'flag');
+  // A declaration does not outweigh the flag that is known to defeat what it declares.
+  const both = detect({ platform: 'linux', config: configWith({ sandbox: 'on' }), host: cliHost({ skipPermissions: true }) });
+  assert.deepEqual([both.active, both.source], [false, 'flag']);
   // Nowhere to read the arguments, no settings file, nothing declared.
   assert.equal(detect({ platform: 'win32', appDataDir: null }).source, 'platform');
 });

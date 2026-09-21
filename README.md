@@ -66,7 +66,7 @@ node scripts/install.mjs --uninstall          # 加 --purge 同时删除 ~/.gemi
 
 > 注意：如果只用 `agy plugin disable autoagy` 停用插件，上面的授权仍然存在，绕过沙箱的命令、MCP 调用和浏览器操作会不经审核、也不弹窗直接执行。请用 `autoagy mode off` 暂停（此时这三类操作会改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
 
-**Antigravity IDE / Antigravity 2.0**：插件格式相同，但权限在设置界面里（Settings → Permission Grants）。请手动加上同样三条授权并保持终端沙箱开启，然后在 `config.json` 里设 `"sandbox": "on"`（autoagy 只能自动识别 CLI 的沙箱设置）。
+**Antigravity IDE / Antigravity 2.0**：插件格式相同，但权限在设置界面里（Settings → Permission Grants）。请手动加上同样三条授权并保持终端沙箱开启，然后在 `config.json` 里设 `"sandbox": "on"`（autoagy 只能自动识别 CLI 的沙箱设置）。这是一句声明，不是观测：能观测到 `--dangerously-skip-permissions` 时（它会让 Antigravity 的沙箱失效），以那个标志为准。
 
 ## 使用
 
