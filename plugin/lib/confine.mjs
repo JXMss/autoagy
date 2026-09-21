@@ -306,6 +306,12 @@ export function detectOwnSandbox({ config, host, appDataDir, autoagyHome, build 
   if (mode === 'off') return { active: false, required: false, detail: 'ownSandbox: "off" in autoagy config' };
   const required = mode === 'on';
   if (platform !== 'linux') return { active: false, required, detail: "autoagy's own sandbox needs Linux with bubblewrap" };
+  // bwrap is started under `env -i` (see confinedCommandLine). Without a trusted
+  // `env` there is no way to keep agy's environment out of the sandbox's PID 1,
+  // and the policy treats this sandbox's environment as rebuilt — so it is not
+  // started at all rather than started with that assumption false.
+  const env = envBinaryPath();
+  if (!env) return { active: false, required, detail: 'no root-owned env to start bubblewrap with an empty environment' };
   // In executor mode the rewritten call redeems a token, so the program that
   // redeems it has to be there. Failing here rather than falling back to the
   // wildcard rewrite is the point: that rewrite needs a grant this
@@ -327,7 +333,7 @@ export function detectOwnSandbox({ config, host, appDataDir, autoagyHome, build 
   }
   const result = probe(autoagyHome);
   if (!result.ok) return { active: false, required, detail: result.detail };
-  return { active: true, required, bwrap: result.bwrap, detail: `autoagy's bubblewrap sandbox (${result.bwrap})` };
+  return { active: true, required, bwrap: result.bwrap, env, detail: `autoagy's bubblewrap sandbox (${result.bwrap})` };
 }
 
 const quote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
@@ -540,15 +546,24 @@ export function confinedCommandLine(ctx, commandLine, { placeholders } = {}) {
   }
   const filter = seccompProgramFile(ctx.autoagyHome);
   const call = [ctx.ownSandbox.bwrap, ...args, '--seccomp', String(SECCOMP_FD), '--', shellPath(), '-c', commandLine];
-  // The filter is handed to bwrap as an inherited descriptor, opened by the
-  // shell that execs it; autoagy's own directory is read-only in the sandbox, so
-  // the file it points at cannot be swapped while the command runs.
-  const line = `exec ${call.map(quote).join(' ')} ${SECCOMP_FD}<${quote(filter)}`;
+  // Everything is started under `env -i`, because `--clearenv` only reaches the
+  // command. With `--unshare-pid` bwrap stays in the sandbox as PID 1 and keeps
+  // the environment it was started with — agy's, every exported key included —
+  // and the fresh /proc shows it to the command. Measured on bwrap 0.9.0:
+  // `/proc/1/environ` held 7 KB and a canary variable while `/proc/self/environ`
+  // held the allowlist, and the policy allowed `cat /proc/1/environ` without a
+  // review, because it counts this sandbox's environment as rebuilt
+  // (`envScrubbed`) and all of its /proc as hidden (`hiddenByOwnSandbox`).
+  // Starting the whole chain empty is what makes both of those true.
+  const launcher = [ctx.ownSandbox.env, '-i'];
   // Hold a shared lock for as long as bwrap runs, so `lockQuiescent` can tell
   // whether any command is still alive. `flock` execs bwrap as its child and
   // waits, and passes the inherited seccomp descriptor through untouched.
   const flock = flockPath();
   const lockFile = flock ? workspaceLockFile(ctx) : null;
-  if (!flock || !lockFile) return line;
-  return `exec ${quote(flock)} -s ${quote(lockFile)} ${line.slice('exec '.length)}`;
+  if (flock && lockFile) launcher.push(flock, '-s', lockFile);
+  // The filter is handed to bwrap as an inherited descriptor, opened by the
+  // shell that execs it; autoagy's own directory is read-only in the sandbox, so
+  // the file it points at cannot be swapped while the command runs.
+  return `exec ${[...launcher, ...call].map(quote).join(' ')} ${SECCOMP_FD}<${quote(filter)}`;
 }

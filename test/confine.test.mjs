@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
-import { detectOwnSandbox, confinedCommandLine, scrubbedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath } from '../plugin/lib/confine.mjs';
+import { detectOwnSandbox, confinedCommandLine, scrubbedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath, envBinaryPath } from '../plugin/lib/confine.mjs';
 import { seccompProgram, seccompSupported } from '../plugin/lib/seccomp.mjs';
 import { HookContext, PROTECTED_WORKSPACE_DIRS, findNestedGitPaths } from '../plugin/lib/context.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
@@ -80,12 +80,20 @@ test('the confined command mounts read-only paths over writable roots and keeps 
   assert.equal(parsed.error, null);
   const argv = parsed.commands[0].argv;
   assert.equal(argv[0], 'exec');
+  // The chain starts with an empty environment: bwrap stays in the sandbox as
+  // PID 1, and --clearenv never reaches it.
+  assert.deepEqual(argv.slice(1, 3), [envBinaryPath(), '-i']);
   // The command holds a shared lock on the workspace while bwrap runs, so a
-  // reclamation knows whether anything is still alive. See lockQuiescent.
-  assert.equal(argv[1], '/usr/bin/flock');
-  assert.equal(argv[2], '-s');
-  assert.match(argv[3], /\/state\/ws-[0-9a-f]{16}\.lock$/);
-  assert.equal(argv[4], '/usr/bin/bwrap');
+  // reclamation knows whether anything is still alive. See lockQuiescent. Only
+  // where a root-owned flock exists; without one bwrap follows directly.
+  let at = 3;
+  if (flockPath()) {
+    assert.equal(argv[3], flockPath());
+    assert.equal(argv[4], '-s');
+    assert.match(argv[5], /\/state\/ws-[0-9a-f]{16}\.lock$/);
+    at = 6;
+  }
+  assert.equal(argv[at], '/usr/bin/bwrap');
   assert.ok(argv.includes('--unshare-net'));
   assert.deepEqual(argv.slice(-2), ['-c', original], 'the original command is passed through byte for byte');
   const mountIndex = (flag, p) => argv.findIndex((a, i) => a === flag && argv[i + 1] === p && argv[i + 2] === p);
@@ -116,7 +124,9 @@ test('allowed sandboxed commands are rewritten into the own sandbox; escalations
   const sandboxed = await run({ CommandLine: 'npm test' });
   assert.equal(sandboxed.decision, 'allow');
   assert.equal(sandboxed.overwrite.BypassSandbox, true);
-  assert.match(sandboxed.overwrite.CommandLine, /^exec '\/usr\/bin\/flock' -s '\S+ws-[0-9a-f]{16}\.lock' '\/usr\/bin\/bwrap' /);
+  const launcher = [envBinaryPath(), '-i', ...(flockPath() ? [flockPath(), '-s'] : [])].map((a) => `'${a}'`).join(' ');
+  assert.ok(sandboxed.overwrite.CommandLine.startsWith(`exec ${launcher} `), sandboxed.overwrite.CommandLine.slice(0, 120));
+  assert.match(sandboxed.overwrite.CommandLine, flockPath() ? /^\S+ \S+ '-i' \S+ '-s' '\S+ws-[0-9a-f]{16}\.lock' '\/usr\/bin\/bwrap' / : /^\S+ \S+ '-i' '\/usr\/bin\/bwrap' /);
   // Reviewed inside the sandbox (forced rm), approved, and still confined.
   const reviewed = await run({ CommandLine: 'rm -rf build' });
   assert.equal(reviewed.decision, 'allow');
@@ -396,6 +406,26 @@ test('a sandboxed command does not inherit the hook environment', { skip: real.o
   assert.match(res.stdout, /CANARY=unset/, 'the canary variable does not reach the sandbox');
   assert.match(res.stdout, /PATHOK=\/.*touch/, 'an external binary still resolves through the surviving PATH');
   assert.equal(fs.existsSync(out), true);
+});
+
+// `--clearenv` rebuilds the command's environment and nothing else. With
+// `--unshare-pid` bwrap stays in the sandbox as PID 1, and the fresh /proc
+// shows the command whatever bwrap itself was started with — which is agy's
+// environment, every exported key included. The test above could not see that:
+// it only asked the command about its own environment.
+test('nothing in the sandbox\'s /proc carries the hook environment, PID 1 included', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  const env = { ...dirs.env, AUTOAGY_CANARY_SECRET: 'leaked-value' };
+  const script = [
+    `printf 'PID1=%s\\n' "$(tr '\\0' ' ' < /proc/1/cmdline | cut -c1-200)"`,
+    `printf 'PID1BYTES=%s\\n' "$(wc -c < /proc/1/environ)"`,
+    `n=0; for f in /proc/[0-9]*/environ; do if tr '\\0' '\\n' < "$f" 2>/dev/null | grep -q AUTOAGY_CANARY_SECRET; then n=$((n+1)); fi; done; printf 'LEAKS=%s\\n' "$n"`,
+  ].join('\n');
+  const res = runLine(confinedCommandLine(ctxFor({ CommandLine: 'true' }, { probe: () => real, env }), script), env);
+  assert.equal(res.status, 0, res.stderr);
+  // Otherwise the rest of this proves nothing about the process that leaked.
+  assert.match(res.stdout, /PID1=\S*bwrap /, 'PID 1 in the sandbox is bwrap itself');
+  assert.match(res.stdout, /PID1BYTES=0\n/, 'bwrap was started with an empty environment');
+  assert.match(res.stdout, /LEAKS=0\n/, 'no process the command can see holds the canary');
 });
 
 /**

@@ -502,6 +502,12 @@ export function isCredentialPath(ctx, abs) {
  * happen. That sandbox mounts a private /proc and masks every credential store
  * it can name by location.
  *
+ * "Private" is not enough on its own, and it was once wrong: bwrap stays inside
+ * as PID 1, and `/proc/1/environ` held agy's whole environment until the line
+ * started bwrap under `env -i`. The /proc answer below holds because nothing
+ * the command can see was started with more than the allowlist — which
+ * `detectOwnSandbox` makes a condition of the sandbox existing at all.
+ *
  * Location, not pattern: the `id_ed25519` pattern matches the key in `~/.ssh`
  * (masked) and a copy someone made inside the workspace (not masked), and only
  * the mount list says which one a given path is.
