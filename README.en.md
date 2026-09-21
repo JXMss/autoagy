@@ -85,6 +85,12 @@ and reverted by `teardown` / `--uninstall`.
 2. **`~/.gemini/antigravity-cli/settings.json`** — backed up first to
    `<that file>.autoagy-backup-<timestamp>`, then:
    - `permissions.allow` gains `command(*)`, `mcp(*)`, `execute_url(*)`;
+   - and `read_file(/)`: the `allowNonWorkspaceAccess: false` below caps reads
+     as well as writes (measured: reading `/etc/hostname` prompted "outside
+     workspace"), so without it every read outside the workspace — library
+     sources, system headers — prompts. Codex reads anywhere; credential reads
+     (`~/.ssh`, `.env`, …) are still reviewed by autoagy first. `readGrant:
+     "none"` leaves it out;
    - plus `write_file(<dir>)` for each directory in `writableRoots`, and
      `read_url(<domain>)` for each trusted domain when `networkGrants:
      "trusted-domains"` (off by default);
@@ -150,7 +156,7 @@ approval.
 ## Configuration worth knowing
 
 `~/.gemini/autoagy/config.json` — the full table is in the
-[configuration table in the Chinese README](README.md#配置geminiautoagyconfigjson). The four that change
+[configuration table in the Chinese README](README.md#配置geminiautoagyconfigjson). The ones that change
 what you experience:
 
 | Field | Default | Why you would touch it |
@@ -158,6 +164,7 @@ what you experience:
 | `mode` | `"auto"` | `ask` to go back to prompts, `off` to pause everything. |
 | `commandGrant` | `"wildcard"` | `"executor"` replaces `command(*)` with a grant naming one program that only redeems one-shot tokens the hook wrote — the command class then becomes fail-closed instead of fail-open. |
 | `ownSandbox` | `"auto"` | Whether autoagy's bubblewrap sandbox is used where it could be. |
+| `readGrant` | `"anywhere"` | `"none"` leaves out `read_file(/)`, so reads outside the workspace prompt again. When autoagy itself fails or times out, content reads are refused while the grant is on, since agy would no longer ask. |
 | `networkGrants` | `"none"` | `"trusted-domains"` stops the first fetch of each trusted domain from prompting. Cost depends on which sandbox is running; `autoagy status` says which. |
 
 Also: `writableRoots` (outside directories editable without review — re-run

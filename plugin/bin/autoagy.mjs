@@ -504,6 +504,11 @@ function status() {
   } else if ((config.trustedDomains ?? []).length > 0) {
     lines.push(`  network grants  none — a first fetch of any domain still prompts, including the ${config.trustedDomains.length} in trustedDomains (see networkGrants)`);
   }
+  lines.push(
+    config.readGrant === 'none'
+      ? '  read grant      none — every read outside the workspace prompts (see readGrant)'
+      : '  read grant      read_file(/) — reads outside the workspace do not prompt; credential reads are still reviewed',
+  );
   // The degraded mode is worth saying out loud rather than falling back in
   // silence: without a usable `flock`, autoagy cannot tell whether a sandboxed
   // command is still running, so it has to guess — and the guess can be wrong in

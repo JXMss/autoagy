@@ -57,6 +57,7 @@ node scripts/install.mjs            # 先看会改什么：node scripts/install.
 3. 创建 `~/.gemini/autoagy/config.json`；
 4. 修改 `~/.gemini/antigravity-cli/settings.json`（先备份）：
    - `permissions.allow` 加入 `command(*)`、`mcp(*)`、`execute_url(*)`——否则被 autoagy 批准的操作仍会被 Antigravity 自己再弹窗；
+   - 还有 `read_file(/)`：下面那条 `allowNonWorkspaceAccess: false` 同时也拦**读取**（实测：读 `/etc/hostname` 会弹「outside workspace」），没有这条，读项目外的任何文件（依赖库源码、系统头文件）都会弹窗。Codex 本来就能读全盘；读凭据（`~/.ssh`、`.env` 等）autoagy 仍会先送审。不想要就设 `readGrant: "none"`；
    - 确保 `enableTerminalSandbox: true`、`toolPermission: "proceed-in-sandbox"`；
    - 设 `allowNonWorkspaceAccess: false`——这是**唯一一道在写入那一刻生效**的检查（agy 会跟着符号链接判落点），堵的是「autoagy 检查完、agy 落笔前路径被换掉」那条缝。`writableRoots` 里列的目录会各自拿到一条 `write_file(<目录>)` 授权，照常免审编辑；没事先声明的临时区外编辑则会多一次确认（headless 下失败）。agy 保存设置时会把值为 `false` 的这一项删掉（比如你信任一个新目录时），而**没写就等于 `false`**（agy 1.2.7 实测），所以文件里看不到它是正常的，`autoagy status` 会显示 `false (not in the file…)`。只有原来是 `true` 时 setup 才会改它，卸载时再改回去。
 5. 在 `~/.gemini/config/hooks.json` 里登记哨兵，并把它的程序装到 `~/.gemini/autoagy/bin/tripwire.mjs`（见本节开头）。这是 `agy plugin` 之外、你自己的文件；登记是合并进去的，里面原有的 hook 不动，文件读不懂时 `setup` 整个停下、一条授权也不写；
@@ -194,6 +195,7 @@ autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandb
 | `mode` | `"auto"` | `auto` / `ask` / `off` |
 | `sandbox` | `"auto"` | Antigravity 的沙箱是否真的隔离命令；`auto` 从 CLI 设置和启动参数判断，`on`/`off` 强制指定。没有沙箱时只有已知只读命令免审。**`on`/`off` 是用户的声明，不是探测结果**：IDE / Antigravity 2.0 用户探不到设置文件，只能自己声明（`autoagy status` 会把它标成 `(config)`，和探测出来的 `(settings)`、`(flag)` 区分开）。所以声明成 `on` 之前请确认那个沙箱真的开着——声明错了不会有人拦你 |
 | `commandGrant` | `"wildcard"` | 自带沙箱的改写要离开 Antigravity 的沙箱，这需要一条 `command(...)` 授权。`wildcard` 给 `command(*)`——能跑任何东西，而且 **hook 停了它还在**（README 开头那条结构性风险就是它）。`executor` 改为只授权一个程序：`autoagy setup` 会把 `bin/exec-confined.mjs` 装进 `~/.gemini/autoagy/bin/`，改写后的调用变成 `<那个程序> <32 位令牌>`（路径不加引号：agy 按命令的字面文字匹配授权，带引号就对不上，真机实测每条命令都会弹窗），令牌由 hook 写进 `~/.gemini/autoagy/state/pending/`（沙箱外只读、`selfPaths` 拒绝编辑），一次性、五分钟过期、回合末清空。**没有 hook 就没有令牌，授权因此失效。** 换配置后要重跑 `autoagy setup`：它会把自己先前加的 `command(*)` 一并撤掉（你手写的授权它不碰）。注意这层保证依赖执行器本身不可被改写——`allowNonWorkspaceAccess: false` 时才完全成立，`status` 会在不成立时说出来。**升级命令也走令牌**：授权是**按命令内容匹配**的（实测 agy 1.2.7：只授予 `command(echo)` 时，带 `BypassSandbox` 的 `echo` 能跑，`whoami` 被拒），所以 agent 主动请求升级的 `git push` 原本匹配不上 `command(<执行器>)`——交互下每次弹窗，**headless 下直接拒绝、agent 根本无法升级**。现在审核模型批准的升级同样铸一个令牌、改写成兑换它，令牌里就是那条被批准的原始命令（不进沙箱，这正是"批准升级"的意思）。授权说的仍然是同一句话：唯一能跑的程序，只会兑换 hook 写下的那一行 |
+| `readGrant` | `"anywhere"` | `"anywhere"` 时 `autoagy setup` 写一条 `read_file(/)` 授权，读项目外的文件不再弹窗；写项目外的文件照旧要过 `allowNonWorkspaceAccess: false` 那道关。凭据读取在 agy 之前已由 autoagy 送审。autoagy 自己出错或超时时，读文件内容的操作一律拒绝，因为此时 agy 不会再问。`"none"`：不写这条，项目外的读取照 agy 的默认弹窗 |
 | `ownSandbox` | `"auto"` | autoagy 自己的 bubblewrap 沙箱（见上文）：`auto` 满足条件时启用，`on` 强制启用（不可用时命令送审），`off` 不使用 |
 | `reviewer.backend` | `"agy"` | `agy` / `openai` / `none`（`none` 等同 `ask`） |
 | `reviewer.timeoutSec` / `maxAttempts` | `90` / `3` | Codex 的审核期限与重试次数 |

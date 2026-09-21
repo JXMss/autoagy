@@ -133,7 +133,19 @@ export function trustedDomainGrants(config) {
  */
 export function grantsFor(config, { autoagyHome, home = os.homedir() }) {
   const command = config?.commandGrant === 'executor' ? `command(${executorPath(autoagyHome)})` : 'command(*)';
-  return [command, 'mcp(*)', 'execute_url(*)', ...writableRootGrants(config, home), ...trustedDomainGrants(config).grants];
+  return [command, 'mcp(*)', 'execute_url(*)', ...readGrants(config), ...writableRootGrants(config, home), ...trustedDomainGrants(config).grants];
+}
+
+/**
+ * The read grant `readGrant` asks for: `read_file(/)` unless it is "none".
+ *
+ * `allowNonWorkspaceAccess: false` caps reads as well as writes, so without it
+ * every read outside the workspace prompts (measured on agy 1.2.7). A read is
+ * something Codex allows anywhere, and autoagy has already reviewed a
+ * credential read before agy is asked, so only the write cap is worth keeping.
+ */
+export function readGrants(config) {
+  return config?.readGrant === 'none' ? [] : ['read_file(/)'];
 }
 
 /**

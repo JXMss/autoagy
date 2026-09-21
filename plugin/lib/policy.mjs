@@ -246,10 +246,12 @@ export function classify(ctx, state = {}) {
  * The decision used when autoagy cannot classify a call itself: its own internal
  * error, or the hook watchdog firing before the decision was ready.
  *
- * Reads and the coordination tools stay usable — blocking them would wedge the
- * session for no gain. Everything else is refused, and a conversation whose
- * paths were already swapped also loses its content reads: after a swap a read
- * follows the symlink to wherever it now points.
+ * The coordination tools and the reads that return no file contents (listing a
+ * directory, finding a file) stay usable — blocking them would wedge the session
+ * for no gain. Everything else is refused, content reads included whenever agy
+ * would not ask before one (see below); a conversation whose paths were already
+ * swapped loses its content reads either way: after a swap a read follows the
+ * symlink to wherever it now points.
  *
  * @param {{ toolCall?: { name?: string } }} payload
  * @param {{ untrusted?: boolean, reason: string, config?: object | null }} options
@@ -263,7 +265,16 @@ export function failOpenOutput(payload, { untrusted = false, reason, config = nu
   // operator who set it should not have it quietly stop applying exactly when
   // supervision is weakest.
   if (name === 'search_web' && config?.webSearch === 'review') return { decision: 'deny', reason };
-  if (READ_ONLY_TOOLS.has(name) && !(untrusted && CONTENT_READ_TOOLS.has(name))) return { decision: 'allow' };
+  // A content read here may be one autoagy was about to review — a credential,
+  // or a read the watchdog cut off mid-review. It used to be allowed anyway,
+  // because agy asked before reading outside the workspace. The read grant
+  // (`readGrant: "anywhere"`, the default) removes that prompt, so on this path
+  // nothing would stand between the call and `~/.ssh`. Only with the grant off
+  // is agy still there to ask; a configuration that cannot be read is treated as
+  // the default.
+  const agyStillAsks = config?.readGrant === 'none';
+  if (CONTENT_READ_TOOLS.has(name) && (untrusted || !agyStillAsks)) return { decision: 'deny', reason };
+  if (READ_ONLY_TOOLS.has(name)) return { decision: 'allow' };
   return { decision: 'deny', reason };
 }
 

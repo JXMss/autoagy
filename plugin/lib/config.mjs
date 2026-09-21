@@ -196,6 +196,18 @@ export const DEFAULT_CONFIG = Object.freeze({
   //   Needs `autoagy setup` to have installed the executor and written that
   //   grant; see tokens.mjs for what the guarantee rests on.
   commandGrant: 'wildcard',
+  // Whether `autoagy setup` also grants Antigravity `read_file(/)`.
+  //
+  // setup turns off `allowNonWorkspaceAccess`, the one check agy makes at the
+  // moment it writes, and that check covers reads too: measured on agy 1.2.7,
+  // `view_file /etc/hostname` asked "Reason: outside workspace" after autoagy
+  // had allowed it. Without a read grant every read outside the workspace —
+  // library sources, system headers — prompts, and in print mode fails. Codex
+  // reads anywhere without asking, and autoagy still reviews credential reads
+  // itself before agy is asked.
+  // "anywhere" (default): `read_file(/)`; writes outside the workspace stay capped.
+  // "none": no read grant, so reads outside the workspace prompt, as agy does.
+  readGrant: 'anywhere',
   // "review": clicks/typing/JS in the browser are reviewed; "allow": not reviewed.
   browser: 'review',
   // A web search sends the agent's query off the machine, and unlike a command
@@ -249,6 +261,7 @@ const ENUMS = {
   webSearch: ['allow', 'review'],
   'commandEnv.mode': ['inherit', 'scrub'],
   commandGrant: ['wildcard', 'executor'],
+  readGrant: ['anywhere', 'none'],
 };
 
 /** Directory holding config.json, state/ and logs/. */
@@ -472,7 +485,7 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
 
 /** The default config file written by `autoagy setup`. */
 export function defaultConfigFileText() {
-  const { mode, sandbox, ownSandbox, commandGrant, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv } = DEFAULT_CONFIG;
+  const { mode, sandbox, ownSandbox, commandGrant, readGrant, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv } = DEFAULT_CONFIG;
   const { mock, ...reviewer } = DEFAULT_CONFIG.reviewer;
-  return `${JSON.stringify({ mode, sandbox, ownSandbox, commandGrant, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv }, null, 2)}\n`;
+  return `${JSON.stringify({ mode, sandbox, ownSandbox, commandGrant, readGrant, reviewer, onDenied, onTimeout, onError, trustedDomains, browserTrustedDomains, writableRoots, rules, mcp, browser, webSearch, commandEnv }, null, 2)}\n`;
 }

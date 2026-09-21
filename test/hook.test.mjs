@@ -286,10 +286,26 @@ test('internal errors never let a subagent start unreviewed', () => {
 
 test('an untrusted conversation also loses its content reads on an internal error', () => {
   const tool = (name) => ({ toolCall: { name } });
-  assert.equal(failClosedOutput(tool('view_file'), new Error('x')).decision, 'allow');
-  assert.equal(failClosedOutput(tool('view_file'), new Error('x'), { untrusted: true }).decision, 'deny');
+  const grantOff = { readGrant: 'none' };
+  assert.equal(failClosedOutput(tool('view_file'), new Error('x'), { config: grantOff }).decision, 'allow');
+  assert.equal(failClosedOutput(tool('view_file'), new Error('x'), { untrusted: true, config: grantOff }).decision, 'deny');
   // Listing a directory returns no file contents, so it keeps working.
   assert.equal(failClosedOutput(tool('list_dir'), new Error('x'), { untrusted: true }).decision, 'allow');
+});
+
+test('with the read grant on, a failure refuses content reads, because agy no longer asks', () => {
+  // A content read on this path may be a credential read autoagy was about to
+  // review, or one the watchdog cut off mid-review. agy used to ask before any
+  // read outside the workspace, so allowing it was harmless; `read_file(/)`
+  // removes that prompt. A configuration that cannot be read counts as the
+  // default, which is the grant on.
+  const tool = (name) => ({ toolCall: { name } });
+  for (const config of [{ readGrant: 'anywhere' }, null]) {
+    assert.equal(failClosedOutput(tool('view_file'), new Error('x'), { config }).decision, 'deny');
+    assert.equal(failClosedOutput(tool('grep_search'), new Error('x'), { config }).decision, 'deny');
+    assert.equal(failClosedOutput(tool('list_dir'), new Error('x'), { config }).decision, 'allow', 'no file contents');
+    assert.equal(failClosedOutput(tool('send_message'), new Error('x'), { config }).decision, 'allow');
+  }
 });
 
 test('a search the operator asked to review stays reviewed when autoagy fails', () => {

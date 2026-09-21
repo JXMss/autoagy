@@ -121,7 +121,7 @@ test('pinHookCommands pins the configuration directory and home', () => {
 test('the grants follow the configuration: the command shape, and one per writable root', () => {
   const home = path.join(root, 'grants-home');
   const autoagyHome = path.join(home, '.gemini', 'autoagy');
-  assert.deepEqual(grantsFor({}, { autoagyHome, home }), ['command(*)', 'mcp(*)', 'execute_url(*)']);
+  assert.deepEqual(grantsFor({}, { autoagyHome, home }), ['command(*)', 'mcp(*)', 'execute_url(*)', 'read_file(/)']);
 
   // The executor shape names one program in place of the wildcard.
   assert.deepEqual(grantsFor({ commandGrant: 'executor' }, { autoagyHome, home })[0], `command(${executorPath(autoagyHome)})`);
@@ -130,7 +130,21 @@ test('the grants follow the configuration: the command shape, and one per writab
   // letter: agy refuses the write whatever autoagy says about it.
   const config = { writableRoots: ['~/shared-lib', '/srv/build ', '', 42] };
   assert.deepEqual(writableRootGrants(config, home), [`write_file(${path.join(home, 'shared-lib')})`, 'write_file(/srv/build)']);
-  assert.deepEqual(grantsFor(config, { autoagyHome, home }).slice(3), writableRootGrants(config, home));
+  assert.deepEqual(grantsFor(config, { autoagyHome, home }).slice(4), writableRootGrants(config, home));
+});
+
+test('reads anywhere are granted unless readGrant says none, and writes never are', () => {
+  // Measured on agy 1.2.7: with `allowNonWorkspaceAccess: false`, `view_file
+  // /etc/hostname` asked "Reason: outside workspace" after autoagy had allowed
+  // it — the cap on writes caps reads too. Codex reads anywhere without asking,
+  // and a credential read has already been reviewed before agy is asked.
+  const home = path.join(root, 'read-home');
+  const autoagyHome = path.join(home, '.gemini', 'autoagy');
+  const grants = grantsFor({}, { autoagyHome, home });
+  assert.ok(grants.includes('read_file(/)'));
+  assert.ok(!grants.some((g) => /^write_file\((\*|\/)\)$/.test(g)), 'the write cap stays');
+  assert.ok(!grantsFor({ readGrant: 'none' }, { autoagyHome, home }).includes('read_file(/)'));
+  assert.equal(loadConfig({ env: { AUTOAGY_HOME: path.join(root, 'no-config') }, home }).config.readGrant, 'anywhere');
 });
 
 test('read_url grants are opt-in, per domain, and never a wildcard', () => {
@@ -142,7 +156,7 @@ test('read_url grants are opt-in, per domain, and never a wildcard', () => {
   // approve a fetch, but agy's own permission prompt for an unknown domain is the
   // one thing a hook `allow` cannot answer.
   assert.deepEqual(trustedDomainGrants({ trustedDomains: domains }), { grants: [], skipped: [] });
-  assert.deepEqual(grantsFor({ trustedDomains: domains }, { autoagyHome, home }), ['command(*)', 'mcp(*)', 'execute_url(*)']);
+  assert.deepEqual(grantsFor({ trustedDomains: domains }, { autoagyHome, home }), ['command(*)', 'mcp(*)', 'execute_url(*)', 'read_file(/)']);
 
   // Opted in: the list the user already wrote, one grant each. A leading `*.`
   // comes off because `isTrustedHost` treats the two spellings as one rule.
