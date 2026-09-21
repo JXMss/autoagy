@@ -126,6 +126,17 @@ export function grantsFor(config, { autoagyHome, home = os.homedir() }) {
  * checkout beside a real install would otherwise report a plugin that is there as
  * missing, which is the false positive the first version of this check had.
  */
+/**
+ * Grants an earlier `setup` added that are still in the settings file although
+ * the configuration no longer asks for them. `setup` takes these out; `status`
+ * names them, so a file that was narrowed on paper only is visible.
+ * @param {string[]} allow the file's `permissions.allow`
+ */
+export function staleGrants(config, allow, { autoagyHome, home = os.homedir() }) {
+  const wanted = grantsFor(config, { autoagyHome, home });
+  return (readSetupRecord(autoagyHome)?.addedGrants ?? []).filter((g) => allow.includes(g) && !wanted.includes(g));
+}
+
 export function halfInstalledRecord({ autoagyHome, home = os.homedir() }) {
   const record = readSetupRecord(autoagyHome);
   if (!record?.addedGrants?.length) return null;
@@ -151,11 +162,25 @@ function writeJsonFile(file, value) {
   fs.renameSync(tmp, file);
 }
 
-/** Computes the settings changes setup would make. */
-export function planSetup(settings, { grants = RECOMMENDED_GRANTS, settingsChanges = true } = {}) {
+/**
+ * Computes the settings changes setup would make.
+ *
+ * `recorded` is what earlier runs added (the setup record). A grant in it that is
+ * still in the file and that the configuration no longer asks for is taken out:
+ * setup used to only ever add, so turning `networkGrants` back to "none",
+ * dropping a `writableRoots` entry or switching `commandGrant` to "executor" left
+ * the old `read_url(…)`, `write_file(…)` or `command(*)` in place — while setup
+ * printed "read_url(...) is not granted" and `status` "network grants none",
+ * both worked out from the configuration. A `read_url` rule is also the terminal
+ * sandbox's network allowlist, so the narrowing the user asked for did not
+ * happen and they were told it had. Only autoagy's own grants are touched: one
+ * the user wrote is not in the record.
+ */
+export function planSetup(settings, { grants = RECOMMENDED_GRANTS, settingsChanges = true, recorded = [] } = {}) {
   const allow = Array.isArray(settings.permissions?.allow) ? settings.permissions.allow : [];
   const deny = Array.isArray(settings.permissions?.deny) ? settings.permissions.deny : [];
   const addGrants = grants.filter((g) => !allow.includes(g));
+  const removeGrants = [...new Set(recorded)].filter((g) => allow.includes(g) && !grants.includes(g));
   const conflicting = grants.filter((g) => deny.includes(g));
   const changes = [];
   if (settingsChanges) {
@@ -163,7 +188,7 @@ export function planSetup(settings, { grants = RECOMMENDED_GRANTS, settingsChang
       if (settings[key] !== value) changes.push({ key, from: settings[key], to: value });
     }
   }
-  return { addGrants, changes, conflicting };
+  return { addGrants, removeGrants, changes, conflicting };
 }
 
 /**
@@ -179,19 +204,20 @@ export function applySetup({ home = os.homedir(), env = process.env, dryRun = fa
   // overwrite from an empty object. The raw parse error it used to throw said
   // nothing about that.
   if (!readable) throw new Error(`${settingsFile} is not valid JSON, so autoagy setup left it alone. Fix it first (a trailing comma is the usual cause).`);
-  const plan = planSetup(settings, { grants, settingsChanges });
+  const previous = readSetupRecord(autoagyHome);
+  const plan = planSetup(settings, { grants, settingsChanges, recorded: previous?.addedGrants ?? [] });
   const report = { settingsFile, ...plan, backup: null, dryRun };
-  if (dryRun || (plan.addGrants.length === 0 && plan.changes.length === 0)) return report;
+  if (dryRun || (plan.addGrants.length === 0 && plan.removeGrants.length === 0 && plan.changes.length === 0)) return report;
 
   fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
   if (fs.existsSync(settingsFile)) {
     report.backup = `${settingsFile}.autoagy-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     fs.copyFileSync(settingsFile, report.backup);
   }
-  const previous = readSetupRecord(autoagyHome);
   const next = JSON.parse(JSON.stringify(settings));
   next.permissions = { ...(next.permissions ?? {}) };
-  next.permissions.allow = [...(Array.isArray(next.permissions.allow) ? next.permissions.allow : []), ...plan.addGrants];
+  const kept = (Array.isArray(next.permissions.allow) ? next.permissions.allow : []).filter((g) => !plan.removeGrants.includes(g));
+  next.permissions.allow = [...kept, ...plan.addGrants];
   const priorValues = { ...(previous?.priorValues ?? {}) };
   for (const change of plan.changes) {
     if (!(change.key in priorValues)) priorValues[change.key] = change.key in settings ? { present: true, value: settings[change.key] } : { present: false };
@@ -203,7 +229,9 @@ export function applySetup({ home = os.homedir(), env = process.env, dryRun = fa
     time: new Date().toISOString(),
     settingsFile,
     backup: report.backup,
-    addedGrants: [...new Set([...(previous?.addedGrants ?? []), ...plan.addGrants])],
+    // What teardown will take back: everything added so far, minus what this run
+    // already took back.
+    addedGrants: [...new Set([...(previous?.addedGrants ?? []), ...plan.addGrants])].filter((g) => !plan.removeGrants.includes(g)),
     priorValues,
   });
   return report;

@@ -21,7 +21,7 @@ import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INST
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
 import { installTripwire, tripwireInstallable, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, installedPluginDir } from '../lib/tripwire.mjs';
 import { scanMcpServers, readMcpCache, readMcpServers, mcpConfigFiles, MCP_CACHE_FILE } from '../lib/mcp.mjs';
@@ -504,7 +504,15 @@ function status() {
       lines.push(`  ! writableRoots changed since the last \`autoagy setup\`: ${rootsMissing.length} of them have no write_file grant,`);
       lines.push('    so edits there are refused however autoagy classifies them. Re-run `autoagy setup`.');
     }
-    if (config.commandGrant === 'executor' && allow.includes('command(*)')) {
+    // Read from the file, not worked out from the configuration: the network and
+    // command-grant lines above say what the configuration asks for, and an
+    // earlier setup may have left more than that in place.
+    const stale = staleGrants(config, allow, { autoagyHome, home: userHome });
+    if (stale.length) {
+      lines.push(`  ! stale grants    ${stale.join(', ')} — added by an earlier \`autoagy setup\` and no longer in the configuration,`);
+      lines.push('    so they still apply although the lines above do not list them. Re-run `autoagy setup` to take them out.');
+    }
+    if (config.commandGrant === 'executor' && allow.includes('command(*)') && !stale.includes('command(*)')) {
       lines.push('  ! command(*) is still granted, which makes the narrow executor grant pointless — remove it');
     }
     if (allow.some((g) => /^read_url\(\*\)$/.test(g))) lines.push('  ! read_url(*) is granted: sandboxed commands can reach any host without review');
@@ -815,8 +823,9 @@ function setup(flags) {
     }
   }
   console.log(`\nAntigravity CLI settings: ${report.settingsFile}`);
-  if (report.addGrants.length === 0 && report.changes.length === 0) console.log('  already configured');
+  if (report.addGrants.length === 0 && report.removeGrants.length === 0 && report.changes.length === 0) console.log('  already configured');
   for (const g of report.addGrants) console.log(`  ${dryRun ? 'would add' : 'added'} permissions.allow ${g}`);
+  for (const g of report.removeGrants) console.log(`  ${dryRun ? 'would remove' : 'removed'} permissions.allow ${g} (an earlier setup added it; the configuration no longer asks for it)`);
   for (const c of report.changes) console.log(`  ${dryRun ? 'would set' : 'set'} ${c.key}: ${JSON.stringify(c.from)} -> ${JSON.stringify(c.to)}`);
   for (const g of report.conflicting) console.log(`  ! ${g} is also in permissions.deny; deny wins, so those actions stay blocked`);
   if (report.backup) console.log(`  backup: ${report.backup}`);

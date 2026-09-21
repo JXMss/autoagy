@@ -5,9 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord } from '../plugin/lib/setup.mjs';
+import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord, staleGrants } from '../plugin/lib/setup.mjs';
 import { executorPath } from '../plugin/lib/tokens.mjs';
 import { configPath, loadConfig } from '../plugin/lib/config.mjs';
+import { configWith } from './helpers.mjs';
 import { removeTripwire, tripwireInstalled, tripwireRegistered, userHooksPath, registeredTripwirePath, registeredAutoagyHome, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-setup-'));
@@ -226,6 +227,37 @@ function pinnedPlugin({ root, configHome, home }) {
   fs.writeFileSync(path.join(dir, 'hooks.json'), JSON.stringify({ autoagy: { PreToolUse: [{ matcher: '*', hooks: [{ command }] }] } }));
   return dir;
 }
+
+test('narrowing the configuration narrows the grants, and only the ones setup added', () => {
+  // Setup used to only ever add: turning networkGrants back to "none", dropping a
+  // writableRoots entry or moving to the executor left the old grants in place,
+  // while setup printed "read_url(...) is not granted" and status "network
+  // grants none" — both worked out from the configuration, not the file.
+  const home = path.join(root, 'narrowing');
+  const env = { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy') };
+  const file = cliSettingsPath(home);
+  const roots = path.join(home, 'shared');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(roots, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['read_url(docs.example.org)'] } }));
+  const where = { autoagyHome: env.AUTOAGY_HOME, home };
+  const wide = configWith({ networkGrants: 'trusted-domains', trustedDomains: ['example.com'], writableRoots: [roots] });
+  applySetup({ home, env, grants: grantsFor(wide, where) });
+  const allow = () => JSON.parse(fs.readFileSync(file, 'utf8')).permissions.allow;
+  assert.ok(allow().includes('read_url(example.com)') && allow().includes(`write_file(${roots})`) && allow().includes('command(*)'));
+
+  const narrow = configWith({ networkGrants: 'none', commandGrant: 'executor' });
+  assert.deepEqual(staleGrants(narrow, allow(), where).sort(), ['command(*)', 'read_url(example.com)', `write_file(${roots})`].sort(), 'status can name them before setup runs');
+  const report = applySetup({ home, env, grants: grantsFor(narrow, where) });
+  assert.deepEqual(report.removeGrants.sort(), ['command(*)', 'read_url(example.com)', `write_file(${roots})`].sort());
+  assert.ok(!allow().includes('read_url(example.com)') && !allow().includes(`write_file(${roots})`) && !allow().includes('command(*)'));
+  assert.ok(allow().includes('read_url(docs.example.org)'), "a grant the user wrote is not setup's to take");
+  assert.deepEqual(staleGrants(narrow, allow(), where), []);
+
+  // And teardown still takes back exactly what is left of autoagy's.
+  applyTeardown({ home, env });
+  assert.deepEqual(allow(), ['read_url(docs.example.org)']);
+});
 
 test('setup writes no grant when the file its tripwire registers in cannot be read', () => {
   // The tripwire is what stands behind the grants. If registering it would mean
