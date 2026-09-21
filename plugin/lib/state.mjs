@@ -208,14 +208,69 @@ export const LOCK_BREAK_MS = 60_000;
 
 /** The lock file's holder record, or null when it cannot be read. */
 function readHolder(lock) {
+  return parseHolder(readLockText(lock));
+}
+
+/** The lock file's text exactly as written, or null when it cannot be read. */
+function readLockText(lock) {
   try {
-    const text = fs.readFileSync(lock, 'utf8').trim();
-    if (!text) return null;
+    return fs.readFileSync(lock, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function parseHolder(text) {
+  if (!text || !text.trim()) return null;
+  try {
     const holder = JSON.parse(text);
     return holder && typeof holder === 'object' ? holder : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Removes a lock judged dead or stale — that lock, and never one taken since.
+ *
+ * Removal used to be a plain `rmSync` of the path, made on the strength of a
+ * holder read a moment earlier. Two waiters that both judged the same dead
+ * holder both removed "it": the first took the lock, and the second's removal
+ * took it away from the first, so both entered the section and one write was
+ * lost. Measured with a dead holder and three writers racing: 51 of 150 rounds
+ * lost an update. A hook the watchdog killed mid-section leaves exactly that
+ * lock behind.
+ *
+ * So breaking goes through a guard of its own. Only the waiter holding the guard
+ * may remove the lock, and it removes it only if the file still reads what it
+ * judged — under the guard no other breaker can have removed it, and a lock taken
+ * since carries another holder's identity. A waiter that finds the guard taken
+ * leaves the lock to whoever holds it. A guard older than any break takes
+ * belongs to a breaker that died inside those few lines, and goes by age.
+ *
+ * @returns {boolean} false when another waiter is breaking it right now
+ */
+function breakLock(lock, judged) {
+  const guard = `${lock}.break`;
+  let fd;
+  try {
+    fd = fs.openSync(guard, 'wx');
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    try {
+      if (Date.now() - fs.statSync(guard).mtimeMs > LOCK_STALE_MS) fs.rmSync(guard, { force: true });
+    } catch {
+      // released while we looked
+    }
+    return false;
+  }
+  try {
+    if (readLockText(lock) === judged) fs.rmSync(lock, { force: true });
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(guard, { force: true });
+  }
+  return true;
 }
 
 /**
@@ -290,11 +345,16 @@ export function withLock(file, fn) {
   const lock = `${file}.lock`;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + LOCK_WAIT_MS;
+  // What this process writes into the lock, kept so that releasing it can tell
+  // its own lock from one another process took after this one was broken.
+  let mine = '';
   for (;;) {
     try {
       const fd = fs.openSync(lock, 'wx');
       try {
-        fs.writeSync(fd, JSON.stringify({ pid: process.pid, start: processStartTime(process.pid), at: Date.now() }));
+        const identity = JSON.stringify({ pid: process.pid, start: processStartTime(process.pid), at: Date.now() });
+        fs.writeSync(fd, identity);
+        mine = identity;
       } catch {
         // An unreadable identity is not a reason to refuse the lock: a waiter
         // treats an empty record as unknown and falls back to age.
@@ -303,7 +363,8 @@ export function withLock(file, fn) {
       break;
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
-      const holder = readHolder(lock);
+      const text = readLockText(lock);
+      const holder = parseHolder(text);
       const alive = holderIsAlive(holder);
       let age;
       try {
@@ -313,7 +374,8 @@ export function withLock(file, fn) {
       }
       const limit = alive === true ? LOCK_BREAK_MS : LOCK_STALE_MS;
       if (alive === false || age > limit) {
-        fs.rmSync(lock, { force: true });
+        if (text === null) continue; // released while we looked
+        if (!breakLock(lock, text)) sleepSync(1);
         continue;
       }
       if (Date.now() >= deadline) {
@@ -327,7 +389,10 @@ export function withLock(file, fn) {
   try {
     return fn();
   } finally {
-    fs.rmSync(lock, { force: true });
+    // Only its own lock. A holder that outlived `LOCK_BREAK_MS` was broken, and
+    // the file may now be someone else's; removing that would hand the section
+    // to a third process while the second is still in it.
+    if (readLockText(lock) === mine) fs.rmSync(lock, { force: true });
   }
 }
 

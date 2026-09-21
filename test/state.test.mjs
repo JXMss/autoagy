@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { withLock, lockIsStale, readState, updateState, markUntrusted, isUntrusted, LOCK_STALE_MS, LOCK_WAIT_MS, touchHeartbeat, readHeartbeat, takeConfigWarnings, recordReviewOutcome, listStates, unreadableStateFiles, reservedStateFile, isConversationStateFile } from '../plugin/lib/state.mjs';
 import { hookBudgetSec } from '../plugin/lib/timeout.mjs';
 import { appendDecision } from '../plugin/lib/log.mjs';
@@ -49,6 +50,50 @@ test('a lock whose holder is gone is taken at once, not after a timer', () => {
   withLock(file, () => {});
   assert.ok(Date.now() - started < LOCK_STALE_MS, 'no timer is consulted for a holder that does not exist');
   assert.equal(fs.existsSync(`${file}.lock`), false);
+});
+
+// A hook the watchdog killed mid-section leaves exactly this lock behind, and
+// every waiter that arrives judges the same dead holder. Removal was a plain
+// `rmSync` of the path, so the second waiter's removal took the lock the first
+// had just taken, both entered the section, and one write was lost — measured,
+// 51 of 150 rounds with three writers. At that rate 15 rounds would all pass by
+// chance about once in 500.
+test('waiters breaking the same dead lock do not both enter the section', async () => {
+  const stateUrl = new URL('../plugin/lib/state.mjs', import.meta.url).href;
+  const worker = [
+    "import fs from 'node:fs';",
+    `const { withLock } = await import(${JSON.stringify(stateUrl)});`,
+    'const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);',
+    'while (Date.now() < Number(process.env.GO)) pause(1);',
+    'withLock(process.env.F, () => { const n = Number(fs.readFileSync(process.env.F, "utf8")); pause(30); fs.writeFileSync(process.env.F, String(n + 1)); });',
+  ].join('\n');
+  const dir = path.join(root, 'race');
+  fs.mkdirSync(dir, { recursive: true });
+  const lost = [];
+  for (let round = 0; round < 15; round++) {
+    const file = path.join(dir, `r${round}.json`);
+    fs.writeFileSync(file, '0');
+    fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: 999_999, start: 1, at: Date.now() }));
+    const go = String(Date.now() + 120);
+    const writers = Array.from({ length: 3 }, () => new Promise((resolve) => {
+      spawn(process.execPath, ['--input-type=module', '-e', worker], { env: { ...process.env, F: file, GO: go }, stdio: 'ignore' }).on('exit', resolve);
+    }));
+    await Promise.all(writers);
+    if (fs.readFileSync(file, 'utf8') !== '3') lost.push(round);
+  }
+  assert.deepEqual(lost, [], 'every round ends with all three writes in');
+});
+
+test('releasing a lock leaves alone one that another process has taken since', () => {
+  // A holder that outlived LOCK_BREAK_MS was broken, and the path may be someone
+  // else's lock by the time it finishes. Removing that one would let a third
+  // process in while the second is still inside.
+  const file = path.join(autoagyHome, 'state', 'taken-since.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const other = JSON.stringify({ pid: 999_998, start: 2, at: Date.now() });
+  withLock(file, () => fs.writeFileSync(`${file}.lock`, other));
+  assert.equal(fs.readFileSync(`${file}.lock`, 'utf8'), other);
+  fs.rmSync(`${file}.lock`, { force: true });
 });
 
 test('a lock whose holder is alive is not broken; the waiter fails closed instead', () => {
