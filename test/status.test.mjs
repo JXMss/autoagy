@@ -179,6 +179,19 @@ test('status says when a conversation\'s state file cannot be read', () => {
   assert.match(out, /autoagy trust/);
 });
 
+test('status says which tools.allow entries do nothing', () => {
+  // The list only covers the `unknown-tool` fallback, which is what keeps `*`
+  // from being a way to switch off the command and edit rules — but from the
+  // setting alone an entry naming a known tool looks like it worked.
+  fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
+  fs.writeFileSync(path.join(dirs.env.AUTOAGY_HOME, 'config.json'), JSON.stringify({ tools: { allow: ['shiny_new_tool', 'run_command', 'view_*', 'mcp_*'] } }));
+  const out = status();
+  assert.match(out, /tools\.allow\s+"run_command" matches a tool autoagy already has a rule for/);
+  assert.match(out, /"view_\*" matches a tool autoagy already has a rule for/);
+  assert.match(out, /"mcp_\*" matches a tool autoagy already has a rule for/);
+  assert.doesNotMatch(out, /"shiny_new_tool" matches/, 'the entry that does something is not reported as a problem');
+});
+
 test('status says when a protection is only partial', () => {
   // Both of these were computed and reported to nobody. A truncated walk is the
   // state a 9p or network workspace is permanently in (measured here: 361 of

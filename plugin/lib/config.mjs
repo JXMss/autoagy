@@ -130,6 +130,28 @@ export const DEFAULT_CONFIG = Object.freeze({
     // MCP tool names (globs over "server/tool") that are read-only and need no review.
     allow: [],
   },
+  tools: {
+    // Tool names (globs) that need no review *where autoagy has no rule of its
+    // own* — the `unknown-tool` fallback. Nothing else: a name autoagy already
+    // classifies keeps its rule, so listing `run_command` here does nothing
+    // (`autoagy status` says so). The escape hatch exists because the tool lists
+    // are a snapshot of agy 1.2.x and agy updates itself: a tool added next month
+    // is reviewed every time it is called, and until now the only way out was
+    // editing the plugin, which is a path the policy refuses to let anything
+    // write.
+    allow: [],
+  },
+  // Whether executing a notebook needs review.
+  //
+  // "review" is the default and stays conservative, because what confines a
+  // notebook's code is *not established*: agy carries no notebook kernel of its
+  // own (no jupyter/kernel symbols in the binary at all) and its only sandbox
+  // component sits under the command subsystem, which neither the notebook tool
+  // nor its handler references. That is evidence, not proof, so the reason given
+  // to the reviewer says as much instead of asserting where the code runs.
+  // "allow" is for someone who has decided their notebooks are theirs — it is
+  // arbitrary code, so it is the widest switch here.
+  notebooks: 'review',
   // Which `command(...)` grant autoagy's own sandbox runs under.
   //
   // "wildcard": `command(*)`, which is what the rewritten call needs to leave
@@ -187,6 +209,7 @@ const ENUMS = {
   onTimeout: ['deny', 'ask'],
   onError: ['deny', 'ask'],
   browser: ['review', 'allow'],
+  notebooks: ['review', 'allow'],
   networkGrants: ['none', 'trusted-domains'],
   webSearch: ['allow', 'review'],
   'commandEnv.mode': ['inherit', 'scrub'],
@@ -321,6 +344,25 @@ function validate(config, warnings, home = os.homedir()) {
       warnings.push(`${key}[${i}] (${JSON.stringify(p)}) is relative, so it can never match an absolute path; ignored — write it absolute, or prefix it with "**/"`);
       return false;
     });
+  }
+  // Glob lists over names rather than paths. Unvalidated, a non-string entry
+  // reached `globToRegExp(String(glob))` and became a pattern nobody wrote.
+  for (const keyPath of ['mcp.allow', 'tools.allow']) {
+    const list = getPath(config, keyPath);
+    if (!Array.isArray(list)) {
+      warnings.push(`config key "${keyPath}" must be an array of name patterns; using default`);
+      setPath(config, keyPath, []);
+      continue;
+    }
+    setPath(
+      config,
+      keyPath,
+      list.filter((g, i) => {
+        if (typeof g === 'string' && g !== '') return true;
+        warnings.push(`${keyPath}[${i}] is not a non-empty string; ignored`);
+        return false;
+      }),
+    );
   }
   for (const [keyPath, allowed] of Object.entries(ENUMS)) {
     const value = getPath(config, keyPath);

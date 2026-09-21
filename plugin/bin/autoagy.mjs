@@ -12,9 +12,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR, detectSandbox, resolveReviewerCommand, protectedPathShapes } from '../lib/context.mjs';
-import { findExecutable } from '../lib/paths.mjs';
+import { findExecutable, globToRegExp } from '../lib/paths.mjs';
 import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath } from '../lib/confine.mjs';
-import { classify, failOpenOutput } from '../lib/policy.mjs';
+import { KNOWN_TOOL_NAMES, classify, failOpenOutput } from '../lib/policy.mjs';
 import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INSTRUCTIONS } from '../lib/guardian.mjs';
@@ -369,6 +369,16 @@ function status() {
       lines.push('                  read-only and a hook planted there is not detected. Slow filesystems (9p/drvfs,');
       lines.push('                  network mounts) hit this; a workspace on a local disk does not.');
     }
+  }
+  // A `tools.allow` entry that names a tool autoagy already classifies does
+  // nothing — every rule above the fallback returns first, which is the intent
+  // (the list must not be a way to switch off the command or the edit rules) but
+  // is invisible from the setting.
+  const knownPattern = (glob) => /^mcp_/.test(glob) || [...KNOWN_TOOL_NAMES].some((name) => globToRegExp(String(glob)).test(name));
+  for (const glob of config.tools?.allow ?? []) {
+    if (!knownPattern(glob)) continue;
+    lines.push(`  ! tools.allow   ${JSON.stringify(glob)} matches a tool autoagy already has a rule for, so it changes nothing;`);
+    lines.push('                  the list only covers tool names autoagy does not know (the `unknown-tool` fallback)');
   }
   // And a `protectedPaths` entry whose shape can never become a mount: it is
   // reviewed but never enforced, on every host, which the setting does not say.

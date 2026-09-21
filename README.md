@@ -174,6 +174,8 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `credentialPaths` | `~/.ssh/**`、`**/.env` 等 | 凭据位置。文件工具读取这些文件（包括经符号链接读取）、`grep_search` 搜索包含它们的目录需要审核。以 `~/` 或绝对路径开头的条目还会在 autoagy 自己的沙箱里被隐藏；没有固定位置的模式（`**/.env`、`**/*.pem`）隐藏不了，所以命令行里字面写出这种路径（`cat .env`）也要审核，沙箱内外一样。不在该沙箱里时，命令行里直接写出**任何**这类路径的命令都需要审核（尽力而为：只识别字面路径、`~` 和 `$HOME`，不解析变量）。另外 `/proc` 一概按凭据位置处理：`/proc/<pid>/environ`、`/proc/<pid>/cmdline` 这类文件被直接读到要审核，而 `/proc` 本身或其中**目录**被遍历（`grep_search /proc`、`grep -r /proc`）也要审核——遍历会读到一个进程一份的 environ；`/proc/cpuinfo`、`/proc/self/status` 这种单个文件不受影响。沙箱内这些都不送审：那里是私有的 /proc，读到的是清空后的环境 |
 | `rules` | `[]` | Codex execpolicy 风格前缀规则，例如 `{"pattern": ["terraform", "destroy"], "decision": "forbidden"}`；`allow` 仅对不含重定向、替换、变量、通配的简单命令生效。**注意 `allow` 也覆盖带 `BypassSandbox: true` 的同一条命令**（Codex 的 execpolicy 同样先于沙箱/升级判定，见 [docs/design.md](docs/design.md) §1）：写 `{"pattern": ["npm", "test"], "decision": "allow"}` 等于同时允许它在宿主上带完整权限和网络免审运行。要区分两者就用 `prompt`，或者不写这条规则 |
 | `mcp.allow` | `[]` | 免审的 MCP 工具（`"server/tool"` glob，如 `"github/get_*"`），与其它路径类配置用同一套 glob：支持 `*`、`?`、`{a,b}`，`*` 不跨 `/` |
+| `tools.allow` | `[]` | 免审的**工具名** glob。**只对 autoagy 不认识的工具名生效**（`unknown-tool` 那条兜底）：上面每一条规则都在兜底之前返回，所以写一个它已经有规则的名字（`run_command`、`view_*`、`mcp_*`…）不会有任何效果——`autoagy status` 会点名这种条目。这也是 `*` 在这里安全的原因：它够不到命令、编辑、凭据读取那些规则。它存在是因为工具名列表是 agy 1.2.x 的快照而 agy 会自动更新，下个月新增的工具会每次调用都送审，而唯一的出路本来是改插件目录——那是策略禁止任何东西写入的地方 |
+| `notebooks` | `"review"` | `"allow"` 时 `notebook_execution` 免审。默认送审，且**不再声称**它在沙箱外执行：agy 二进制里没有任何 notebook kernel（连 jupyter/kernel 符号都没有），而它唯一的沙箱组件在 command 子系统下、notebook 工具和它的 handler 都不经过那里——这是证据不是证明，所以交给审核模型的理由如实写成「确认不了有什么在约束它」。notebook 跑的是任意代码，所以这是这张表里最宽的一个开关 |
 | `browser` | `"review"` | 浏览器点击/输入/执行 JS，以及 `browser_subagent` 是否审核 |
 | `policy.file` / `policy.extra` | — | 替换/追加组织安全策略（对应 Codex 的 tenant policy），例如声明哪些仓库、域名是可信的。**必须是绝对路径**（`~` 会被展开，相对路径不接受——那样它会按进程所在的目录解析，同一个值在不同场合指向不同文件）。**写在 agent 能写的地方等于没写**：指到工作区里，agent 就能免审改写审核所依据的策略本身。这两种情况都**不会被加载**，autoagy 退回内置策略并在 stderr 上说明原因。放在 `~/.gemini/autoagy/` 下或别的 agent 写不到的位置 |
 | `circuitBreaker` | `3 / 10 / 50` | 连续拒绝次数 / 窗口内拒绝次数 / 窗口大小 |
@@ -193,7 +195,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | 编辑 autoagy 自己的配置/插件目录，或**任何能注册 hook 的位置**（`~/.gemini/config/hooks.json`、`~/.gemini/config/plugins/` 下的任何目录） | 直接拒绝。写进这些位置的文件会成为 agy 在**每次工具调用前执行的命令，且在所有沙箱之外**——等于 agent 给自己装监管者。这个问题只该问人，不该由模型判一次然后一直生效 |
 | 沙箱内的命令 | 放行（Linux 上改写为在 autoagy 自己的沙箱里运行）；破坏性命令（强制 `rm`、`git reset --hard`、`git clean -f`、`find -delete`……）审核 |
 | 读进程环境的命令（`printenv`、裸 `env`、`ps auxe`、`jq env`、打印变量的 shell 内建（`export -p`、`declare -x`、裸 `set`、`compgen -e`）、`busybox <applet>` 形式的同一个命令、解释器内联代码里的 `process.env`／`os.environ`／`ENV`／`$ENV`／`ENVIRON`，或展开一个沙箱白名单之外、而环境里确实存在的 `$变量`） | 审核——除非这条命令的环境已被重建（autoagy 自己的沙箱，或 `commandEnv.mode: "scrub"`），那时它读不到东西，不送审 |
-| `BypassSandbox: true` 的命令、`notebook_execution` | 审核 |
+| `BypassSandbox: true` 的命令、`notebook_execution` | 审核（notebook 可用 `notebooks: "allow"` 关掉；它执行的是任意代码，而且确认不了有什么在约束它） |
 | 无沙箱环境（关闭沙箱或 `--dangerously-skip-permissions`） | 已知只读命令放行，其余审核 |
 | `invoke_subagent` 启动不继承 customizations、又带工具的自定义 agent | 审核（这种 agent 的工具调用不经过 autoagy） |
 | `browser_subagent`、`generate_image`、`delete_knowledge` | 审核：前者的导航和点击是它自己做的，不逐条经过本策略；后者写出的路径策略看不到；删除的知识无法从工作区恢复 |
@@ -201,7 +203,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | 命令里给 `HOME` 或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值 | 审核：`HOME` 决定 `~` 指向哪里，也就决定了策略里的凭据清单和「不可编辑路径」 |
 | `send_command_input` | 只在 autoagy 自己的沙箱生效时放行（`config.sandbox: "on"` 是声明，Antigravity 的沙箱也让 `.git` 和日志可写）；macOS/Windows/无 bwrap 时一律审核 |
 | 向用户申请权限（`ask_permission`、`ask_custom_permission`） | 放行——正常情况下弹窗会到你手里，由你决定，autoagy 没什么可加的。但 `--dangerously-skip-permissions` 下 agy 会自己同意所有工具权限（它自己的字符串就是这么写的：`auto-approving all tool permissions`），平台读不到 agy 参数时也无法排除这个标志——那时没有人能回答，申请就送审（策略里「削弱 agent 自身的监管」属于持续性安全削弱） |
-| MCP（含 `read_resource` / `list_resources` 这类 MCP 资源读取）、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核 |
+| MCP（含 `read_resource` / `list_resources` 这类 MCP 资源读取）、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核（未知工具名可用 `tools.allow` 免审——**只有**未知的那些，见配置表） |
 | **会话被标记为不可信之后**（见下）的文件编辑和读取文件内容 | 审核；触及监管文件的命令改为直接拒绝 |
 
 被审核的删除命令（`rm`/`rmdir`/`shred`/`unlink`、`git clean`、`git rm -f`、`find -delete`、`truncate`、`dd of=`）会附带 autoagy 预先检查的目标事实（是否存在、类型、条目数、是否在工作区内、是否是 git 仓库；路径经过符号链接时，按 `rm` 实际会删除的位置判断，并给出 `resolves_to`），弥补审核模型没有工具、无法像 Codex 那样自己去看的问题。

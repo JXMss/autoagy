@@ -238,6 +238,39 @@ test('code execution, agent definitions and unknown tools are reviewed', () => {
   assert.equal(verdict('notebook_execution', {}).category, 'code-execution');
   assert.equal(verdict('define_subagent', {}).category, 'agent-definition');
   assert.equal(verdict('brand_new_tool', {}).category, 'unknown-tool');
+  // The reason must not claim where the notebook's code runs. Nothing measured
+  // says it is outside the terminal sandbox: agy holds no notebook kernel of its
+  // own, and its sandbox belongs to the command subsystem, which this tool does
+  // not go through — evidence, not proof, so the reviewer is told that much.
+  const notebook = verdict('notebook_execution', {});
+  assert.match(notebook.reason, /not established/);
+  assert.doesNotMatch(notebook.reason, /outside the terminal sandbox/);
+});
+
+test('the two switches for tools: notebooks, and the unknown-tool fallback', () => {
+  // A notebook is arbitrary code, so this is the widest switch in the config; it
+  // exists because a notebook-heavy project otherwise pays a review per cell.
+  assert.equal(verdict('notebook_execution', {}, { config: configWith({ notebooks: 'allow' }) }).verdict, 'allow');
+  assert.equal(verdict('notebook_execution', {}, { config: configWith({ notebooks: 'allow' }) }).category, 'notebook-execution');
+
+  // The tool lists are a snapshot of agy 1.2.x and agy updates itself, so a tool
+  // added later is reviewed on every call with no way out but editing the plugin
+  // — which the policy refuses to let anything write.
+  const allowNew = configWith({ tools: { allow: ['brand_new_tool'] } });
+  assert.equal(verdict('brand_new_tool', {}, { config: allowNew }).verdict, 'allow');
+  assert.equal(verdict('brand_new_tool', {}, { config: allowNew }).category, 'tool-allowed');
+  assert.equal(verdict('brand_new_tool', {}, { config: configWith({ tools: { allow: ['brand_*'] } }) }).verdict, 'allow');
+  assert.equal(verdict('other_new_tool', {}, { config: allowNew }).category, 'unknown-tool', 'and only the names listed');
+
+  // The containment that makes the list safe to hand a user: it reaches the
+  // fallback and nothing else, so even `*` cannot switch off a rule autoagy has.
+  // Every branch above the fallback has already returned by then.
+  const allowAll = configWith({ tools: { allow: ['*'] }, ownSandbox: 'off' });
+  assert.equal(verdict('run_command', { CommandLine: 'rm -rf /', BypassSandbox: true }, { config: allowAll }).category, 'sandbox-escalation');
+  assert.equal(verdict('write_to_file', { TargetFile: '/etc/passwd' }, { config: allowAll }).category, 'write-outside-workspace');
+  assert.equal(verdict('view_file', { AbsolutePath: path.join(dirs.home, '.ssh', 'id_ed25519') }, { config: allowAll }).category, 'credential-read');
+  assert.equal(verdict('call_mcp_tool', { ServerName: 's', ToolName: 't' }, { config: allowAll }).category, 'mcp');
+  assert.equal(verdict('notebook_execution', {}, { config: allowAll }).category, 'code-execution', 'a notebook has its own switch, so the list does not reach it');
 });
 
 test('a browser subagent, image generation and deleting knowledge are reviewed', () => {

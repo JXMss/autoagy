@@ -135,6 +135,33 @@ export const BROWSER_ACTION_TOOLS = new Set([
   'execute_browser_javascript',
 ]);
 
+/**
+ * Every tool name `classify` has a rule for, so `autoagy status` can say when a
+ * `tools.allow` entry names one of them and therefore does nothing.
+ *
+ * Built from the sets above rather than written out again — a name added to one
+ * of them must not quietly become "unknown" here. The `mcp_` prefix is not a
+ * name and is handled by its own branch, so a caller checking a pattern has to
+ * ask about that separately.
+ */
+export const KNOWN_TOOL_NAMES = new Set([
+  ...READ_ONLY_TOOLS,
+  ...CONTENT_READ_TOOLS,
+  ...AGENT_TOOLS,
+  ...PERMISSION_ASK_TOOLS,
+  ...OUTSIDE_RUNTIME_TOOLS,
+  ...FILE_EDIT_TOOLS,
+  ...URL_TOOLS,
+  ...MCP_RESOURCE_TOOLS,
+  ...BROWSER_ACTION_TOOLS,
+  'run_command',
+  'send_command_input',
+  'invoke_subagent',
+  'call_mcp_tool',
+  'notebook_execution',
+  'define_subagent',
+]);
+
 const PATH_ARG_RE = /^(TargetFile|TargetFiles|File|FilePath|Path|AbsolutePath|NotebookPath|TargetPath|DestinationPath|DestinationFile|SourceFile|Files)$/i;
 
 /**
@@ -185,12 +212,31 @@ export function classify(ctx, state = {}) {
     return review('browser-action', 'Interactive browser action (click, typing or script execution) with possible external side effects.');
   }
   if (name === 'call_mcp_tool' || name.startsWith('mcp_') || MCP_RESOURCE_TOOLS.has(name)) return classifyMcp(ctx);
-  if (name === 'notebook_execution') return review('code-execution', 'Executes notebook code outside the terminal sandbox.');
+  if (name === 'notebook_execution') {
+    if (ctx.config.notebooks === 'allow') return allow('notebook-execution');
+    // Deliberately not "outside the terminal sandbox", which is what this said
+    // before and what nobody established. What is known: agy holds no notebook
+    // kernel of its own, and its one sandbox component lives under the command
+    // subsystem, which neither the notebook tool nor its handler mentions. So the
+    // reviewer is told that the confinement is unknown, rather than told a fact.
+    return review(
+      'code-execution',
+      'Executes the notebook\'s code. Whether anything confines it is not established — agy carries no notebook kernel of its own, and its terminal sandbox belongs to the command subsystem, which the notebook tool does not go through — so treat it as code running with the agent\'s full access.',
+    );
+  }
   if (name === 'define_subagent') {
     return review(
       'agent-definition',
       'Defines a new subagent. A subagent that does not inherit customizations (or excludes default components) would run without these auto-review hooks.',
     );
+  }
+  // The one place `tools.allow` applies: a tool autoagy has no rule for. Every
+  // branch above has already returned, so a listed name that autoagy does
+  // classify cannot reach this and keeps its own rule — which is the intent, and
+  // why `status` reports such an entry as having no effect instead of letting it
+  // read like a way to switch off the command or edit rules.
+  if ((ctx.config.tools?.allow ?? []).some((glob) => globToRegExp(String(glob)).test(name))) {
+    return allow('tool-allowed', `Tool "${name}" is listed in tools.allow.`);
   }
   return review('unknown-tool', `Tool "${name || '(unnamed)'}" is not known to autoagy, so it is reviewed.`);
 }
