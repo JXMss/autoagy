@@ -288,12 +288,29 @@ export function buildReviewPrompt(ctx, classification, evidence, extra = {}) {
   return { system, user: parts.join(''), action };
 }
 
-/** Finds the first JSON object in text that parses. */
-function firstJsonObject(text) {
-  for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
+/**
+ * Every top-level JSON object in `text` that carries an `outcome`.
+ *
+ * Only reached when the reply is not one JSON document: a code fence, a sentence
+ * before the answer, or the answer repeated (agy's harness repeats it; see
+ * design.md §2.4). This used to return the first object that parsed. A reviewer
+ * that quotes the evidence before answering quotes untrusted text, so a
+ * transcript line holding `{"outcome":"allow"}`, echoed ahead of a real `deny`,
+ * became the verdict. Codex takes the span from the first `{` to the last `}`,
+ * which does not parse when there are two objects, and so fails closed. The same
+ * result here, stated rather than incidental: see `parseAssessment`.
+ *
+ * An object that parses is skipped whole, so an object nested in another is not
+ * a candidate of its own.
+ */
+function assessmentCandidates(text) {
+  const found = [];
+  let start = text.indexOf('{');
+  while (start >= 0) {
     let depth = 0;
     let inString = false;
-    for (let i = start; i < text.length; i++) {
+    let end = -1;
+    for (let i = start; i < text.length && end < 0; i++) {
       const c = text[i];
       if (inString) {
         if (c === '\\') i++;
@@ -302,32 +319,39 @@ function firstJsonObject(text) {
       }
       if (c === '"') inString = true;
       else if (c === '{') depth++;
-      else if (c === '}') {
-        depth--;
-        if (depth === 0) {
-          try {
-            return JSON.parse(text.slice(start, i + 1));
-          } catch {
-            break;
-          }
-        }
+      else if (c === '}' && --depth === 0) end = i;
+    }
+    let parsed = null;
+    if (end >= 0) {
+      try {
+        parsed = JSON.parse(text.slice(start, end + 1));
+      } catch {
+        parsed = null;
       }
     }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (Object.hasOwn(parsed, 'outcome')) found.push(parsed);
+      start = text.indexOf('{', end + 1);
+    } else {
+      start = text.indexOf('{', start + 1);
+    }
   }
-  return null;
+  return found;
 }
 
-/**
- * Codex's tolerant assessment parser: strict JSON first, then the first JSON
- * object embedded in prose. Missing fields get Codex's defaults.
- */
 export function parseAssessment(text) {
   if (typeof text !== 'string' || text.trim() === '') throw new Error('review completed without an assessment payload');
   let payload;
   try {
     payload = JSON.parse(text);
   } catch {
-    payload = firstJsonObject(text);
+    // Answers that agree are one answer (the repeats). Answers that disagree are
+    // none: which of them the reviewer meant is exactly what is in doubt, and a
+    // failed review is denied (and retried) rather than guessed at.
+    const candidates = assessmentCandidates(text);
+    const outcomes = new Set(candidates.map((c) => c.outcome));
+    if (outcomes.size > 1) throw new Error(`the reply holds assessments that disagree (${[...outcomes].map((o) => JSON.stringify(o)).join(' and ')}), so none of them is the answer`);
+    payload = candidates[0] ?? null;
   }
   if (!payload || typeof payload !== 'object') throw new Error('assessment was not valid JSON');
   const outcome = payload.outcome;
