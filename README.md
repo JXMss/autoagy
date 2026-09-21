@@ -50,7 +50,9 @@ node scripts/install.mjs            # 先看会改什么：node scripts/install.
    - 确保 `enableTerminalSandbox: true`、`toolPermission: "proceed-in-sandbox"`；
    - 设 `allowNonWorkspaceAccess: false`——这是**唯一一道在写入那一刻生效**的检查（agy 会跟着符号链接判落点），堵的是「autoagy 检查完、agy 落笔前路径被换掉」那条缝。`writableRoots` 里列的目录会各自拿到一条 `write_file(<目录>)` 授权，照常免审编辑；没事先声明的临时区外编辑则会多一次确认（headless 下失败）。
 
-**故意不授予 `read_url(*)`**：Antigravity 会把 `read_url` 规则同时当作终端沙箱的网络白名单，授予后沙箱内未经审核的命令就能访问任意网络（等于关掉 Codex 的“沙箱无网络”这一层）。
+**永不授予 `read_url(*)`**：Antigravity 会把 `read_url` 规则同时当作终端沙箱的网络白名单，授予后沙箱内未经审核的命令就能访问任意网络（等于关掉 Codex 的“沙箱无网络”这一层）。这条通配符授权不会由任何配置生成。
+
+**但逐个域名可以选择授予**：`networkGrants: "trusted-domains"` 会让 `autoagy setup` 为 `trustedDomains` 里每一项写一条 `read_url(<域名>)`。这是为了消掉**唯一一个 autoagy 答不了的弹窗**——hook 返回 `allow` 盖不过 Antigravity 自己对未授权域名的权限询问（实测），所以第一次抓取任何一个新域名都会问到你。代价取决于哪个沙箱在跑：**autoagy 自己的沙箱生效时代价为零**（那里根本没有网络：`--unshare-net`，而且 seccomp 只允许 AF_UNIX socket，被授权的域名在沙箱里照样访问不到，白名单管的是 agy 的终端沙箱——而改写正是把命令从那个沙箱里搬出来）；**没有它的时候**（macOS、Windows、没装 bubblewrap、`ownSandbox: "off"`），沙箱内未经审核的命令就能访问这几个域名——这正是 Codex 网络白名单的形状，不是对它的背离。条目按原样取（去掉开头的 `*.`），**去掉之后仍含通配符的条目会被跳过并在 `autoagy status` 里点名**，不会被放宽成一条更大的规则。默认 `"none"`，也就是今天的行为。
 
 卸载（还原上面的设置改动并移除插件）：
 
@@ -121,7 +123,7 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 与 Antigravity 的沙箱相比，有这些变化：
 
 - 会写 `.git` 的 git 命令（`commit`、`checkout`、`stash`……）在沙箱里会失败，agent 需要加 `BypassSandbox: true` 重试并经过审核，这一点与 Codex 相同；
-- 沙箱里完全没有网络，`read_url(...)` 授权过的域名在沙箱里也访问不到；
+- 沙箱里完全没有网络，`read_url(...)` 授权过的域名在沙箱里也访问不到（这正是 `networkGrants` 在这里代价为零的原因）；
 - agent 看到的工具结果前面会多一行 “A pre-tool hook changed the arguments of this tool call”。
 
 **自检**：这套做法依赖 agy 没有公开的行为，而 agy 会自动更新。所以每条被改写的命令执行后，autoagy 都会在 PostToolUse 里核对 agy 实际执行的参数。只要有一次对不上（比如更新后的 agy 不再执行改写），autoagy 就对这个 agy 版本停用自己的沙箱：`auto` 退回 Antigravity 的沙箱，`on` 改为把命令送审。同时会拒绝下一条命令一次，让 agent 告诉你发生了什么。agy 换了版本会重新检查。`autoagy status` 会显示自检结果。
@@ -162,6 +164,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `reviewer.agy.model` / `effort` | 默认模型 / `"low"` | 审核用的 agy 模型与推理强度 |
 | `onDenied` / `onTimeout` / `onError` | `"deny"` | 改为 `"ask"` 时，审核拒绝/超时/出错会转为弹窗让你决定 |
 | `trustedDomains` | `localhost` 等 | **抓取**网页到这些域名（含子域名）免审 |
+| `networkGrants` | `"none"` | `"trusted-domains"` 时，`autoagy setup` 为 `trustedDomains` 每一项写一条 `read_url(<域名>)` 授权，于是这些域名的抓取不再由 Antigravity 弹窗询问（那是 hook 的 `allow` 盖不过去的唯一一类弹窗）。代价：`read_url` 规则同时是**终端沙箱**的出网白名单，所以在 autoagy 自己的沙箱**没有**生效的机器上（macOS、Windows、无 bwrap、`ownSandbox: "off"`），沙箱内免审的命令也能访问这些域名；自带沙箱生效时代价为零（那里没有网络）。`*.x.com` 按 `x.com` 授予；去掉 `*.` 后仍含通配符的条目跳过并在 `status` 里点名——`read_url(*)` 不会被生成 |
 | `browserTrustedDomains` | `[]` | **浏览器导航**到这些域名免审。默认空白：抓取拿到的是文本，导航会把页面脚本放进一个能联网、不在任何沙箱里的浏览器里跑，而本地开发服务器提供的页面通常正是 agent 免审就能改的工作区文件。要恢复「浏览器打开 localhost 免审」就把 `localhost` 加进来 |
 | `webSearch` | `"allow"` | `search_web` 是否送审。搜索把 agent 写的 query 发给搜索引擎，而请求是 agy 自己发的——没有任何沙箱在这条路上（`--unshare-net` 挡的是沙箱内命令的网络）。默认 `"allow"`，与 Codex 一致：Codex 的 web search 是托管工具，不经过审批流程，改由配置限制（`web_search` 模式、受管 `requirements.toml` 里的 `allowed_web_search_modes`）。需要审核每次搜索就设为 `"review"`，此时 autoagy 自身出错或超时的那条失败路径也照样拒绝——否则它恰好在监管最弱的时候失效 |
 | `ownSandboxEnvPassThrough` | `[]` | 除白名单外额外传给沙箱内命令的环境变量名（支持 `PREFIX_*`）。沙箱默认清空环境，列在这里的变量对免审命令可读，属于削弱沙箱。**值会写进改写后的命令行，agent 能看到，不要放密钥** |
@@ -229,7 +232,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 - **凭据读取的审核是按路径名判的，按目录搜索就绕过去了。** `read_file .env`、`cat .env` 会送审，但 `grep_search {SearchPath: <工作区>}` 和沙箱里的 `grep -r API_KEY .` 读的是同一个文件、返回的是命中行，两者都免审。原因是 `**/.env`、`**/*.pem` 这类没有固定位置的模式列举不出来，只有 `~/.ssh/**` 这种锚定的位置才进得了「搜索的目录里包含凭据位置」这条检查。这条没有堵：Codex 根本没有 credentialPaths 这个概念（工作区文件本来就可读），而要堵住它就得审核所有全库搜索，那是 agent 最常用的操作。把工作区的 `.env` 隐藏掉也不行——那会让所有用 dotenv 的项目在沙箱里跑不起来。真正的边界仍然是「工作区内的文件 agent 都读得到」。
 - **Windows 上从设置文件推断沙箱状态已被停用**：Windows 读不到 agy 进程的参数，`--dangerously-skip-permissions` 无法识别，而 `autoagy setup` 写进设置文件的那两个值正是检查所依据的。所以那里不再声称「沙箱有效」，而是按无沙箱处理——后果是不带沙箱的普通命令（`npm test`、`ls`、`curl`）从免审变成送审。同样因为读不到启动参数，Windows 上**弹窗一律改为拒绝**：那个标志无法排除，弹窗可能被静默自动同意，宁可不问。
 - **沙箱外的已知只读命令要看它解析到哪里。** autoagy 自己的沙箱不跑的时候（macOS、Windows、没装 bwrap），命令用的是继承来的 `PATH`，很多开发环境会包含 `.venv/bin`、`node_modules/.bin` 这类目录——都在可写根内，改动免审。已知只读的白名单只比较 basename，所以 `ls` 会被当作安全的，哪怕实际执行的是 agent 刚写进 `node_modules/.bin` 的那个 `ls`。现在这条链会被送审：无沙箱时，如果命令解析到的文件落在可写根内，就不放行（`command-from-writable-root`）。代价是这类环境里从 `.venv/bin` 调工具会多一次审核——这是刻意的，因为那正是「先写后执行」成立的地方。autoagy 自己的沙箱内不问这个问题：沙箱已经限定了任何二进制能碰到什么。
-- Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问（这是为保住沙箱网络隔离做的取舍）。
+- Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问——**这是 autoagy 唯一答不上的弹窗**，也是默认配置下日常最可能剩下的那一个。要消掉它就把 `networkGrants` 设成 `"trusted-domains"`（见配置表）：代价在 Linux＋bwrap 上为零，在没有自带沙箱的机器上等于给沙箱内免审的命令开放那几个域名。`autoagy status` 会报现在覆盖了几个域名、以及这台机器上它值多少代价。
 - hook 负载里没有可信的用户消息（`lastUserInput` 等字段存在但未填），autoagy 只能从 transcript 里识别用户说的话，而 transcript 的完整性依赖上面的沙箱。
 - 审核模型没有工具（Codex 的 guardian 可以做只读检查）；autoagy 用确定性的目标检查部分弥补。
 - **文件编辑本身不在任何沙箱里执行**：写文件的是 agy 自己（Codex 的 `apply_patch` 在文件系统沙箱里跑），autoagy 只能在写入前检查一次目标路径。如果一条后台的沙箱命令在这中间把路径换成了符号链接，写入就会落到别处（检查时刻和使用时刻不一致）。**批准前 autoagy 会把路径解析好再交给 agy**（实测 `overwrite` 对编辑和读取工具都生效），所以路径里**原本就有的符号链接**事后被改指向不再能移动那次写入——这同时也是日常最常见的误报来源（pnpm、构建缓存会在后台不停重建符号链接）。**没覆盖的是另一种**：路径里一个真实目录在检查之后被换成符号链接，因为写入无论如何都要经过那个目录项，这一种只有 agy 自己在打开文件时才拦得住。PostToolUse 会在写入后重新解析目标并比对：对不上就记一条 `edit-target-changed`、熔断本轮，并把整个会话标记为不可信（见「会话信任」）。事后发现，不能阻止那一次写入。**读取走的是同一条路，也有同样的事后核对**：agy 同样是自己去读、不经过任何沙箱，所以返回文件内容的工具（`view_file`、`read_file`、`grep_search` 等，`grep_search` 按它的 `SearchPath` 判）在执行后会重新解析一次目标，对不上就记 `read-target-changed`、同样熔断并标记会话不可信。**但性质比编辑更不可逆**：写错地方还能清理，读错地方的内容已经进了模型上下文，收不回来——所以那条提示直接告诉你哪个文件可能被读走了、该去轮换什么。根治仍然要等 Antigravity 把编辑和读取都放进沙箱。

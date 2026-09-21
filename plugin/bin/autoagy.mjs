@@ -21,7 +21,7 @@ import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INST
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
 import { listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, readSetupRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
 import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath } from '../lib/tripwire.mjs';
 
@@ -351,6 +351,29 @@ function status() {
     }
   } else {
     lines.push('  command grant   command(*) — a standing licence to run anything, which keeps working if the hook stops (see commandGrant: "executor")');
+  }
+  // A fetch of a domain agy has no rule for reaches the user however the reviewer
+  // judged it — a hook `allow` does not override that prompt — so how many
+  // domains are covered is worth stating. Reported here rather than with the
+  // settings file because what it *costs* depends on which sandbox is running,
+  // and that is known at this point: inside autoagy's own sandbox a granted
+  // domain is unreachable anyway (`--unshare-net`, AF_UNIX-only seccomp), while
+  // without it the same grant is also an entry in agy's terminal sandbox
+  // allowlist. Whether the grants are actually present is the `missing grants`
+  // line further down; `grantsFor` includes them, so it needs nothing extra.
+  const network = trustedDomainGrants(config);
+  if (config.networkGrants === 'trusted-domains') {
+    lines.push(`  network grants  ${network.grants.length} read_url grant(s) from trustedDomains${network.grants.length ? `: ${network.grants.join(', ')}` : ''}`);
+    if (network.grants.length > 0 && !own.active) {
+      lines.push("                  those hosts are reachable from commands in agy's terminal sandbox without review;");
+      lines.push("                  autoagy's own sandbox is what would keep them out, and it is not running here");
+    }
+    for (const entry of network.skipped) {
+      lines.push(`  ! network grants trustedDomains entry ${JSON.stringify(entry)} got no read_url grant: it is not a plain`);
+      lines.push('                  hostname, so fetching it still prompts. A wildcard is never widened into a grant.');
+    }
+  } else if ((config.trustedDomains ?? []).length > 0) {
+    lines.push(`  network grants  none — a first fetch of any domain still prompts, including the ${config.trustedDomains.length} in trustedDomains (see networkGrants)`);
   }
   // The degraded mode is worth saying out loud rather than falling back in
   // silence: without a usable `flock`, autoagy cannot tell whether a sandboxed
@@ -696,7 +719,16 @@ function setup(flags) {
   for (const c of report.changes) console.log(`  ${dryRun ? 'would set' : 'set'} ${c.key}: ${JSON.stringify(c.from)} -> ${JSON.stringify(c.to)}`);
   for (const g of report.conflicting) console.log(`  ! ${g} is also in permissions.deny; deny wins, so those actions stay blocked`);
   if (report.backup) console.log(`  backup: ${report.backup}`);
-  console.log('\nread_url(...) is intentionally not granted: it would also open the terminal sandbox to the network.');
+  // This line used to be unconditional, and with `networkGrants` set it
+  // contradicted the plan printed a few lines above it.
+  const network = trustedDomainGrants(config);
+  if (network.grants.length > 0) {
+    console.log(`\n${network.grants.length} read_url grant(s) come from trustedDomains (networkGrants: "trusted-domains"), so fetching those domains stops prompting.`);
+    console.log('A read_url rule is also the terminal sandbox\'s network allowlist: where autoagy\'s own sandbox is not running, unreviewed commands can reach those hosts too.');
+    console.log('read_url(*) is never granted, and an entry that is not a plain hostname is skipped — `autoagy status` names any that were.');
+  } else {
+    console.log('\nread_url(...) is not granted: it would also open the terminal sandbox to the network. Per-domain grants are opt-in, see `networkGrants`.');
+  }
   console.log('Antigravity IDE / Antigravity 2.0: add the same grants under Settings → Permission Grants and keep the terminal sandbox on.');
 }
 

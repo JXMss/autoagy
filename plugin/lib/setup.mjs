@@ -7,9 +7,11 @@
 //   command(*)      agent-requested sandbox bypass no longer prompts natively
 //   mcp(*)          MCP tool calls no longer prompt natively
 //   execute_url(*)  browser interactions no longer prompt natively
-// read_url(...) is deliberately NOT granted: read_url rules also become the
-// terminal sandbox's network allowlist, which would let unreviewed sandboxed
-// commands reach the network.
+// read_url(*) is never granted by anything here: a read_url rule is also an entry
+// in the terminal sandbox's network allowlist (measured), so the wildcard would
+// let unreviewed sandboxed commands reach any host. Per-domain grants derived
+// from `trustedDomains` are opt-in — see `trustedDomainGrants` and
+// `networkGrants` in config.mjs.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -55,13 +57,61 @@ export function writableRootGrants(config, home = os.homedir()) {
 }
 
 /**
+ * A `read_url(<domain>)` grant for each `trustedDomains` entry, when
+ * `networkGrants` asks for them.
+ *
+ * The prompt this removes is the one autoagy cannot answer: a hook `allow` does
+ * not override agy's own permission for a fetch (measured), so the first fetch of
+ * any domain reaches the user however the reviewer judged it. `trustedDomains`
+ * already says which domains need no review, and this hands that same list to
+ * agy.
+ *
+ * It is opt-in because a `read_url` rule is also an entry in the *terminal
+ * sandbox's* network allowlist. What that costs depends on which sandbox is
+ * running: inside autoagy's own one, nothing at all — there is no network there
+ * (`--unshare-net`, plus a seccomp filter that allows only AF_UNIX sockets), and
+ * the rewrite takes the command out of agy's sandbox, which is the one the
+ * allowlist governs. Without it (macOS, Windows, no bubblewrap, `ownSandbox:
+ * "off"`) an unreviewed command can reach those hosts, which is the shape of
+ * Codex's own network allowlist.
+ *
+ * `*` is the line that is not crossed. A leading `*.` is stripped, because
+ * `isTrustedHost` treats `*.example.com` and `example.com` as the same rule, but
+ * an entry that still holds a wildcard after that is skipped and reported rather
+ * than turned into something wider than it looks — `read_url(*)` must not be
+ * reachable from a configuration file. Anything that is not hostname-shaped is
+ * skipped for the same reason: it would be a rule nobody can predict the meaning
+ * of.
+ *
+ * @returns {{ grants: string[], skipped: string[] }} `skipped` is for reporting;
+ *   an entry silently dropped here is a domain that keeps prompting with no
+ *   explanation.
+ */
+export function trustedDomainGrants(config) {
+  if (config?.networkGrants !== 'trusted-domains') return { grants: [], skipped: [] };
+  const grants = new Set();
+  const skipped = [];
+  for (const raw of config.trustedDomains ?? []) {
+    if (typeof raw !== 'string' || raw.trim() === '') continue;
+    const domain = raw.trim().toLowerCase().replace(/^\*\./, '');
+    // Hostnames, IPv4, and the bracketed IPv6 form `trustedDomains` already uses.
+    if (/[*?]/.test(domain) || !/^[a-z0-9._:[\]-]+$/.test(domain)) {
+      skipped.push(raw);
+      continue;
+    }
+    grants.add(`read_url(${domain})`);
+  }
+  return { grants: [...grants], skipped };
+}
+
+/**
  * Every grant a configuration needs, in the order `autoagy setup` writes them.
  * @param {object} config
  * @param {{ autoagyHome: string, home?: string }} where
  */
 export function grantsFor(config, { autoagyHome, home = os.homedir() }) {
   const command = config?.commandGrant === 'executor' ? `command(${executorPath(autoagyHome)})` : 'command(*)';
-  return [command, 'mcp(*)', 'execute_url(*)', ...writableRootGrants(config, home)];
+  return [command, 'mcp(*)', 'execute_url(*)', ...writableRootGrants(config, home), ...trustedDomainGrants(config).grants];
 }
 
 export function cliSettingsPath(home = os.homedir()) {

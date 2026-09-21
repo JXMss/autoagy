@@ -58,6 +58,31 @@ export const DEFAULT_CONFIG = Object.freeze({
   onError: 'deny',
   // Domains a web fetch may reach without review.
   trustedDomains: ['localhost', '127.0.0.1', '[::1]'],
+  // Whether `autoagy setup` also writes Antigravity a `read_url(<domain>)` grant
+  // for each `trustedDomains` entry.
+  //
+  // It has to be a switch, because a `read_url` rule is two things at once
+  // (measured): permission for the fetch tool, and an entry in the *terminal
+  // sandbox's* network allowlist. That is why `read_url(*)` is never written by
+  // anything here.
+  //
+  // "none" (default) keeps today's behavior: autoagy can approve a fetch, but agy
+  // still asks for its own permission the first time a domain comes up, and that
+  // prompt is the one thing autoagy cannot answer — a hook `allow` does not
+  // override it (measured). For someone whose reason for installing this is "stop
+  // asking me", that prompt is the most likely one left.
+  //
+  // "trusted-domains" hands agy the list the user already wrote, so those fetches
+  // stop prompting. What it costs depends on whether autoagy's own sandbox is
+  // running: with it, nothing, because a confined command has no network at all
+  // (`--unshare-net`, and the seccomp filter allows only AF_UNIX sockets) — the
+  // allowlist applies to agy's terminal sandbox, which is the one autoagy's
+  // rewrite takes the command out of. Without it (macOS, Windows, no bubblewrap,
+  // `ownSandbox: "off"`) an unreviewed sandboxed command can reach those specific
+  // hosts, which is Codex's network-allowlist model rather than a departure from
+  // it. Entries are taken as written minus a leading `*.`, and an entry that
+  // still holds a wildcard is skipped rather than widened.
+  networkGrants: 'none',
   // Domains browser navigation may reach without review. Empty by default: a
   // navigation runs the page's scripts in a networked, unsandboxed browser, and
   // a local dev server usually serves files the agent may have edited without
@@ -162,6 +187,7 @@ const ENUMS = {
   onTimeout: ['deny', 'ask'],
   onError: ['deny', 'ask'],
   browser: ['review', 'allow'],
+  networkGrants: ['none', 'trusted-domains'],
   webSearch: ['allow', 'review'],
   'commandEnv.mode': ['inherit', 'scrub'],
   commandGrant: ['wildcard', 'executor'],

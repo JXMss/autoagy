@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, RECOMMENDED_SETTINGS } from '../plugin/lib/setup.mjs';
+import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS } from '../plugin/lib/setup.mjs';
 import { executorPath } from '../plugin/lib/tokens.mjs';
 import { configPath, loadConfig } from '../plugin/lib/config.mjs';
 import { removeTripwire, tripwireInstalled, tripwireRegistered, userHooksPath, registeredTripwirePath, registeredAutoagyHome, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
@@ -103,6 +103,50 @@ test('the grants follow the configuration: the command shape, and one per writab
   const config = { writableRoots: ['~/shared-lib', '/srv/build ', '', 42] };
   assert.deepEqual(writableRootGrants(config, home), [`write_file(${path.join(home, 'shared-lib')})`, 'write_file(/srv/build)']);
   assert.deepEqual(grantsFor(config, { autoagyHome, home }).slice(3), writableRootGrants(config, home));
+});
+
+test('read_url grants are opt-in, per domain, and never a wildcard', () => {
+  const home = path.join(root, 'network-home');
+  const autoagyHome = path.join(home, '.gemini', 'autoagy');
+  const domains = ['localhost', 'docs.python.org', '*.github.com', 'API.Example.COM'];
+
+  // Off by default, which is the behavior every install has had: autoagy can
+  // approve a fetch, but agy's own permission prompt for an unknown domain is the
+  // one thing a hook `allow` cannot answer.
+  assert.deepEqual(trustedDomainGrants({ trustedDomains: domains }), { grants: [], skipped: [] });
+  assert.deepEqual(grantsFor({ trustedDomains: domains }, { autoagyHome, home }), ['command(*)', 'mcp(*)', 'execute_url(*)']);
+
+  // Opted in: the list the user already wrote, one grant each. A leading `*.`
+  // comes off because `isTrustedHost` treats the two spellings as one rule.
+  const on = trustedDomainGrants({ networkGrants: 'trusted-domains', trustedDomains: domains });
+  assert.deepEqual(on.grants, ['read_url(localhost)', 'read_url(docs.python.org)', 'read_url(github.com)', 'read_url(api.example.com)']);
+  assert.deepEqual(on.skipped, []);
+  assert.deepEqual(grantsFor({ networkGrants: 'trusted-domains', trustedDomains: ['example.com'] }, { autoagyHome, home }).at(-1), 'read_url(example.com)');
+
+  // The line that is not crossed: a read_url rule is also the terminal sandbox's
+  // network allowlist, so `read_url(*)` must not be reachable from a config file.
+  // An entry that is not a plain hostname is reported, not widened.
+  const wild = trustedDomainGrants({ networkGrants: 'trusted-domains', trustedDomains: ['*', '*.*', 'ex*mple.com', 'http://x/y', 'a b', ''] });
+  assert.deepEqual(wild.grants, []);
+  assert.deepEqual(wild.skipped, ['*', '*.*', 'ex*mple.com', 'http://x/y', 'a b']);
+});
+
+test('setup writes the read_url grants, and teardown takes exactly those away', () => {
+  const home = path.join(root, 'network-setup-home');
+  const env = { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy') };
+  const file = cliSettingsPath(home);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // A rule the user put there themselves must survive the round trip: teardown
+  // removes what the setup record says it added, not everything that looks like it.
+  const original = { permissions: { allow: ['read_url(mine.example)'] } };
+  fs.writeFileSync(file, JSON.stringify(original));
+  const config = { networkGrants: 'trusted-domains', trustedDomains: ['docs.python.org'] };
+  applySetup({ home, env, grants: grantsFor(config, { autoagyHome: env.AUTOAGY_HOME, home }) });
+  const written = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(written.permissions.allow.includes('read_url(docs.python.org)'));
+  assert.ok(!written.permissions.allow.includes('read_url(*)'));
+  assert.equal(applyTeardown({ home, env }).found, true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).permissions.allow, ['read_url(mine.example)']);
 });
 
 test('setup writes a write_file grant for each writable root', () => {

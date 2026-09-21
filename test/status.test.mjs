@@ -179,6 +179,25 @@ test('status says when a conversation\'s state file cannot be read', () => {
   assert.match(out, /autoagy trust/);
 });
 
+test('status says how many domains the fetch prompt is off for, and what that costs', () => {
+  // The prompt for an ungranted domain is the one autoagy cannot answer, so the
+  // count is the answer to "why am I still being asked". Both directions are
+  // reported, because "none" is the default and looks the same as "not
+  // configured" otherwise.
+  const configFile = path.join(dirs.env.AUTOAGY_HOME, 'config.json');
+  fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
+  fs.writeFileSync(configFile, JSON.stringify({ trustedDomains: ['localhost', 'docs.python.org'] }));
+  assert.match(status(), /network grants  none — a first fetch of any domain still prompts, including the 2/);
+
+  fs.writeFileSync(configFile, JSON.stringify({ networkGrants: 'trusted-domains', trustedDomains: ['docs.python.org', '*.github.com', '*'] }));
+  const out = status();
+  assert.match(out, /network grants  2 read_url grant\(s\) from trustedDomains: read_url\(docs\.python\.org\), read_url\(github\.com\)/);
+  // The wildcard entry is named rather than dropped in silence: it is a domain
+  // that keeps prompting, and the reason is not guessable from the outside.
+  assert.match(out, /trustedDomains entry "\*" got no read_url grant/);
+  assert.doesNotMatch(out, /read_url\(\*\)/);
+});
+
 test('status does not call a truncated probe cache an untrusted conversation', () => {
   // The same directory holds the probe cache and the two self-check records, and
   // they are the files here most likely to be found truncated. Reported as
