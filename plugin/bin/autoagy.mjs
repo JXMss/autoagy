@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR, detectSandbox, resolveReviewerCommand, protectedPathShapes } from '../lib/context.mjs';
 import { findExecutable, globToRegExp } from '../lib/paths.mjs';
-import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath } from '../lib/confine.mjs';
+import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath, sandboxStartCheck } from '../lib/confine.mjs';
 import { KNOWN_TOOL_NAMES, classify, failOpenOutput } from '../lib/policy.mjs';
 import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
@@ -288,6 +288,29 @@ function readJsonQuiet(file) {
   }
 }
 
+/**
+ * A hook context for the directory `status` runs in, as the hook would see a
+ * conversation there: that directory as the workspace, and an artifact directory
+ * under Antigravity's `brain` — an existing one where there is one, so its bind is
+ * part of the table, as it is in a real call.
+ */
+function statusSandboxContext({ config, env, home }) {
+  const brain = path.join(path.dirname(cliSettingsPath(home)), 'brain');
+  let artifact = path.join(brain, 'autoagy-status-check');
+  try {
+    const newest = fs.readdirSync(brain, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => path.join(brain, d.name))
+      .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+    if (newest) artifact = newest;
+  } catch {
+    // no conversations yet
+  }
+  const cwd = process.cwd();
+  return new HookContext(
+    { conversationId: 'autoagy-status-check', workspacePaths: [cwd], artifactDirectoryPath: artifact },
+    { config: { ...config, ownSandbox: 'on' }, env, home, host: { kind: 'cli', cwd, argv: ['agy'], flags: { skipPermissions: false, sandbox: false, addDirs: [] } } },
+  );
+}
+
 function status() {
   // `userHome` (not `home`) so a later call cannot silently take the user's
   // home directory where the configuration directory is meant.
@@ -357,6 +380,17 @@ function status() {
   }
   const own = detectOwnSandbox({ config, host: null, appDataDir: path.dirname(cliSettingsPath(userHome)), autoagyHome: autoagyHome });
   lines.push(`  own sandbox     ${own.active ? 'active' : own.required ? 'REQUIRED BUT UNAVAILABLE (commands are reviewed)' : 'inactive'} — ${own.detail}`);
+  // The self-check cannot see an exit status, so a mount bwrap refuses is only
+  // visible by starting it. Asked for the directory status runs in, since the
+  // mount table depends on the workspace; see sandboxStartCheck.
+  if (own.active) {
+    const started = sandboxStartCheck(statusSandboxContext({ config, env, home: userHome }));
+    if (started?.ok) lines.push(`  sandbox start   ok in ${process.cwd()}`);
+    else if (started) {
+      lines.push(`  ! sandbox start FAILED in ${process.cwd()}: ${started.detail}`);
+      lines.push('    every sandboxed command in this workspace fails before it runs, whatever the self-check records.');
+    }
+  }
   // What the command grant is worth when the hook is not running is the whole
   // reason the executor exists, so say which of the two shapes is in force.
   if (config.commandGrant === 'executor') {

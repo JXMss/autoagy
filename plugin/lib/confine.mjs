@@ -505,6 +505,33 @@ export function removeControlPlaceholders(paths) {
 }
 
 /**
+ * Starts the sandbox this context would build, running `true`, and says whether
+ * it came up. Null when the own sandbox is not active here.
+ *
+ * The self-check compares command lines, and agy hands PostToolUse no exit
+ * status, so a mount bwrap refuses fails every command before it runs while the
+ * check records `verified`. That has happened twice (a protected name that is a
+ * file, a symlink in a mounted path), and the mount table changes with the
+ * workspace — a new link, a declared root, `.git` turning into a file — so the
+ * question is asked where it can be answered: by starting it. The mount points it
+ * creates are taken away again once `true` has exited.
+ * @returns {{ ok: boolean, detail: string } | null}
+ */
+export function sandboxStartCheck(ctx, { timeoutMs = 10_000 } = {}) {
+  if (!ctx.ownSandbox.active) return null;
+  const placeholders = [];
+  const line = confinedCommandLine(ctx, 'true', { placeholders });
+  try {
+    const res = spawnSync('/bin/sh', ['-c', line], { cwd: ctx.baseDir ?? undefined, encoding: 'utf8', timeout: timeoutMs, env: ctx.env });
+    if (res.status === 0) return { ok: true, detail: '' };
+    const why = (res.stderr ?? '').trim().split('\n').slice(-2).join(' ') || res.error?.message || `exit ${res.status ?? res.signal}`;
+    return { ok: false, detail: why };
+  } finally {
+    removeControlPlaceholders(placeholders);
+  }
+}
+
+/**
  * The command line that runs `commandLine` inside autoagy's sandbox.
  * @param {import('./context.mjs').HookContext} ctx
  * @param {string} commandLine

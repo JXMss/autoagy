@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
-import { detectOwnSandbox, confinedCommandLine, scrubbedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath, envBinaryPath } from '../plugin/lib/confine.mjs';
+import { detectOwnSandbox, confinedCommandLine, scrubbedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath, envBinaryPath, sandboxStartCheck } from '../plugin/lib/confine.mjs';
 import { seccompProgram, seccompSupported } from '../plugin/lib/seccomp.mjs';
 import { HookContext, PROTECTED_WORKSPACE_DIRS, findNestedGitPaths } from '../plugin/lib/context.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
@@ -1090,6 +1090,21 @@ test('a declared writable root that does not exist yet neither fails commands no
   } finally {
     d.cleanup();
   }
+});
+
+// The self-check compares command lines and never sees an exit status, so a
+// mount bwrap refuses has only ever been found by someone noticing that nothing
+// runs. This is the check `status` makes instead: start it and look.
+test('whether the sandbox starts is asked by starting it', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
+  const present = () => PROTECTED_WORKSPACE_DIRS.filter((name) => fs.existsSync(path.join(dirs.workspace, name)));
+  const before = present();
+  assert.deepEqual(sandboxStartCheck(ctxFor({ CommandLine: 'true' }, { probe: () => real })), { ok: true, detail: '' });
+  // A sandbox that exits non-zero before the command, standing in for a refused mount.
+  const refused = sandboxStartCheck(ctxFor({ CommandLine: 'true' }, { probe: () => ({ ...real, bwrap: '/bin/false' }) }));
+  assert.equal(refused.ok, false);
+  assert.ok(refused.detail.length > 0, 'and says something about why');
+  assert.equal(sandboxStartCheck(ctxFor({ CommandLine: 'true' }, { ownSandbox: 'off' })), null, 'nothing to start where it is not in use');
+  assert.deepEqual(present(), before, 'the mount points it made are gone again');
 });
 
 test('a protected name that is a file does not fail every command in the workspace', { skip: real.ok ? false : `bubblewrap unavailable: ${real.detail ?? 'not Linux'}` }, () => {
