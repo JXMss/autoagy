@@ -13,6 +13,7 @@ import { autoagyHome, resolveConfigPath } from './config.mjs';
 import { toAbsolute, uniquePaths, expandHome, expandAnchoredGlob, resolveReal, findExecutable, isWithin } from './paths.mjs';
 import { detectOwnSandbox, probeBwrap, hostBuildId, envBinaryPath, envScrubDisabled } from './confine.mjs';
 import { userHooksPath } from './tripwire.mjs';
+import { readMcpCache } from './mcp.mjs';
 
 export const PLUGIN_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -876,6 +877,17 @@ export class HookContext {
       }
       return uniquePaths(out);
     });
+  }
+
+  /**
+   * The MCP tool annotations `autoagy mcp-scan` recorded, or null.
+   *
+   * Only read when the configuration asks for them, so an install that does not
+   * use MCP never touches the file — and a stale cache cannot change a decision
+   * for someone who never opted in.
+   */
+  get mcpCache() {
+    return this.memo('mcpCache', () => (this.config.mcp?.annotations === 'trust' ? readMcpCache(this.autoagyHome) : null));
   }
 
   get protectedGlobs() {

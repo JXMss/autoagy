@@ -179,6 +179,31 @@ test('status says when a conversation\'s state file cannot be read', () => {
   assert.match(out, /autoagy trust/);
 });
 
+test('status says what the MCP annotations are worth here', () => {
+  // Both halves are silent failures otherwise: trusting the annotations without a
+  // scan reviews every call anyway, and a scan without the setting changes nothing.
+  const dir = path.join(dirs.env.AUTOAGY_HOME, 'state');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dirs.env.AUTOAGY_HOME, 'config.json'), JSON.stringify({ mcp: { annotations: 'trust' } }));
+  assert.match(status(), /annotations are trusted but no scan has been recorded/);
+
+  fs.writeFileSync(
+    path.join(dir, 'mcp-tools.json'),
+    JSON.stringify({
+      at: '2026-09-21T01:00:00.000Z',
+      servers: {
+        github: { transport: 'stdio', error: null, tools: { get_issue: { readOnly: true }, delete_repo: { destructive: true } } },
+        broken: { transport: 'stdio', error: 'it exited (code 3)', tools: {} },
+      },
+    }),
+  );
+  const out = status();
+  assert.match(out, /1 of 2 scanned tool\(s\) claim read-only and run without review/);
+  assert.match(out, /server "broken" could not be scanned: it exited \(code 3\)/);
+  // And the cache is not mistaken for a conversation whose record is unreadable.
+  assert.doesNotMatch(out, /mcp-tools\.json cannot be read as state/);
+});
+
 test('status says which tools.allow entries do nothing', () => {
   // The list only covers the `unknown-tool` fallback, which is what keeps `*`
   // from being a way to switch off the command and edit rules — but from the

@@ -45,7 +45,7 @@ export function stateFile(autoagyHome, conversationId) {
  * handed all of them to its callers as states that merely happened to have no
  * fields.
  */
-const RESERVED_STATE_FILES = new Set(['bwrap-probe.json', 'own-sandbox-check.json', 'command-env-check.json', 'config-warning.json', 'last-hook-run.json']);
+const RESERVED_STATE_FILES = new Set(['bwrap-probe.json', 'own-sandbox-check.json', 'command-env-check.json', 'config-warning.json', 'last-hook-run.json', 'mcp-tools.json']);
 
 /**
  * The path of one of those files.

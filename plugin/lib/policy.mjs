@@ -14,6 +14,7 @@ import { analyzeCommandLine, findDangerousCommand, isKnownSafeCommandLine, print
 import { evaluateRules, describeRule } from './exec-rules.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from './context.mjs';
 import { envNameAllowed } from './confine.mjs';
+import { annotationVerdict } from './mcp.mjs';
 import { toAbsolute, resolveReal, isWithin, matchesAnyGlob, globToRegExp, findExecutable } from './paths.mjs';
 
 export const READ_ONLY_TOOLS = new Set([
@@ -1146,6 +1147,24 @@ function classifyMcp(ctx) {
     return re.test(id) || re.test(ctx.toolName);
   });
   if (allowed) return allow('mcp-allowed', id);
+  // Codex's rule, from the servers' own annotations, and only when the config says
+  // to believe them. Placed after `mcp.allow` because that list is the user's own
+  // judgement and needs no server's cooperation; placed before the resource reads
+  // below because those are not tools and carry no annotations.
+  if (ctx.config.mcp?.annotations === 'trust' && !MCP_RESOURCE_TOOLS.has(ctx.toolName)) {
+    const claim = annotationVerdict(ctx.mcpCache, { server, tool, toolName: ctx.toolName });
+    if (claim === 'read-only') return allow('mcp-read-only', id);
+    // Both remaining answers are reviewed, as in Codex — but the reviewer is told
+    // which one it is, because "the server calls this destructive" and "no server
+    // claims anything about this" are different pieces of evidence.
+    if (claim === 'destructive') {
+      return review('mcp', `Calls MCP tool ${id || ctx.toolName}, which its server annotates as destructive.`);
+    }
+    return review(
+      'mcp',
+      `Calls MCP tool ${id || ctx.toolName}. No annotation for it was found in the scan${ctx.mcpCache ? '' : ' (no scan has been recorded — run `autoagy mcp-scan`)'}, so it is reviewed.`,
+    );
+  }
   if (MCP_RESOURCE_TOOLS.has(ctx.toolName)) {
     const uri = ctx.args.Uri ?? ctx.args.URI ?? ctx.args.uri ?? ctx.args.ResourceUri ?? ctx.args.resource_uri;
     return review(

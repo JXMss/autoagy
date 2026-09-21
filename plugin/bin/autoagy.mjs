@@ -20,10 +20,11 @@ import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOu
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INSTRUCTIONS } from '../lib/guardian.mjs';
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
-import { listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
+import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
 import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath } from '../lib/tripwire.mjs';
+import { scanMcpServers, readMcpCache, readMcpServers, mcpConfigFiles, MCP_CACHE_FILE } from '../lib/mcp.mjs';
 
 /**
  * The home directory the account database reports. `HOME` can be set for a
@@ -369,6 +370,23 @@ function status() {
       lines.push('                  read-only and a hook planted there is not detected. Slow filesystems (9p/drvfs,');
       lines.push('                  network mounts) hit this; a workspace on a local disk does not.');
     }
+  }
+  // What the MCP annotations are worth here. Both halves matter: a scan that was
+  // never taken means every MCP call is reviewed however the setting reads, and a
+  // setting left at "ignore" means a scan that was taken changes nothing.
+  if (config.mcp?.annotations === 'trust') {
+    const cache = readMcpCache(autoagyHome);
+    if (!cache) {
+      lines.push('  ! mcp           annotations are trusted but no scan has been recorded, so every MCP call is still reviewed — run `autoagy mcp-scan`');
+    } else {
+      const tools = Object.values(cache.servers ?? {}).flatMap((server) => Object.values(server.tools ?? {}));
+      const readOnly = tools.filter((a) => a.readOnly === true && a.destructive !== true).length;
+      lines.push(`  mcp             ${readOnly} of ${tools.length} scanned tool(s) claim read-only and run without review (scanned ${fmtTime(cache.at)})`);
+      const failed = Object.entries(cache.servers ?? {}).filter(([, server]) => server.error);
+      for (const [id, server] of failed) lines.push(`  ! mcp           server "${id}" could not be scanned: ${server.error}`);
+    }
+  } else if (readMcpServers(userHome).servers.length > 0) {
+    lines.push(`  mcp             ${readMcpServers(userHome).servers.length} server(s) configured; every call is reviewed unless mcp.allow names it (see mcp.annotations)`);
   }
   // A `tools.allow` entry that names a tool autoagy already classifies does
   // nothing — every rule above the fallback returns first, which is the intent
@@ -802,6 +820,56 @@ function teardown(flags) {
   for (const r of report.restored) console.log(`  ${verb('restored', 'would restore')} ${r.key} -> ${r.to === undefined ? '(unset)' : JSON.stringify(r.to)}`);
 }
 
+/**
+ * `autoagy mcp-scan`: ask each configured MCP server what it offers, and record
+ * the annotations the policy may then believe.
+ *
+ * A command rather than something the hook does, for two reasons that are both
+ * about who is deciding: starting the servers cannot fit in a PreToolUse budget,
+ * and believing a server's own claim about itself is a choice the user makes at a
+ * moment they picked, not one made behind them on the first call.
+ */
+async function mcpScan(flags) {
+  const { autoagyHome, home, env } = managementContext();
+  const timeoutMs = Math.max(1000, Math.min(120_000, Number(strFlag(flags.timeout) ?? 10) * 1000));
+  const { servers } = readMcpServers(home);
+  if (servers.length === 0) {
+    console.log('No MCP servers are configured. autoagy looked in:');
+    for (const file of mcpConfigFiles(home)) console.log(`  ${file}`);
+    console.log('\nNothing to scan, and nothing for `mcp.annotations: "trust"` to read.');
+    return;
+  }
+  console.log(`Asking ${servers.length} MCP server(s) for their tools (${timeoutMs / 1000}s each)...\n`);
+  const record = await scanMcpServers({ autoagyHome, home, timeoutMs, env });
+  let readOnly = 0;
+  let destructive = 0;
+  let silent = 0;
+  for (const [id, server] of Object.entries(record.servers)) {
+    const tools = Object.entries(server.tools);
+    console.log(`${id}  (${server.transport}${server.protocolVersion ? `, protocol ${server.protocolVersion}` : ''})`);
+    console.log(`  from ${server.source}`);
+    if (server.error) console.log(`  ! ${server.error}`);
+    for (const [name, a] of tools) {
+      const claim = a.destructive === true ? 'destructive -> reviewed' : a.readOnly === true ? 'read-only -> allowed' : 'no annotation -> reviewed';
+      if (a.destructive === true) destructive++;
+      else if (a.readOnly === true) readOnly++;
+      else silent++;
+      console.log(`  ${name.padEnd(36)} ${claim}`);
+    }
+    if (tools.length === 0 && !server.error) console.log('  (it offers no tools)');
+  }
+  for (const problem of record.problems) console.log(`! ${problem}`);
+  console.log(`\nRecorded ${readOnly} read-only, ${destructive} destructive and ${silent} unannotated tool(s) in ${reservedStateFile(autoagyHome, MCP_CACHE_FILE)}.`);
+  const config = loadConfig({ env, home }).config;
+  if (config.mcp?.annotations !== 'trust') {
+    console.log('`mcp.annotations` is "ignore", so none of this changes a decision yet. Set it to "trust" to have the');
+    console.log('read-only ones run without review — that is believing each server\'s claim about its own tools.');
+  } else {
+    console.log('`mcp.annotations` is "trust", so the read-only ones above now run without review.');
+  }
+  console.log('Re-run this after changing an MCP server or its version: the snapshot is only as current as this moment.');
+}
+
 const USAGE = `autoagy — Codex-style auto mode for Google Antigravity
 
 Usage:
@@ -813,6 +881,7 @@ Usage:
   autoagy trust [<conversation>] [--all] [--force]
                                      trust a conversation's paths again
   autoagy mode <auto|ask|off>        switch mode
+  autoagy mcp-scan [--timeout 10]    record the MCP servers' own tool annotations
   autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only] [--show-prompt]
   autoagy setup [--dry-run] [--no-settings]
   autoagy teardown [--dry-run]
@@ -838,6 +907,8 @@ async function main() {
       return trust(flags._[0], Boolean(flags.all), Boolean(flags.force));
     case 'mode':
       return setMode(flags._[0]);
+    case 'mcp-scan':
+      return mcpScan(flags);
     case 'review':
       return dryRunReview(flags);
     case 'setup':

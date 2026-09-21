@@ -129,6 +129,14 @@ export const DEFAULT_CONFIG = Object.freeze({
   mcp: {
     // MCP tool names (globs over "server/tool") that are read-only and need no review.
     allow: [],
+    // Whether to believe the servers' own tool annotations, which is Codex's rule
+    // (`destructive_hint` -> approval, `read_only_hint` -> none, otherwise
+    // approval). "ignore" is the default: every MCP call is reviewed unless
+    // `allow` names it, which trusts nobody but the user. "trust" uses the
+    // snapshot `autoagy mcp-scan` took — the annotation is written by whoever
+    // wrote the server, so believing it is a decision, and taking the snapshot is
+    // a command the user runs rather than something the hook does behind them.
+    annotations: 'ignore',
   },
   tools: {
     // Tool names (globs) that need no review *where autoagy has no rule of its
@@ -236,6 +244,7 @@ const ENUMS = {
   browser: ['review', 'allow'],
   notebooks: ['review', 'allow'],
   pathDrift: ['sticky', 'graded'],
+  'mcp.annotations': ['ignore', 'trust'],
   networkGrants: ['none', 'trusted-domains'],
   webSearch: ['allow', 'review'],
   'commandEnv.mode': ['inherit', 'scrub'],

@@ -16,7 +16,7 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 | `sandbox_permissions: require_escalated` 走审核 | `BypassSandbox: true` 走审核 |
 | 强制 `rm`（含 `sudo`/`env`/`bash -c` 嵌套）走审核 | 同左，另加破坏性 git 命令（Antigravity 沙箱不保护 `.git`） |
 | `apply_patch` 只写可写根目录则放行，`.git/.agents/.codex` 只读 | 编辑工具同理；`.git/.agents/.gemini`、`~/.gemini` 等需审核。autoagy 自己的沙箱里 shell 命令对这些目录同样只读 |
-| MCP 调用（非只读注解）走审核 | `call_mcp_tool` / `mcp_*` 走审核，可用 `mcp.allow` 白名单 |
+| MCP 调用（非只读注解）走审核 | 默认全部走审核（比 Codex 严），可用 `mcp.allow` 白名单；`mcp.annotations: "trust"` + 一次 `autoagy mcp-scan` 之后就与 Codex 一致：只读注解免审 |
 | execpolicy `prefix_rule` allow/prompt/forbidden | `rules` 配置，语义相同 |
 | guardian：策略 prompt + 精简 transcript + planned action JSON | 同左（策略文本改编自 Codex，transcript 预算与选取规则相同） |
 | 输出 `{risk_level, user_authorization, outcome, rationale}` | 同左 |
@@ -82,6 +82,7 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 | `autoagy trust [<会话>] [--all] [--force]` | 解除会话的标记（见下文「会话信任」）、清除嵌套仓库的 hook 植入记录，并释放为它保留的只读挂载点。不带参数时只列出被标记的会话。执行前它自己会先查一次工作区锁：还有命令在跑就拒绝，`--force` 才强行释放 |
 | `autoagy mode auto\|ask\|off` | `auto`=审核模型裁决；`ask`=有风险的操作弹窗问你（相当于 Codex “Ask for approval”）；`off`=不审核；上述授权覆盖的操作（绕过沙箱的命令、MCP、浏览器操作）改为弹窗问你，其余交给 Antigravity 自己的权限流程。`off` 下弹窗在 `--dangerously-skip-permissions` 里会被自动同意，所以那个模式下改为直接拒绝；不可信会话的编辑和读取也照常弹窗 |
 | `autoagy review --tool run_command --args '{"CommandLine":"...","BypassSandbox":true}'` | 不启动 agent，直接测试某个操作会被怎么判 |
+| `autoagy mcp-scan [--timeout 10]` | 逐个启动配置里的 MCP 服务器，问它 `tools/list`，把每个工具的只读/破坏性注解记成快照（配合 `mcp.annotations: "trust"`）。会逐条打印哪个工具声明了什么、以及连不上的服务器 |
 | `autoagy setup` / `autoagy teardown` | 单独执行/撤销设置改动 |
 
 被拒绝时，agent 会收到 Codex 的原文指令（不得绕过；只能换更安全的做法，或向你说明风险并请求明确批准）。如果你确认要做，直接在对话里说明“我确认要执行 xxx”，下一次审核会把你的明确批准计入（Codex 的 post-denial approval 规则）。
@@ -174,6 +175,7 @@ OpenAI、DeepSeek、本地 Ollama 等同理，改 `baseUrl` / `apiKeyEnv` / `mod
 | `credentialPaths` | `~/.ssh/**`、`**/.env` 等 | 凭据位置。文件工具读取这些文件（包括经符号链接读取）、`grep_search` 搜索包含它们的目录需要审核。以 `~/` 或绝对路径开头的条目还会在 autoagy 自己的沙箱里被隐藏；没有固定位置的模式（`**/.env`、`**/*.pem`）隐藏不了，所以命令行里字面写出这种路径（`cat .env`）也要审核，沙箱内外一样。不在该沙箱里时，命令行里直接写出**任何**这类路径的命令都需要审核（尽力而为：只识别字面路径、`~` 和 `$HOME`，不解析变量）。另外 `/proc` 一概按凭据位置处理：`/proc/<pid>/environ`、`/proc/<pid>/cmdline` 这类文件被直接读到要审核，而 `/proc` 本身或其中**目录**被遍历（`grep_search /proc`、`grep -r /proc`）也要审核——遍历会读到一个进程一份的 environ；`/proc/cpuinfo`、`/proc/self/status` 这种单个文件不受影响。沙箱内这些都不送审：那里是私有的 /proc，读到的是清空后的环境 |
 | `rules` | `[]` | Codex execpolicy 风格前缀规则，例如 `{"pattern": ["terraform", "destroy"], "decision": "forbidden"}`；`allow` 仅对不含重定向、替换、变量、通配的简单命令生效。**注意 `allow` 也覆盖带 `BypassSandbox: true` 的同一条命令**（Codex 的 execpolicy 同样先于沙箱/升级判定，见 [docs/design.md](docs/design.md) §1）：写 `{"pattern": ["npm", "test"], "decision": "allow"}` 等于同时允许它在宿主上带完整权限和网络免审运行。要区分两者就用 `prompt`，或者不写这条规则 |
 | `mcp.allow` | `[]` | 免审的 MCP 工具（`"server/tool"` glob，如 `"github/get_*"`），与其它路径类配置用同一套 glob：支持 `*`、`?`、`{a,b}`，`*` 不跨 `/` |
+| `mcp.annotations` | `"ignore"` | `"trust"` 时相信 MCP 服务器自己给工具打的标签，也就是 Codex 的规则：`readOnlyHint` 免审、`destructiveHint` 送审、没标签送审。标签是**写这个服务器的人**写的，所以这是一个信任决定：Codex 在运行时隐式地信，这里要你先跑一次 `autoagy mcp-scan` 把快照记下来（落在 agent 写不到的 `$AUTOAGY_HOME/state`，自带沙箱里还是只读挂载），再把这个开关打开。`mcp.allow` 是"只信你自己"的那个版本，它先于这条生效。改过服务器或升级过版本要重新 scan——快照只代表当时那一刻 |
 | `tools.allow` | `[]` | 免审的**工具名** glob。**只对 autoagy 不认识的工具名生效**（`unknown-tool` 那条兜底）：上面每一条规则都在兜底之前返回，所以写一个它已经有规则的名字（`run_command`、`view_*`、`mcp_*`…）不会有任何效果——`autoagy status` 会点名这种条目。这也是 `*` 在这里安全的原因：它够不到命令、编辑、凭据读取那些规则。它存在是因为工具名列表是 agy 1.2.x 的快照而 agy 会自动更新，下个月新增的工具会每次调用都送审，而唯一的出路本来是改插件目录——那是策略禁止任何东西写入的地方 |
 | `pathDrift` | `"sticky"` | 检查与执行之间路径被换掉时的后果。`"sticky"`＝整个会话不可信、之后每次读写都送审、只能 `autoagy trust` 解除（历来的行为）；`"graded"`＝按新落点判，落在工作区/临时目录等"本来就能写的地方"且不是凭据/受保护路径时只中断本轮、不粘住会话。详见「会话信任」一节 |
 | `notebooks` | `"review"` | `"allow"` 时 `notebook_execution` 免审。默认送审，且**不再声称**它在沙箱外执行：agy 二进制里没有任何 notebook kernel（连 jupyter/kernel 符号都没有），而它唯一的沙箱组件在 command 子系统下、notebook 工具和它的 handler 都不经过那里——这是证据不是证明，所以交给审核模型的理由如实写成「确认不了有什么在约束它」。notebook 跑的是任意代码，所以这是这张表里最宽的一个开关 |
