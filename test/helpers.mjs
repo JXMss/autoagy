@@ -60,3 +60,12 @@ export function contextFor(dirs, name, args, { config = configWith(), env = dirs
 
 /** A bubblewrap probe that reports success, so the own sandbox is "active" without running bwrap. */
 export const okProbe = () => ({ ok: true, bwrap: '/usr/bin/bwrap', detail: 'test' });
+
+/**
+ * autoagy's own sandbox exists only on Linux (`detectOwnSandbox` refuses every
+ * other platform), so a test that needs it active cannot pass anywhere else —
+ * `okProbe` fakes bubblewrap, not the platform. Those tests are skipped there,
+ * with this as the reason; the real-bubblewrap ones already skip on their own.
+ */
+export const ownSandboxPlatform = process.platform === 'linux';
+export const linuxOnly = ownSandboxPlatform ? false : "autoagy's own sandbox exists only on Linux";

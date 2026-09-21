@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { classify, plannedAction, canonicalPathArgs } from '../plugin/lib/policy.mjs';
-import { makeSandboxDirs, contextFor, configWith, okProbe } from './helpers.mjs';
+import { makeSandboxDirs, contextFor, configWith, okProbe, ownSandboxPlatform, linuxOnly } from './helpers.mjs';
 import { PROTECTED_WORKSPACE_DIRS, parseHostFlags } from '../plugin/lib/context.mjs';
 
 const dirs = makeSandboxDirs();
@@ -57,7 +57,7 @@ test('reads are allowed, credential reads are reviewed', () => {
   // Inside autoagy's own sandbox there is nothing to review: /proc is a private
   // PID namespace with a cleared environment.
   const own = configWith({ ownSandbox: 'on' });
-  assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'grep -r AKIA /proc' }, { config: own, bwrapProbe: okProbe })).category, 'sandboxed-command');
+  if (ownSandboxPlatform) assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'grep -r AKIA /proc' }, { config: own, bwrapProbe: okProbe })).category, 'sandboxed-command');
   // The file tools never run in that sandbox, so a search there is still real.
   assert.equal(verdict('grep_search', { SearchPath: '/proc', Query: 'x' }, { config: own, bwrapProbe: okProbe }).category, 'credential-read');
 });
@@ -283,7 +283,7 @@ test('a browser subagent, image generation and deleting knowledge are reviewed',
   assert.equal(verdict('send_message', { To: 'x', Message: 'hi' }).verdict, 'allow');
 });
 
-test('terminal input needs autoagy\'s own sandbox, not just a declared one', () => {
+test('terminal input needs autoagy\'s own sandbox, not just a declared one', { skip: linuxOnly }, () => {
   const own = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe };
   assert.equal(classify(contextFor(dirs, 'send_command_input', { Input: 'y\n' }, own)).verdict, 'allow');
   assert.equal(classify(contextFor(dirs, 'send_command_input', { Input: 'y\n' }, own), { escalatedCommandApproved: true }).verdict, 'review');
@@ -353,7 +353,7 @@ test('without a sandbox, a known-safe command that resolves into a writable root
     assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: './node_modules/.bin/mytool' }, bare)).category, 'unsandboxed-command');
     // Inside autoagy's sandbox this is not asked: the sandbox bounds whatever runs.
     const boxed = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe, env: bare.env };
-    assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls -la' }, boxed)).verdict, 'allow');
+    if (ownSandboxPlatform) assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'ls -la' }, boxed)).verdict, 'allow');
   } finally {
     fs.rmSync(bin, { recursive: true, force: true });
   }
@@ -447,8 +447,10 @@ test('a command reading a credential through a symlink is reviewed, as the read 
     // Inside the own sandbox a workspace `.env` is not hidden, so the link still
     // reaches it; a link into `~/.ssh` reaches the masked directory and does not.
     const own = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe };
-    assert.equal(verdict('run_command', { CommandLine: 'cat settings.txt' }, own).category, 'credential-read');
-    assert.equal(verdict('run_command', { CommandLine: 'cat keys/config' }, own).category, 'sandboxed-command');
+    if (ownSandboxPlatform) {
+      assert.equal(verdict('run_command', { CommandLine: 'cat settings.txt' }, own).category, 'credential-read');
+      assert.equal(verdict('run_command', { CommandLine: 'cat keys/config' }, own).category, 'sandboxed-command');
+    }
   } finally {
     for (const f of ['.env', 'settings.txt', 'keys']) fs.rmSync(path.join(dirs.workspace, f), { force: true });
   }

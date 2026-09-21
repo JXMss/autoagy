@@ -12,7 +12,7 @@ import { classify } from '../plugin/lib/policy.mjs';
 import { readState, updateState } from '../plugin/lib/state.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
 import { installExecutor, executorPath, tokenDir } from '../plugin/lib/tokens.mjs';
-import { makeSandboxDirs, configWith, payloadFor, contextFor } from './helpers.mjs';
+import { makeSandboxDirs, configWith, payloadFor, contextFor, linuxOnly } from './helpers.mjs';
 
 const dirs = makeSandboxDirs();
 after(() => dirs.cleanup());
@@ -65,14 +65,14 @@ test('own sandbox activation: auto needs Linux, bubblewrap and the command grant
   assert.deepEqual([unavailable.active, unavailable.required], [false, true]);
 });
 
-test('a required but unavailable own sandbox makes commands count as unsandboxed', () => {
+test('a required but unavailable own sandbox makes commands count as unsandboxed', { skip: linuxOnly }, () => {
   const ctx = ctxFor({ CommandLine: 'ls' }, { probe: failProbe });
   assert.equal(ctx.sandbox.active, false);
   assert.match(ctx.sandbox.detail, /ownSandbox is "on" but unavailable: no user namespaces/);
   assert.equal(ctxFor({ CommandLine: 'ls' }).sandbox.source, 'autoagy');
 });
 
-test('the confined command mounts read-only paths over writable roots and keeps the command intact', () => {
+test('the confined command mounts read-only paths over writable roots and keeps the command intact', { skip: linuxOnly }, () => {
   const original = `echo "it's $HOME" && printf '%s\\n' 'a b' > out.txt; cat <<'EOF'\n$(not run)\nEOF`;
   const ctx = ctxFor({ CommandLine: original });
   const line = confinedCommandLine(ctx, original);
@@ -109,12 +109,12 @@ test('the confined command mounts read-only paths over writable roots and keeps 
   assert.ok(ssh > logsRo, 'the credential store is hidden on top of the other mounts');
 });
 
-test('inside the own sandbox a command naming a credential store needs no review: the store is hidden', () => {
+test('inside the own sandbox a command naming a credential store needs no review: the store is hidden', { skip: linuxOnly }, () => {
   assert.equal(classify(ctxFor({ CommandLine: 'cat ~/.ssh/id_ed25519' })).category, 'sandboxed-command');
   assert.equal(classify(ctxFor({ CommandLine: 'cat ~/.ssh/id_ed25519', BypassSandbox: true })).category, 'sandbox-escalation');
 });
 
-test('allowed sandboxed commands are rewritten into the own sandbox; escalations and denials are not', async () => {
+test('allowed sandboxed commands are rewritten into the own sandbox; escalations and denials are not', { skip: linuxOnly }, async () => {
   fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
   const run = (args, mock = 'allow') => {
     const config = { ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: mock } } };
@@ -182,7 +182,7 @@ test('bubblewrap enforces the policy', { skip: real.ok ? false : `bubblewrap una
   assert.equal(fs.readFileSync(dirs.transcriptPath, 'utf8'), '');
 });
 
-test('self-check: when agy ignores the rewrite, the own sandbox is switched off for that build, with one notice', async () => {
+test('self-check: when agy ignores the rewrite, the own sandbox is switched off for that build, with one notice', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   const configure = (config) => fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(config));
@@ -448,7 +448,7 @@ async function untilQuiescent(probe, want, ms = 3000) {
   }
 }
 
-test('mount points are reclaimed only once no sandboxed command is running', { skip: flockPath() ? false : 'no trusted flock on this host' }, async () => {
+test('mount points are reclaimed only once no sandboxed command is running', { skip: linuxOnly || (flockPath() ? false : 'no trusted flock on this host') }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
@@ -516,7 +516,7 @@ test('a daemon command is noted as possibly still running even without WaitMsBef
   fs.rmSync(path.join(home, 'config.json'));
 });
 
-test('a mount point a command wrote into is kept and marks the conversation untrusted', async () => {
+test('a mount point a command wrote into is kept and marks the conversation untrusted', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
@@ -573,7 +573,7 @@ test('a protected directory that exists stays readable inside the sandbox', { sk
   fs.rmSync(target, { recursive: true, force: true });
 });
 
-test('the mount points for missing protected directories exist only while the command runs', async () => {
+test('the mount points for missing protected directories exist only while the command runs', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
@@ -667,7 +667,7 @@ const plantedConfig = (capture) => ({
 // which dropped a repository in silence. Nine in one command, or twenty-one
 // across two, was a legal way to get a planted hook's `git commit` to the
 // reviewer with nothing said about the hook.
-test('no number of planted repositories pushes one out of the record', async () => {
+test('no number of planted repositories pushes one out of the record', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   const capture = path.join(dirs.root, 'planted-many.jsonl');
   fs.mkdirSync(home, { recursive: true });
@@ -711,7 +711,7 @@ test('no number of planted repositories pushes one out of the record', async () 
   }
 });
 
-test('a nested .git the command created is found afterwards, and commands touching it are reviewed', async () => {
+test('a nested .git the command created is found afterwards, and commands touching it are reviewed', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   const capture = path.join(dirs.root, 'planted-prompt.jsonl');
   fs.mkdirSync(home, { recursive: true });
@@ -871,7 +871,7 @@ test('a nested .git is protected once it exists, and not while it is being creat
   }
 });
 
-test('a workspace full of nested repositories does not turn the check off', async () => {
+test('a workspace full of nested repositories does not turn the check off', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on' }));
@@ -907,7 +907,7 @@ test('a workspace full of nested repositories does not turn the check off', asyn
   }
 });
 
-test('executor mode hands agy a token instead of the command, and will not fall back without one', async () => {
+test('executor mode hands agy a token instead of the command, and will not fall back without one', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
   const conversationId = '99999999-0000-4000-8000-70ke40000001';
@@ -1164,7 +1164,7 @@ test('the walk stops on the clock as well as on the directory count', () => {
   assert.ok(whole.visited > 0);
 });
 
-test('protectedPaths reaches commands, not only the edit tools', () => {
+test('protectedPaths reaches commands, not only the edit tools', { skip: linuxOnly }, () => {
   // The setting is documented as "paths that need review to modify" and the
   // class it names — `.husky/`, `.envrc`, a `postinstall` script — is the
   // "written now, executed later outside the sandbox" one, which a *command*
