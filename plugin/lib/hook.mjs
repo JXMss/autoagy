@@ -826,6 +826,16 @@ function sweepPlaceholders(home, conversationId, state, ctx) {
   updateState(home, conversationId, (s) => {
     s.pendingPlaceholders = {};
     s.pendingNestedGit = {};
+    // `pendingConfined` is deliberately left alone, and the asymmetry with the
+    // line above is the point. `checkConfinedRun` deletes a step's entry
+    // unconditionally, so whatever is still here belongs to a step whose
+    // PostToolUse never ran — and its before-set was just included in the walk
+    // above, so the planting question is already answered for it. What the entry
+    // still buys is the hash self-check, if that PostToolUse arrives late;
+    // clearing it would throw that away and buy nothing. A stale entry cannot be
+    // mistaken for another step's: `stepIdx` does not repeat within a
+    // conversation (measured on a real transcript: 0..413, monotonic across
+    // turns), and the write side trims the map to the newest 50.
     s.pendingLock = null;
     // The mount points are gone, so the fallback signal that produced them is
     // stale; leaving it set would keep status reporting a conversation as
