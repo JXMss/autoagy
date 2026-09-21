@@ -227,6 +227,35 @@ function pinnedPlugin({ root, configHome, home }) {
   return dir;
 }
 
+test('setup writes no grant when the file its tripwire registers in cannot be read', () => {
+  // The tripwire is what stands behind the grants. If registering it would mean
+  // overwriting the user's own hooks file, neither happens: grants whose tripwire
+  // could not be registered are the fail-open it exists to catch.
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-hooks-'));
+  try {
+    const pinned = path.join(root2, 'pinned-autoagy-home');
+    const userHome = path.join(root2, 'user-home');
+    fs.mkdirSync(userHome, { recursive: true });
+    const pluginDir = pinnedPlugin({ root: root2, configHome: pinned, home: userHome });
+    const settingsFile = cliSettingsPath(userHome);
+    fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+    fs.writeFileSync(settingsFile, JSON.stringify({ permissions: { allow: [] } }));
+    const hooksFile = path.join(userHome, '.gemini', 'config', 'hooks.json');
+    fs.mkdirSync(path.dirname(hooksFile), { recursive: true });
+    const broken = '{ "mine": { "PreToolUse": [] }, }';
+    fs.writeFileSync(hooksFile, broken);
+
+    const res = spawnSync(process.execPath, [path.join(pluginDir, 'bin', 'autoagy.mjs'), 'setup'], { env: { HOME: userHome, PATH: process.env.PATH }, encoding: 'utf8' });
+    assert.equal(res.status, 1, res.stdout);
+    assert.match(res.stderr, /not valid JSON/);
+    assert.match(res.stderr, /no grants were written/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(settingsFile, 'utf8')).permissions.allow, [], 'no grant stands without its tripwire');
+    assert.equal(fs.readFileSync(hooksFile, 'utf8'), broken, 'and the user\'s file is untouched');
+  } finally {
+    fs.rmSync(root2, { recursive: true, force: true });
+  }
+});
+
 test('teardown reverts through the pin, not through the environment', () => {
   // The bug this covers was in the wiring, not in the library: `setup` wrote the
   // record into the pinned home while `teardown` looked for it in whatever

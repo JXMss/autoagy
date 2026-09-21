@@ -130,7 +130,40 @@ export function installedPluginDir(home = os.homedir()) {
   return path.join(home, '.gemini', 'config', 'plugins', 'autoagy');
 }
 
+/**
+ * Reads the user hooks file for a read-modify-write, and says whether it may be
+ * rewritten: the rule `readForRewrite` (setup.mjs) applies to the CLI settings,
+ * for the same reason. The file is the user's, not autoagy's, and may hold hooks
+ * that have nothing to do with autoagy. Registration used to read it with
+ * `readJson(file) ?? {}`, so one syntax error — or a read that failed for any
+ * other reason — made it write back `{}` plus the tripwire, silently taking
+ * every other hook with it, and exit 0. `removeTripwire` already refused to
+ * touch such a file; the two now agree. Absent is fine: there is nothing to lose.
+ */
+function readHooksForRewrite(file) {
+  if (!fs.existsSync(file)) return { value: {}, readable: true };
+  const value = readJson(file);
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return { value: null, readable: false };
+  return { value, readable: true };
+}
+
+/**
+ * Whether `installTripwire` can register without destroying anything. Asked by
+ * `autoagy setup` before it writes a single grant: grants whose tripwire could
+ * not be registered are the fail-open the tripwire exists to catch.
+ * @returns {{ ok: boolean, file: string }}
+ */
+export function tripwireInstallable({ home = os.homedir() } = {}) {
+  const file = userHooksPath(home);
+  return { ok: readHooksForRewrite(file).readable, file };
+}
+
 export function installTripwire({ autoagyHome, home = os.homedir(), nodePath = process.execPath }) {
+  const file = userHooksPath(home);
+  const { value: hooks, readable } = readHooksForRewrite(file);
+  if (!readable) {
+    throw new Error(`${file} is not valid JSON, so the tripwire was not registered and the file was left as it is. Fix it first (a trailing comma is the usual cause).`);
+  }
   const script = tripwirePath(autoagyHome);
   const source = fs
     .readFileSync(SOURCE, 'utf8')
@@ -147,8 +180,6 @@ export function installTripwire({ autoagyHome, home = os.homedir(), nodePath = p
   fs.writeFileSync(tmp, source, { mode: 0o700 });
   fs.renameSync(tmp, script);
 
-  const file = userHooksPath(home);
-  const hooks = readJson(file) ?? {};
   hooks[TRIPWIRE_KEY] = {
     PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: quote(script), timeout: 20 }] }],
   };

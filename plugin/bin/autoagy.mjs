@@ -23,7 +23,7 @@ import { appendDecision, readDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, restrictHomePermissions, hookPins } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled } from '../lib/tokens.mjs';
-import { installTripwire, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, installedPluginDir } from '../lib/tripwire.mjs';
+import { installTripwire, tripwireInstallable, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, installedPluginDir } from '../lib/tripwire.mjs';
 import { scanMcpServers, readMcpCache, readMcpServers, mcpConfigFiles, MCP_CACHE_FILE } from '../lib/mcp.mjs';
 
 /**
@@ -776,6 +776,19 @@ function setup(flags) {
   }
   if (flags['no-settings']) {
     console.log('Skipping Antigravity settings (--no-settings). Approved actions may still show Antigravity prompts.');
+    return;
+  }
+  // Asked before any grant is written. The tripwire is what stands behind them,
+  // and it registers in a file the user owns; if that file cannot be read,
+  // registering would mean overwriting it. So neither happens — grants whose
+  // tripwire could not be registered are exactly what it exists to catch.
+  const installable = tripwireInstallable({ home });
+  if (!installable.ok) {
+    console.error(
+      `autoagy: ${installable.file} is not valid JSON. setup registers its tripwire there and will not overwrite a file it cannot read, ` +
+        'so no grants were written. Fix the file (a trailing comma is the usual cause) and run this again.',
+    );
+    process.exitCode = 1;
     return;
   }
   const report = applySetup({ dryRun, env, home, grants: grantsFor(config, { autoagyHome, home }) });

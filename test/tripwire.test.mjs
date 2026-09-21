@@ -118,6 +118,21 @@ test('registration merges into the user hooks file and leaves the rest alone', (
   assert.equal(fs.existsSync(tripwirePath(autoagyHome)), false);
 });
 
+test('a user hooks file that cannot be read is left exactly as it was, not replaced', () => {
+  // Registration used to read the file with `readJson(file) ?? {}`, so one
+  // syntax error became `{}` plus the tripwire: every hook the user had in there
+  // gone, and exit 0.
+  const file = userHooksPath(home);
+  const broken = '{ "someone-else": { "PreToolUse": [] }, }\n';
+  fs.writeFileSync(file, broken);
+  assert.throws(() => installTripwire({ autoagyHome, home, pluginDir }), /not valid JSON/);
+  assert.equal(fs.readFileSync(file, 'utf8'), broken, 'byte for byte');
+  // Removal already refused to touch such a file; the two agree now.
+  removeTripwire({ autoagyHome, home });
+  assert.equal(fs.readFileSync(file, 'utf8'), broken);
+  fs.rmSync(file, { force: true });
+});
+
 test('a file that held nothing but the tripwire is taken away with it', () => {
   fs.rmSync(userHooksPath(home), { force: true });
   installTripwire({ autoagyHome, home, pluginDir });
