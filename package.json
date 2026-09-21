@@ -2,6 +2,26 @@
   "name": "autoagy",
   "version": "0.1.0",
   "description": "Codex-style auto mode (\"Approve for me\" auto-review) for Google Antigravity, implemented as an Antigravity plugin.",
+  "keywords": [
+    "antigravity",
+    "agy",
+    "codex",
+    "auto-review",
+    "guardian",
+    "permissions",
+    "sandbox",
+    "bubblewrap",
+    "plugin"
+  ],
+  "homepage": "https://github.com/JXMss/autoagy",
+  "bugs": {
+    "url": "https://github.com/JXMss/autoagy/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JXMss/autoagy.git"
+  },
+  "author": "JXMss",
   "private": true,
   "type": "module",
   "engines": {

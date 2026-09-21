@@ -1,5 +1,23 @@
 autoagy
 Codex-style auto mode for Google Antigravity.
+Copyright 2026 JXMss
+
+Codex's own NOTICE file is reproduced here in full: Apache-2.0 section 4(d)
+asks for a readable copy of the notices that come with the work this project is
+derived from.
+
+    OpenAI Codex
+    Copyright 2025 OpenAI
+
+    This project includes code derived from Ratatui, licensed under the MIT
+    license.
+    Copyright (c) 2016-2022 Florian Dehau
+    Copyright (c) 2023-2025 The Ratatui Developers
+
+The Ratatui attribution covers Codex's terminal UI. autoagy adapts Codex's
+guardian policy, its transcript budgets and its command-safety heuristics, not
+its TUI, so no Ratatui code is present here — the line is carried over because
+it is part of the notice above.
 
 This project contains material adapted from OpenAI Codex
 (https://github.com/openai/codex, tag rust-v0.154.0), licensed under the
