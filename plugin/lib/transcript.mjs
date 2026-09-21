@@ -345,6 +345,14 @@ export function findParentConversation(brainDir, childId, { maxFiles = 40, maxAg
   }
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
   const re = SUBAGENT_ID_RE(childId);
+  let childRequest;
+  const childPrompt = () => {
+    if (childRequest === undefined) {
+      const first = readTranscriptRows(transcriptPathFor(brainDir, childId)).find((r) => r.type === 'USER_INPUT');
+      childRequest = first ? extractUserRequest(first.content) : null;
+    }
+    return childRequest;
+  };
   for (const c of candidates.slice(0, maxFiles)) {
     let text;
     try {
@@ -353,18 +361,58 @@ export function findParentConversation(brainDir, childId, { maxFiles = 40, maxAg
       continue;
     }
     if (!text.includes(childId)) continue;
-    for (const line of text.split('\n')) {
+    const lines = text.split('\n');
+    let genericRecord = false;
+    for (const line of lines) {
       if (!line.includes(childId)) continue;
       try {
         const row = JSON.parse(line);
-        if (row.type === 'INVOKE_SUBAGENT' && typeof row.content === 'string' && re.test(row.content)) return c.id;
+        if (typeof row.content !== 'string' || !re.test(row.content)) continue;
+        if (row.type === 'INVOKE_SUBAGENT') return c.id;
+        if (row.type === 'GENERIC' && row.content.includes(CREATED_SUBAGENTS)) genericRecord = true;
       } catch {
         // skip
       }
     }
+    // The same record, written as a `GENERIC` row: measured on a real machine,
+    // one `invoke_subagent` call's result was typed that way while others were
+    // `INVOKE_SUBAGENT` — not by version, not by how many subagents it started.
+    // Those children could not be traced to their root, so they lost the
+    // authorization the user gave there. The type alone cannot be trusted as
+    // widely: a `GENERIC` row can be any tool's result, carries no call id, and a
+    // conversation id is something an agent can read from the brain directory and
+    // echo. So the link also needs the one thing only a real delegation has — the
+    // child's first request is exactly a `Prompt` this parent passed to
+    // `invoke_subagent` (measured 6 of 6). That holds whatever order the steps
+    // were written in, which `step_index` does not tell.
+    if (genericRecord && invokedWithPrompt(lines, childPrompt())) return c.id;
   }
   if (report && candidates.length > maxFiles) report.truncated = true;
   return null;
+}
+
+const CREATED_SUBAGENTS = 'Created the following subagents:';
+
+/** Whether any `invoke_subagent` call in these transcript lines passed exactly this prompt. */
+function invokedWithPrompt(lines, prompt) {
+  if (typeof prompt !== 'string' || prompt === '') return false;
+  for (const line of lines) {
+    if (!line.includes('invoke_subagent')) continue;
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (row.type !== 'PLANNER_RESPONSE') continue;
+    for (const call of toolCallsOf(row)) {
+      if (call?.name !== 'invoke_subagent') continue;
+      const args = decodeArgs(call.args ?? call.arguments ?? {});
+      const subagents = Array.isArray(args?.Subagents) ? args.Subagents : [];
+      if (subagents.some((sub) => typeof sub?.Prompt === 'string' && sub.Prompt.trim() === prompt)) return true;
+    }
+  }
+  return false;
 }
 
 /**

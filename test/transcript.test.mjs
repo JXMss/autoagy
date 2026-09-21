@@ -183,6 +183,35 @@ test('review conversations do not use up the window the parent search looks in',
   assert.equal(settled.truncated, undefined, 'a search that saw everything is a real "no parent"');
 });
 
+// Measured on a real machine: one `invoke_subagent` call's result was written as
+// a GENERIC row rather than INVOKE_SUBAGENT, so its three children could not be
+// traced to their root. A GENERIC row can hold any tool's result and an agent
+// can echo a conversation id, so the row alone is not enough: the child's first
+// request has to be a Prompt that parent really passed to invoke_subagent.
+test('a GENERIC invocation record links a child only when the parent really delegated that prompt', () => {
+  const brain = path.join(tmp, 'brain-generic');
+  const created = (id) => ({ source: 'MODEL', type: 'GENERIC', status: 'DONE', content: `Created At: x\nCompleted At: y\nCreated the following subagents:\n{\n  "conversationId":  "${id}",\n  "logAbsoluteUri":  "file:///x"\n}` });
+  const call = (prompt) => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: '', tool_calls: [{ name: 'invoke_subagent', args: { Subagents: [{ TypeName: 'self', Prompt: prompt, Role: 'r', Model: 'inherit' }], toolAction: 'a', toolSummary: 's' } }] });
+  const child = (id, prompt) => writeTranscript(path.join(brain, id), [userRow(prompt, false)]);
+  const real = 'aaaaaaaa-3333-4000-8000-000000000001';
+  const echo = 'aaaaaaaa-3333-4000-8000-000000000002';
+  const other = 'aaaaaaaa-3333-4000-8000-000000000003';
+  const kid = 'bbbbbbbb-3333-4000-8000-000000000001';
+  const kid2 = 'bbbbbbbb-3333-4000-8000-000000000002';
+  const kid3 = 'bbbbbbbb-3333-4000-8000-000000000003';
+  child(kid, 'Read parser.js and report its exports.');
+  child(kid2, 'Delete the build directory.');
+  child(kid3, 'Summarise the README.');
+  writeTranscript(path.join(brain, real), [userRow('refactor the parser'), call('Read parser.js and report its exports.'), created(kid)]);
+  // An id echoed into some tool's result, with no delegation behind it.
+  writeTranscript(path.join(brain, echo), [userRow('look around'), created(kid2)]);
+  // A real delegation, but not of this child's prompt.
+  writeTranscript(path.join(brain, other), [userRow('tidy up'), call('Run the tests.'), created(kid3)]);
+  assert.equal(findParentConversation(brain, kid), real);
+  assert.equal(findParentConversation(brain, kid2), null, 'an echoed id is not a delegation');
+  assert.equal(findParentConversation(brain, kid3), null, 'nor is a delegation of some other prompt');
+});
+
 test('finds the root conversation of nested subagents', () => {
   const brain = path.join(tmp, 'brain');
   const root = 'aaaaaaaa-0000-4000-8000-000000000001';
