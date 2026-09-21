@@ -7,11 +7,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { makeSandboxDirs, payloadFor } from './helpers.mjs';
+import { makeSandboxDirs, payloadFor, contextFor, configWith } from './helpers.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
 import { readState, updateState } from '../plugin/lib/state.mjs';
 import { readSandboxCheck } from '../plugin/lib/confine.mjs';
-import { handlePreToolUse, failClosedOutput } from '../plugin/lib/hook.mjs';
+import { handlePreToolUse, failClosedOutput, driftIsContained } from '../plugin/lib/hook.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from '../plugin/lib/context.mjs';
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin', 'bin', 'autoagy.mjs');
@@ -353,6 +353,88 @@ test('an edit whose target is swapped after approval trips the circuit breaker',
   assert.equal(blocked.decision, 'deny');
   assert.match(blocked.reason, /resolved to .* when the write_to_file was approved/);
   fs.rmSync(path.join(dirs.workspace, 'src'), { force: true });
+});
+
+test('pathDrift "graded": a drift that stays inside the workspace stops the turn but not the conversation', () => {
+  // The sticky mark is the highest-friction thing autoagy has: once set, every
+  // later edit and content read is reviewed until a person runs `autoagy trust`.
+  // Grading asks where the drift landed, and this is the case where the answer is
+  // "on a file this conversation could have named outright".
+  const src = path.join(dirs.workspace, 'src');
+  const elsewhere = path.join(dirs.workspace, 'elsewhere');
+  const target = path.join(src, 'a.js');
+  const approveThenSwap = () => {
+    fs.rmSync(src, { recursive: true, force: true });
+    fs.mkdirSync(elsewhere, { recursive: true });
+    assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: target, CodeContent: 'x' }, ws()), { mock: 'allow' }).decision, 'allow');
+    fs.symlinkSync(elsewhere, src);
+    runHook('post-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: target, CodeContent: 'x' }, ws()));
+    fs.rmSync(src, { force: true });
+  };
+
+  writeConfig({ pathDrift: 'graded' });
+  approveThenSwap();
+  const [graded] = readDecisions(dirs.env.AUTOAGY_HOME, 1);
+  assert.equal(graded.verdict, 'edit-target-changed', 'the drift is still recorded');
+  assert.equal(graded.contained, true);
+  assert.equal(graded.after, path.join(elsewhere, 'a.js'));
+  assert.equal(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).untrusted, null, 'but the conversation is not marked');
+  // The turn still stops: something moved under the call, and the user hears it.
+  const blocked = runHook('pre-tool-use', payloadFor(dirs, 'run_command', { CommandLine: 'npm test', Cwd: dirs.workspace }, ws()), { mock: 'allow' });
+  assert.equal(blocked.decision, 'deny');
+  assert.match(blocked.reason, /only this turn stops/);
+  assert.doesNotMatch(blocked.reason, /autoagy trust/);
+
+  // Landing outside every writable root is marked under grading exactly as before.
+  // `/etc` rather than the fixture's home: this harness runs the hook as a real
+  // subprocess, so its temp roots are the machine's — and the whole fixture lives
+  // under `/tmp`, which is one of them. A drift into a temp directory really is
+  // contained (see driftIsContained), so the fixture home cannot play the part of
+  // "somewhere else" here.
+  fs.rmSync(dirs.env.AUTOAGY_HOME, { recursive: true, force: true });
+  writeConfig({ pathDrift: 'graded' });
+  writeTranscript();
+  fs.rmSync(src, { recursive: true, force: true });
+  assert.equal(runHook('pre-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: target, CodeContent: 'x' }, ws()), { mock: 'allow' }).decision, 'allow');
+  fs.symlinkSync('/etc', src);
+  runHook('post-tool-use', payloadFor(dirs, 'write_to_file', { TargetFile: target, CodeContent: 'x' }, ws()));
+  assert.equal(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).untrusted?.reason, 'edit-target-changed');
+  fs.rmSync(src, { force: true });
+
+  // And the default is unchanged: the same in-workspace drift sticks.
+  fs.rmSync(dirs.env.AUTOAGY_HOME, { recursive: true, force: true });
+  writeConfig({});
+  writeTranscript();
+  approveThenSwap();
+  assert.equal(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).untrusted?.reason, 'edit-target-changed');
+  assert.equal(readDecisions(dirs.env.AUTOAGY_HOME, 1)[0].contained, undefined);
+  fs.rmSync(elsewhere, { recursive: true, force: true });
+});
+
+test('what counts as a contained drift, by landing zone', () => {
+  // The predicate is the whole of `pathDrift: "graded"`, so it is pinned directly
+  // rather than through one end-to-end case. In-process, so the writable roots are
+  // the fixture's and `~` is the fixture's home — which the subprocess harness
+  // cannot arrange, since the hook resolves both from the real machine.
+  const ctx = (config) => contextFor(dirs, 'write_to_file', { TargetFile: path.join(dirs.workspace, 'a.js') }, { config: configWith(config) });
+  const graded = ctx({ pathDrift: 'graded' });
+  const contained = (p) => driftIsContained(graded, p);
+
+  assert.equal(contained(path.join(dirs.workspace, 'elsewhere', 'a.js')), true, 'an ordinary workspace file');
+  assert.equal(contained(path.join(dirs.tmp, 'a.js')), true, 'a temp directory is a writable root, so this is contained on the same grounds');
+  assert.equal(contained(path.join(dirs.brain, 'a.js')), true, "agy's own artifact directory, likewise");
+
+  assert.equal(contained('/etc/passwd'), false, 'outside every writable root');
+  assert.equal(contained(path.join(dirs.home, '.ssh', 'id_ed25519')), false, 'a credential store — outside the roots and a credential path, which is redundant on purpose');
+  assert.equal(contained(path.join(dirs.workspace, '.git', 'hooks', 'pre-commit')), false, 'protected metadata, wherever it sits');
+  assert.equal(contained(path.join(dirs.env.AUTOAGY_HOME, 'config.json')), false, "autoagy's own files");
+  assert.equal(contained(path.join(dirs.brain, '.system_generated', 'logs', 'transcript_full.jsonl')), false, 'the conversation log');
+  const protectedByConfig = ctx({ pathDrift: 'graded', protectedPaths: [`${dirs.workspace}/.husky/**`] });
+  assert.equal(driftIsContained(protectedByConfig, path.join(dirs.workspace, '.husky', 'pre-commit')), false, 'and whatever protectedPaths names');
+
+  // The default answers "nowhere", which is what every version before this did.
+  const sticky = ctx({});
+  assert.equal(driftIsContained(sticky, path.join(dirs.workspace, 'elsewhere', 'a.js')), false);
 });
 
 test('a swapped edit target leaves the conversation untrusted, not just the turn', () => {

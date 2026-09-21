@@ -141,6 +141,31 @@ export const DEFAULT_CONFIG = Object.freeze({
     // write.
     allow: [],
   },
+  // What a path that resolved somewhere else between the check and the call costs.
+  //
+  // agy performs edits and reads itself, outside every sandbox, so autoagy can
+  // only resolve the target before the call and again after it. A difference means
+  // something replaced part of that path in between.
+  //
+  // "sticky" (default) is what every version so far did: the whole conversation
+  // stops being trusted, every later edit and content read is reviewed, and only
+  // `autoagy trust` clears it — because a swapped symlink does not revert just
+  // because a new turn started, and only a person can say what is on disk now.
+  //
+  // "graded" asks *where it landed*. Still inside the workspace (or an
+  // agy-managed scratch/artifact/temp directory), and not a credential store, not
+  // `.git` or other protected metadata, not autoagy's own files, not the
+  // conversation log: the call reached a file the agent could already have named
+  // outright, so the turn still stops and the drift is still logged, but the
+  // conversation is not marked. Anywhere else — outside the workspace, a
+  // credential path, a control surface — is marked exactly as before.
+  //
+  // What that gives up, stated plainly: a file inside the workspace that some
+  // other tool executes later (`.envrc`, `.husky/`, a `Makefile`) is an ordinary
+  // workspace file by this test, so a drift onto one of those no longer sticks.
+  // `protectedPaths` is the answer to that — those entries are excluded here, and
+  // on Linux they are mounted read-only besides.
+  pathDrift: 'sticky',
   // Whether executing a notebook needs review.
   //
   // "review" is the default and stays conservative, because what confines a
@@ -210,6 +235,7 @@ const ENUMS = {
   onError: ['deny', 'ask'],
   browser: ['review', 'allow'],
   notebooks: ['review', 'allow'],
+  pathDrift: ['sticky', 'graded'],
   networkGrants: ['none', 'trusted-domains'],
   webSearch: ['allow', 'review'],
   'commandEnv.mode': ['inherit', 'scrub'],

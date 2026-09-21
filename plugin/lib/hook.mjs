@@ -10,7 +10,7 @@
 
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext, HOST_INSPECTABLE_PLATFORMS, newNestedGitPlantings } from './context.mjs';
-import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets, readTargets, canonicalPathArgs } from './policy.mjs';
+import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets, readTargets, canonicalPathArgs, classifyWriteTarget, isCredentialPath } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor } from './guardian.mjs';
@@ -455,6 +455,14 @@ const TARGET_CHECKS = {
       `autoagy: ${abs} resolved to ${real} when the ${tool} was approved, but to ${after} when it ran. ` +
       'Something replaced part of that path in between, so the write may have landed outside the approved location. ' +
       'Check what changed there before continuing.',
+    // `pathDrift: "graded"`, and the write landed on an ordinary workspace file.
+    // The turn still stops — something moved under the call and the user should
+    // hear it — but the wording does not ask for `autoagy trust`, because the mark
+    // that command clears was not set.
+    containedMessage: (tool, abs, real, after) =>
+      `autoagy: ${abs} resolved to ${real} when the ${tool} was approved, but to ${after} when it ran. ` +
+      'Something replaced part of that path in between. The write landed on an ordinary file inside the workspace, ' +
+      'which this conversation could have named directly, so only this turn stops. Say what happened and check that file.',
   },
   read: {
     pending: 'pendingReads',
@@ -468,6 +476,13 @@ const TARGET_CHECKS = {
       `autoagy: ${abs} resolved to ${real} when the ${tool} was approved, but to ${after} when it ran. ` +
       `Something replaced part of that path in between, so ${after} is what may have been read into this conversation. ` +
       'That cannot be taken back: treat anything secret in that file as disclosed, and rotate it.',
+    // The read counterpart. A read that landed elsewhere is the less reversible
+    // of the two, and what makes this case harmless is not that it was a read —
+    // it is that the file was already readable without review.
+    containedMessage: (tool, abs, real, after) =>
+      `autoagy: ${abs} resolved to ${real} when the ${tool} was approved, but to ${after} when it ran. ` +
+      `Something replaced part of that path in between, so ${after} is what was read. It is an ordinary file inside the workspace, ` +
+      'readable without review anyway, so only this turn stops. Say what happened, and do not rely on having read the path you asked for.',
   },
 };
 
@@ -531,7 +546,8 @@ function checkTargets(ctx, kind) {
   for (const { abs, real } of recorded) {
     const after = now.get(abs);
     if (!after || after === real) continue;
-    const message = check.message(ctx.toolName, abs, real, after);
+    const contained = driftIsContained(ctx, after);
+    const message = contained ? check.containedMessage(ctx.toolName, abs, real, after) : check.message(ctx.toolName, abs, real, after);
     appendDecision(home, {
       conversation: ctx.conversationId,
       step: ctx.stepIdx,
@@ -540,22 +556,61 @@ function checkTargets(ctx, kind) {
       path: abs,
       before: real,
       after,
+      contained: contained || undefined,
     });
     updateState(home, ctx.conversationId, (s) => {
       s.interrupt = { turnKey: countUserMessages(ctx.transcriptPath), pending: true, message };
       // This is a fact about the filesystem, not about the agent's behaviour, so
       // it outlives the turn: leaving the symlink in place does not undo it.
-      markUntrusted(s, { reason: check.verdict, detail: `${abs} resolved to ${after}`, step: ctx.stepIdx });
+      // Unless the drift stayed inside the workspace under `pathDrift: "graded"`
+      // — then the turn still stops and the log still names it, but the rest of
+      // the conversation is not reviewed. See driftIsContained.
+      if (!contained) markUntrusted(s, { reason: check.verdict, detail: `${abs} resolved to ${after}`, step: ctx.stepIdx });
       rootId = s.rootConversationId;
     });
     // A subagent's conversation keeps its own state file, but it just changed
     // the parent's workspace too, so the parent stops trusting its paths as well.
-    if (rootId && rootId !== ctx.conversationId) {
+    if (!contained && rootId && rootId !== ctx.conversationId) {
       updateState(home, rootId, (s) => markUntrusted(s, { reason: check.verdict, detail: `${abs} changed while a subagent ran`, step: ctx.stepIdx }));
     }
     return {};
   }
   return {};
+}
+
+/**
+ * Whether a drifted target landed somewhere the agent could have named outright.
+ *
+ * Only asked under `pathDrift: "graded"`. The default answers "nowhere" and every
+ * drift marks the conversation, which is what every version before this did.
+ *
+ * `classifyWriteTarget` is the same judgement the edit rules use, so the two
+ * cannot disagree about what a control surface is: `self`, `evidence` and
+ * `protected` (which covers `protectedPaths`, `.git` anywhere in the path, agent
+ * metadata and `~/.gemini`) all fall through to "not contained", as does a
+ * credential store and anything outside the writable roots. What is left —
+ * `workspace` and the agy-managed scratch, artifact and temp directories — is a
+ * place the agent writes and reads without review anyway, so a call that landed
+ * there reached nothing it was not already allowed to reach.
+ *
+ * The same test serves reads and edits, and it is worth saying why, because a
+ * read that lands elsewhere is the less reversible of the two: what makes it
+ * harmless here is not that it was a read, it is that the file was already
+ * readable. The question "could this call have named that path itself" has one
+ * answer for both.
+ *
+ * A real `~/.ssh` drift fails this twice over — it is outside every writable root
+ * *and* a credential path — and that redundancy is worth keeping rather than
+ * trimming to whichever check looks sufficient. `/tmp` is the case that surprises:
+ * it is a writable root, so a drift landing there *is* contained, deliberately, on
+ * the same grounds as the workspace. Exported for the test, because the
+ * interesting part of this change is the predicate rather than the plumbing.
+ */
+export function driftIsContained(ctx, after) {
+  if (ctx.config.pathDrift !== 'graded') return false;
+  const where = classifyWriteTarget(ctx, after);
+  if (where !== 'workspace' && where !== 'managed') return false;
+  return !isCredentialPath(ctx, after);
 }
 
 /** The decision used when autoagy itself fails: never block reads, never allow the rest. */
