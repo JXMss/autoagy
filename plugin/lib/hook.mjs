@@ -852,8 +852,12 @@ export async function handlePreToolUse(payload, options = {}) {
   const denialId = result.status === 'denied' ? newId() : null;
 
   const interrupt = updateState(home, ctx.conversationId, (s) => {
-    // Cache the lookup (null = root conversation) so later reviews skip the scan.
-    if (prompt) s.rootConversationId = evidence.rootId ?? null;
+    // Cache the lookup (null = root conversation) so later reviews skip the scan
+    // — unless the scan was cut short, in which case "no parent" may only mean
+    // "not looked at" and the next review looks again. A miss used to be cached
+    // for good, so one burst of reviews made a subagent a root for the rest of
+    // its run.
+    if (prompt && evidence.rootLookupComplete !== false) s.rootConversationId = evidence.rootId ?? null;
     if (approvals.length > 0) takeApprovals(s, key);
     if (result.status === 'approved' && ctx.toolName === 'run_command' && ctx.args.BypassSandbox === true) {
       s.escalatedCommandApproved = true;

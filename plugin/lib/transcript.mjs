@@ -292,7 +292,40 @@ const SUBAGENT_ID_RE = (id) => new RegExp(`"conversationId"\\s*:\\s*"${id.replac
  * Looks for the conversation whose invoke_subagent result created `childId`.
  * @returns {string | null}
  */
-export function findParentConversation(brainDir, childId, { maxFiles = 40, maxAgeMs = 3 * 24 * 3600 * 1000 } = {}) {
+// How agy writes the first message of one of autoagy's own review conversations:
+// the text `agyMessageText` (reviewers.mjs) sends, inside agy's `<USER_REQUEST>`
+// wrapper, JSON-encoded on the first line.
+const REVIEW_TRANSCRIPT_MARK = '<USER_REQUEST>\\n<review_policy>';
+
+/**
+ * Whether a transcript is one of autoagy's review conversations. Every review is
+ * a headless agy conversation in the same `brain` directory as the user's (on one
+ * real machine, 16 of 66). Only the head of the file is read.
+ */
+export function isReviewTranscript(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(1024);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    return buf.toString('utf8', 0, n).includes(REVIEW_TRANSCRIPT_MARK);
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * The conversation that invoked `childId`, among the most recent ones.
+ *
+ * Review conversations are not candidates: each review adds one, so a burst of
+ * them pushed the real parent out of the window — and an agent can cause reviews
+ * on purpose. `report.truncated` is set when the answer is "not found" and the
+ * window left candidates unread, because then "not found" may only mean "not
+ * looked at", and the caller must not settle on it.
+ */
+export function findParentConversation(brainDir, childId, { maxFiles = 40, maxAgeMs = 3 * 24 * 3600 * 1000, report = null } = {}) {
   let dirs;
   try {
     dirs = fs.readdirSync(brainDir, { withFileTypes: true }).filter((d) => d.isDirectory() && d.name !== childId);
@@ -305,7 +338,7 @@ export function findParentConversation(brainDir, childId, { maxFiles = 40, maxAg
     const file = path.join(brainDir, d.name, '.system_generated', 'logs', 'transcript_full.jsonl');
     try {
       const { mtimeMs } = fs.statSync(file);
-      if (now - mtimeMs <= maxAgeMs) candidates.push({ id: d.name, file, mtimeMs });
+      if (now - mtimeMs <= maxAgeMs && !isReviewTranscript(file)) candidates.push({ id: d.name, file, mtimeMs });
     } catch {
       // no transcript
     }
@@ -330,6 +363,7 @@ export function findParentConversation(brainDir, childId, { maxFiles = 40, maxAg
       }
     }
   }
+  if (report && candidates.length > maxFiles) report.truncated = true;
   return null;
 }
 
@@ -337,11 +371,11 @@ export function findParentConversation(brainDir, childId, { maxFiles = 40, maxAg
  * Returns the root conversation id for a (possibly nested) subagent, or null
  * when `conversationId` has no known parent.
  */
-export function findRootConversation(brainDir, conversationId, maxDepth = 4) {
+export function findRootConversation(brainDir, conversationId, maxDepth = 4, { report = null } = {}) {
   let current = conversationId;
   let root = null;
   for (let i = 0; i < maxDepth; i++) {
-    const parent = findParentConversation(brainDir, current);
+    const parent = findParentConversation(brainDir, current, { report });
     if (!parent) break;
     root = parent;
     current = parent;

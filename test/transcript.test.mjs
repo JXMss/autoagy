@@ -12,6 +12,7 @@ import {
   decodeArgs,
   readTranscriptRows,
   findParentConversation,
+  isReviewTranscript,
   findRootConversation,
   renderRootAuthorization,
   BUDGETS,
@@ -150,6 +151,36 @@ test('reads JSONL tolerating a partially written last line', () => {
   fs.writeFileSync(file, `${JSON.stringify(userRow('a'))}\n{"type":"PLANNER_RES`);
   assert.equal(readTranscriptRows(file).length, 1);
   assert.deepEqual(readTranscriptRows(path.join(tmp, 'missing.jsonl')), []);
+});
+
+// Every review is a headless agy conversation in the same brain directory — 16
+// of 66 on one real machine — and the parent search looked at the newest 40. A
+// burst of reviews pushed the real parent out, and the miss was then cached for
+// good.
+test('review conversations do not use up the window the parent search looks in', async () => {
+  const { agyMessageText } = await import('../plugin/lib/reviewers.mjs');
+  const brain = path.join(tmp, 'brain-reviews');
+  const parent = 'aaaaaaaa-1111-4000-8000-000000000001';
+  const child = 'bbbbbbbb-1111-4000-8000-000000000002';
+  const invoke = { source: 'MODEL', type: 'INVOKE_SUBAGENT', status: 'DONE', content: `Created the following subagents:\n{\n  "conversationId":  "${child}"\n}` };
+  const parentFile = writeTranscript(path.join(brain, parent), [userRow('refactor the parser'), invoke]);
+  const older = (Date.now() - 3600_000) / 1000;
+  fs.utimesSync(parentFile, older, older);
+  // Written the way agy records what autoagy sends, so the mark and the sender cannot drift apart.
+  const review = { source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: `<USER_REQUEST>\n${agyMessageText({ system: 'policy', user: 'action' })}\n</USER_REQUEST>` };
+  for (let i = 0; i < 45; i++) writeTranscript(path.join(brain, `review-${i}`), [review]);
+  assert.equal(isReviewTranscript(path.join(brain, 'review-0', '.system_generated', 'logs', 'transcript_full.jsonl')), true);
+  assert.equal(isReviewTranscript(parentFile), false);
+  assert.equal(findParentConversation(brain, child), parent);
+
+  // Ordinary conversations still count, and a miss the window may have caused says so.
+  for (let i = 0; i < 41; i++) writeTranscript(path.join(brain, `other-${i}`), [userRow(`task ${i}`)]);
+  const report = {};
+  assert.equal(findParentConversation(brain, child, { report }), null);
+  assert.equal(report.truncated, true, 'not found because it was not looked at');
+  const settled = {};
+  findParentConversation(brain, 'cccccccc-1111-4000-8000-000000000003', { report: settled, maxFiles: 1000 });
+  assert.equal(settled.truncated, undefined, 'a search that saw everything is a real "no parent"');
 });
 
 test('finds the root conversation of nested subagents', () => {

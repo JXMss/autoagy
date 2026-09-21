@@ -160,20 +160,37 @@ export function gatherEvidence(ctx, hints = {}) {
   // parent's invoke_subagent record is independent evidence. The result is
   // cached per conversation, so the scan runs once.
   let rootId = hints.rootConversationId;
-  if (rootId === undefined) rootId = brainDir ? findRootConversation(brainDir, ctx.conversationId) : null;
+  const lookup = {};
+  if (rootId === undefined) rootId = brainDir ? findRootConversation(brainDir, ctx.conversationId, undefined, { report: lookup }) : null;
+  // The walk calls "root" the first conversation whose own parent it cannot
+  // find. For a nested subagent whose top ancestor is out of reach — older than
+  // the age limit, or pushed out of the window — that is the intermediate
+  // subagent, and its "user" messages were written by an agent. They were shown
+  // to the reviewer as "The human user asked the root agent: …" (reproduced), so
+  // an agent that can make the top ancestor unfindable could author its own
+  // authorization. The root's messages count only when it looks like a
+  // conversation a person started (in the CLI, the harness-written settings
+  // snapshot, the same test used below for a conversation with no parent) and
+  // the walk that found it was not cut short.
   let rootMessages = null;
+  let rootUnverified = false;
   if (rootId && brainDir) {
-    rootMessages = rowsToEntries(readTranscriptRows(transcriptPathFor(brainDir, rootId))).userMessages;
+    const root = rowsToEntries(readTranscriptRows(transcriptPathFor(brainDir, rootId)));
+    rootUnverified = lookup.truncated === true || (ctx.product === 'antigravity-cli' && root.userMessages.length > 0 && !root.firstUserHasSettings);
+    if (!rootUnverified) rootMessages = root.userMessages;
   }
   // A CLI conversation started by a person begins with a settings snapshot;
   // subagent conversations do not. Without a known parent, treat such a
   // conversation's "user" as another agent.
-  const unverifiedDelegate = !rootId && ctx.product === 'antigravity-cli' && userMessages.length > 0 && !firstUserHasSettings;
+  const unverifiedDelegate = rootUnverified || (!rootId && ctx.product === 'antigravity-cli' && userMessages.length > 0 && !firstUserHasSettings);
   const delegated = Boolean(rootId) || unverifiedDelegate;
   return {
     entries: dropPendingCall(entries, ctx.toolName),
     userMessageCount: userMessages.length,
     rootId: rootId ?? null,
+    // False when the walk may have missed a parent only because it did not look
+    // far enough: the caller must not cache that answer.
+    rootLookupComplete: !lookup.truncated,
     rootMessages,
     delegated,
     unverifiedDelegate,
