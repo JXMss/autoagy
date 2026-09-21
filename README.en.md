@@ -113,7 +113,7 @@ Requirements: Node.js ≥ 20, Antigravity CLI (`agy`) ≥ 1.2. On Linux, install
 `bubblewrap` for the own sandbox (`sudo apt install bubblewrap`).
 
 ```bash
-git clone https://github.com/OWNER/autoagy autoagy && cd autoagy
+git clone https://github.com/JXMss/autoagy autoagy && cd autoagy
 node scripts/install.mjs --dry-run     # prints exactly what it would change
 node scripts/install.mjs
 alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
