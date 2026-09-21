@@ -160,6 +160,21 @@ test('the hook list is capped and the head is read, not loaded', () => {
   assert.equal(big.hooks[0].head.length, 400);
 });
 
+test('a new repository the reading budget did not reach is recorded as unchecked, not skipped', () => {
+  const plain = path.join(dirs.workspace, 'plain', '.git');
+  fs.mkdirSync(plain, { recursive: true });
+  try {
+    const ctx = contextFor(dirs, 'run_command', { CommandLine: 'ls' });
+    // Read in time: an empty `git init` holds nothing runnable and is not a finding.
+    assert.deepEqual(newNestedGitPlantings(ctx, []), []);
+    // Not read: not knowing is treated like it holding something.
+    const late = newNestedGitPlantings(ctx, [], { budgetMs: 0 });
+    assert.deepEqual(late.map((f) => [f.path, f.unchecked]), [[plain, true]]);
+  } finally {
+    fs.rmSync(path.join(dirs.workspace, 'plain'), { recursive: true, force: true });
+  }
+});
+
 test('only a .git that was not there when the command was built counts as a planting', () => {
   const existing = path.join(dirs.workspace, 'existing', '.git');
   const created = path.join(dirs.workspace, 'created', '.git');

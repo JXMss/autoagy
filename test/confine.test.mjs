@@ -663,6 +663,54 @@ const plantedConfig = (capture) => ({
   reviewer: { backend: 'mock', mock: { response: 'allow', capture } },
 });
 
+// Both caps are gone: eight per command and twenty per conversation, each of
+// which dropped a repository in silence. Nine in one command, or twenty-one
+// across two, was a legal way to get a planted hook's `git commit` to the
+// reviewer with nothing said about the hook.
+test('no number of planted repositories pushes one out of the record', async () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  const capture = path.join(dirs.root, 'planted-many.jsonl');
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(plantedConfig(capture)));
+  const conversationId = '99999999-0000-4000-8000-p1a17ed0000e';
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  const base = path.join(dirs.workspace, 'many');
+  fs.rmSync(base, { recursive: true, force: true });
+  fs.rmSync(capture, { force: true });
+  fs.mkdirSync(base, { recursive: true });
+  const plant = (i) => {
+    const hooks = path.join(base, `r${i}`, '.git', 'hooks');
+    fs.mkdirSync(hooks, { recursive: true });
+    fs.writeFileSync(path.join(hooks, 'pre-commit'), `#!/bin/sh\necho ${i}\n`);
+  };
+  const step = async (stepIdx, range) => {
+    const started = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'true' }, { conversationId, stepIdx }), opts);
+    for (const i of range) plant(i);
+    handlePostToolUse(payloadFor(dirs, 'run_command', started.overwrite, { conversationId, stepIdx }), opts);
+  };
+  try {
+    await step(80, Array.from({ length: 9 }, (_, i) => i));
+    assert.equal(readState(home, conversationId).plantedHooks.length, 9, 'the ninth in one command is recorded');
+    await step(81, Array.from({ length: 13 }, (_, i) => i + 9));
+    const state = readState(home, conversationId);
+    assert.equal(state.plantedHooks.length, 22, 'and the twenty-first and later do not push the first out');
+    assert.equal(state.untrusted, null, 'many plants are still not grounds for distrusting the conversation');
+
+    const first = path.join(base, 'r0');
+    const commit = await handlePreToolUse(payloadFor(dirs, 'run_command', { CommandLine: 'git commit -m x', Cwd: first }, { conversationId, stepIdx: 82 }), opts);
+    assert.equal(commit.decision, 'allow', 'the mock reviewer allows — what matters is that it was asked');
+    const prompts = fs.readFileSync(capture, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const prompt = JSON.stringify(prompts[prompts.length - 1]);
+    assert.ok(prompt.includes(JSON.stringify(path.join(first, '.git')).slice(1, -1)), 'the oldest repository is still the one named');
+    // Bounded where it is shown: eight in full, the rest named.
+    assert.equal((prompt.match(/hook \\"pre-commit\\"/g) ?? []).length, 8);
+    assert.match(prompt, /14 more, contents not shown/);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+    fs.rmSync(capture, { force: true });
+  }
+});
+
 test('a nested .git the command created is found afterwards, and commands touching it are reviewed', async () => {
   const home = dirs.env.AUTOAGY_HOME;
   const capture = path.join(dirs.root, 'planted-prompt.jsonl');

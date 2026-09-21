@@ -351,7 +351,9 @@ function removePlaceholders(home, conversationId, paths, { attribute = false } =
 function recordPlantedHooks(state, findings, step) {
   for (const finding of findings) {
     if ((state.plantedHooks ?? []).some((p) => p.path === finding.path)) continue;
-    state.plantedHooks = [...(state.plantedHooks ?? []), step === null ? finding : { ...finding, step }].slice(-MAX_PLANTED_HOOKS);
+    // No cap: see newNestedGitPlantings. What reaches the reviewer is bounded in
+    // buildReviewPrompt instead.
+    state.plantedHooks = [...(state.plantedHooks ?? []), step === null ? finding : { ...finding, step }];
   }
 }
 
@@ -385,7 +387,6 @@ function reportPlantedHooks(home, ctx, findings) {
 }
 
 const MAX_PENDING_CONFINED = 50;
-const MAX_PLANTED_HOOKS = 20;
 
 /**
  * PostToolUse: the two checks that only the arguments which actually ran can

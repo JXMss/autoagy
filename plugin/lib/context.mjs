@@ -271,9 +271,11 @@ export function plantedGitContent(gitDir) {
   return hooksMore > 0 ? { hooks, config, hooksMore } : { hooks, config };
 }
 
-// Findings per call, so one command that scatters repositories cannot fill the
-// state file with them; the caller does not need the overflow.
-const MAX_PLANTINGS_PER_CALL = 8;
+// How long one call may spend reading what new repositories hold. The walk that
+// finds them is bounded already (depth, directory count, time); reading each
+// one's hooks and config is the part that was not, and it runs in PostToolUse,
+// under a watchdog.
+const PLANTING_READ_MS = 300;
 
 /**
  * The nested `.git` directories that appeared while a rewritten command ran and
@@ -287,21 +289,38 @@ const MAX_PLANTINGS_PER_CALL = 8;
  * the after-the-fact half: what the walk found now that the recorded set did not
  * have.
  *
+ * Every finding is returned. There was a cap of eight here and a cap of twenty on
+ * the record, and both had the shape the seventh round removed from the nested
+ * scan: going over one dropped a repository silently, and a dropped repository
+ * is one whose later git commands reach the reviewer with nothing said about the
+ * hook. Nine repositories in one command, or twenty-one over a conversation, was
+ * a legal way to switch the check off. The walk bounds how many there can be per
+ * call; what needed a bound of its own was the reading, so that has a time
+ * budget, and a new repository it did not get to is recorded as `unchecked`
+ * rather than skipped — not knowing what one holds is treated like it holding
+ * something. How much of this reaches the reviewer is bounded where the prompt
+ * is built.
+ *
  * @param {import('./context.mjs').HookContext} ctx
  * @param {string[]} before the nested set recorded when the command was built
- * @returns {{ path: string, dir: string, hooks: object[], config: string[], hooksMore?: number }[]}
+ * @param {{ budgetMs?: number }} [options]
+ * @returns {{ path: string, dir: string, hooks: object[], config: string[], hooksMore?: number, unchecked?: true }[]}
  */
-export function newNestedGitPlantings(ctx, before) {
+export function newNestedGitPlantings(ctx, before, { budgetMs = PLANTING_READ_MS } = {}) {
   const known = new Set(before ?? []);
+  const deadline = Date.now() + budgetMs;
   const out = [];
   for (const gitDir of ctx.nestedGitPaths) {
     if (known.has(gitDir)) continue;
-    const content = plantedGitContent(gitDir);
-    if (!content) continue;
     // `dir` is the repository a later git command would run in, which is what
     // the review consequence is keyed on.
-    out.push({ path: gitDir, dir: path.dirname(gitDir), ...content });
-    if (out.length >= MAX_PLANTINGS_PER_CALL) break;
+    const where = { path: gitDir, dir: path.dirname(gitDir) };
+    if (Date.now() >= deadline) {
+      out.push({ ...where, hooks: [], config: [], unchecked: true });
+      continue;
+    }
+    const content = plantedGitContent(gitDir);
+    if (content) out.push({ ...where, ...content });
   }
   return out;
 }
