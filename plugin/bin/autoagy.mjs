@@ -383,12 +383,29 @@ function status() {
   // The self-check cannot see an exit status, so a mount bwrap refuses is only
   // visible by starting it. Asked for the directory status runs in, since the
   // mount table depends on the workspace; see sandboxStartCheck.
+  //
+  // Only in a directory the user can write. Anywhere else bwrap cannot make its
+  // mount points (`Can't mkdir /.git: Permission denied` from `/` or `/etc`), and
+  // "every sandboxed command fails" read as "the sandbox is broken" to someone
+  // who had simply run status from `/` — a directory that is not a workspace agy
+  // could write in either.
   if (own.active) {
-    const started = sandboxStartCheck(statusSandboxContext({ config, env, home: userHome }));
-    if (started?.ok) lines.push(`  sandbox start   ok in ${process.cwd()}`);
-    else if (started) {
-      lines.push(`  ! sandbox start FAILED in ${process.cwd()}: ${started.detail}`);
-      lines.push('    every sandboxed command in this workspace fails before it runs, whatever the self-check records.');
+    const cwd = process.cwd();
+    let writable = true;
+    try {
+      fs.accessSync(cwd, fs.constants.W_OK);
+    } catch {
+      writable = false;
+    }
+    if (!writable) {
+      lines.push(`  sandbox start   not checked: ${cwd} is not writable, so it is not a workspace agy could write in — run \`autoagy status\` from your workspace`);
+    } else {
+      const started = sandboxStartCheck(statusSandboxContext({ config, env, home: userHome }));
+      if (started?.ok) lines.push(`  sandbox start   ok in ${cwd}`);
+      else if (started) {
+        lines.push(`  ! sandbox start FAILED in ${cwd}: ${started.detail}`);
+        lines.push("    if agy's workspace is this directory, every sandboxed command there fails before it runs, whatever the self-check records.");
+      }
     }
   }
   // What the command grant is worth when the hook is not running is the whole

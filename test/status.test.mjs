@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSandboxDirs } from './helpers.mjs';
 import { updateState, markUntrusted, readState } from '../plugin/lib/state.mjs';
+import { probeBwrap } from '../plugin/lib/confine.mjs';
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin', 'bin', 'autoagy.mjs');
 const dirs = makeSandboxDirs();
@@ -319,4 +320,26 @@ test('status does not call a truncated probe cache an untrusted conversation', (
   const out = status();
   assert.doesNotMatch(out, /cannot be read as state/);
   assert.doesNotMatch(out, /bwrap-probe/);
+});
+
+// From `/` the check could only fail — bwrap cannot make its mount points there
+// — and "every sandboxed command fails" read as a broken sandbox to someone who
+// had simply run status from a directory that is no workspace at all.
+const bwrapHere = process.platform === 'linux' && probeBwrap(fs.mkdtempSync(path.join(os.tmpdir(), 'autoagy-probe-'))).ok;
+test('the sandbox start check runs only where agy could have a workspace', { skip: bwrapHere ? false : 'bubblewrap unavailable' }, () => {
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  const cfg = path.join(home, 'config.json');
+  const had = fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : null;
+  fs.writeFileSync(cfg, JSON.stringify({ ownSandbox: 'on' }));
+  try {
+    const run = (cwd) => spawnSync(process.execPath, [BIN, 'status'], { env: dirs.env, cwd, encoding: 'utf8' }).stdout;
+    const root = run('/');
+    assert.match(root, /sandbox start\s+not checked: \/ is not writable/);
+    assert.doesNotMatch(root, /sandbox start FAILED/);
+    assert.match(run(dirs.workspace), /sandbox start\s+ok in /);
+  } finally {
+    if (had === null) fs.rmSync(cfg, { force: true });
+    else fs.writeFileSync(cfg, had);
+  }
 });
