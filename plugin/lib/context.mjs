@@ -902,13 +902,22 @@ export class HookContext {
         if (core === '' || core.includes('**')) continue;
         const absolute = path.isAbsolute(core);
         if (!absolute && !anywhere && core.includes('/')) continue;
+        if (absolute) {
+          // An absolute entry names a place, not a position in `writableRoots`,
+          // and that list is the workspace roots first, then the declared ones
+          // and the artifact/scratch/temp directories — so asking one root and
+          // stopping is a `break` in the wrong place. Measured with the entry in
+          // a declared root: the write went through, because the first root was
+          // the only one consulted (`isWithin` returned false and the entry was
+          // dropped in silence), while the same entry inside the workspace was
+          // refused with `Read-only file system`.
+          for (const p of expandAnchoredGlob(core)) if (roots.some((root) => isWithin(p, root))) out.push(p);
+          continue;
+        }
         for (const root of roots) {
-          const glob = absolute ? core : path.join(root, core);
           // `isWithin` guards the one way a relative entry could point out of the
-          // root it was joined to (`../../etc/profile`), and for an absolute
-          // entry it is the question being asked.
-          for (const p of expandAnchoredGlob(glob)) if (isWithin(p, root)) out.push(p);
-          if (absolute) break;
+          // root it was joined to (`../../etc/profile`).
+          for (const p of expandAnchoredGlob(path.join(root, core))) if (isWithin(p, root)) out.push(p);
         }
       }
       return uniquePaths(out);

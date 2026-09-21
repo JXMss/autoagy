@@ -989,6 +989,23 @@ test('protectedPaths that name a place are mounted read-only, not merely recogni
   assert.ok(mounts(['*.pem']).includes(path.join(dirs.workspace, 'key.pem')), 'and a star is matched against the root\'s entries');
   assert.ok(mounts([path.join(dirs.workspace, 'Makefile')]).includes(path.join(dirs.workspace, 'Makefile')), 'an absolute entry inside a writable root names itself');
 
+  // Every writable root, not just the first one. `writableRoots` is the workspace
+  // roots followed by the declared ones and the artifact/scratch/temp
+  // directories, and an absolute entry names a place rather than a position in
+  // that list: with the `break` where it was, an entry inside a *declared* root
+  // was dropped in silence — measured end to end, the write it was meant to stop
+  // went through (`PWN` in the file), while the same entry inside the workspace
+  // was refused with `Read-only file system`.
+  const declared = path.join(dirs.root, 'declared-root');
+  fs.mkdirSync(declared, { recursive: true });
+  fs.writeFileSync(path.join(declared, 'keep.md'), 'declared');
+  const declaredMounts = readOnlyPaths(
+    contextFor(dirs, 'run_command', { CommandLine: 'x' }, { config: configWith({ ownSandbox: 'on', writableRoots: [declared], protectedPaths: [path.join(declared, 'keep.md')] }), bwrapProbe: okProbe }),
+  );
+  assert.ok(declaredMounts.includes(path.join(declared, 'keep.md')), 'an absolute entry inside a declared root is a mount too');
+  const outside = mounts([path.join(dirs.root, 'nowhere', 'x.md')]);
+  assert.ok(!outside.some((p) => p.includes('nowhere')), 'and one that is inside no writable root at all still names nothing');
+
   // The ones that cannot name a mount point, each for its own reason.
   const middle = mounts(['src/**/gen*']);
   assert.ok(!middle.includes(path.join(dirs.workspace, 'src')), 'a `**` in the middle is skipped, not widened to the directory that holds the subtree');
