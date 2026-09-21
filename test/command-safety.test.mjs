@@ -284,6 +284,28 @@ test('probes that run workspace content are not known-safe', () => {
   }
 });
 
+// The known-safe checks compared exact words, so an option that runs a program
+// or writes a file got through as soon as its value was attached (`-Oevil`),
+// joined with `=`, abbreviated, or put in a cluster. `git grep -Oevil TODO` ran
+// `evil` (measured by an external audit). Same getopt rules as the dangerous
+// table, applied to this one.
+test('an option that runs a program or writes a file is found however it is spelled', () => {
+  for (const cmd of [
+    'git grep -Oevil TODO', 'git grep -iOevil TODO', 'git grep --open-files-in-pager=evil TODO', 'git grep --open=evil TODO',
+    'git diff --outp=/tmp/x', 'git log --ext-d', 'git show --textc',
+    'xxd in.bin out.txt', '/usr/bin/time -o /tmp/f ls', '/usr/bin/time --output=/tmp/f ls', '/usr/bin/time -ao /tmp/f ls',
+    'base64 -oout in', 'sort -uo out in', 'rg -iz x', 'date -s2020-01-01',
+  ]) {
+    assert.equal(isKnownSafeCommandLine(cmd), false, cmd);
+  }
+  for (const cmd of [
+    'git grep -i TODO', 'git diff --stat', 'git diff --exit-code', 'git log --oneline -5',
+    'xxd in.bin', 'xxd -c 16 in.bin', '/usr/bin/time ls', 'time ls -o', 'base64 -d in', 'sort -u in', 'sort -k2 -t, in', 'rg -i x', 'date +%s',
+  ]) {
+    assert.equal(isKnownSafeCommandLine(cmd), true, cmd);
+  }
+});
+
 test('helpers', () => {
   assert.equal(executableName('/usr/bin/git'), 'git');
   assert.equal(executableName('C:\\Windows\\System32\\cmd.exe'), 'cmd');

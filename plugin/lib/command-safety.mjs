@@ -527,6 +527,13 @@ const SAFE_GIT_SUBCOMMANDS = new Set([
   'rev-list', 'show-branch', 'var', 'check-ignore', 'annotate',
 ]);
 const UNSAFE_GIT_ARGS = new Set(['--output', '-o', '--ext-diff', '--textconv', '--exec', '--upload-pack', '--open-files-in-pager', '-O']);
+// The same options by long name, matched the way git's parse-options reads them:
+// `--open-files-in-pager=evil`, and any unambiguous prefix (`--open=evil`,
+// `--outp=/tmp/x`, `--ext-d`). The set above compared exact words, so a value
+// joined with `=` — or `-Oevil`, the value attached to the short form — was not
+// the option, and `git grep -Oevil TODO` ran `evil` as a known-safe command
+// (measured by an external audit: it created a file).
+const UNSAFE_GIT_LONG = ['--output', '--ext-diff', '--textconv', '--exec', '--upload-pack', '--open-files-in-pager'];
 
 /**
  * Whether running `argv` hands the caller the process environment.
@@ -722,6 +729,10 @@ export function isSafeArgv(argv) {
   if (args.length === 1 && BARE_PROBES.get(args[0])?.has(name)) return true;
   const script = shellScriptOf(argv);
   if (script !== null && SHELLS.has(name)) return script.trim() !== '' && isKnownSafeCommandLine(script);
+  // `time -o FILE` writes FILE (and `-a` appends to it). The unwrap below skips
+  // the option to reach the command, so it has to be looked at here, among
+  // time's own options only — `time ls -o` is ls's `-o`.
+  if (name === 'time' && timeWritesFile(args)) return false;
   if (name === 'timeout' || name === 'nice' || name === 'time' || name === 'nohup' || name === 'env') {
     // Bare `env` prints the environment, which is the one thing this list must
     // not hand over unreviewed; `env A=1 cmd` is judged by what it runs.
@@ -745,24 +756,30 @@ export function isSafeArgv(argv) {
       return !args.some((a) => /^env(:|\*|$)/i.test(a));
     case 'uniq':
       return args.filter((a) => !a.startsWith('-')).length <= 1;
+    // Output options in any spelling getopt accepts: `sort -uo out in` is `-u
+    // -o out`, and the exact-word checks here missed every cluster.
     case 'sort':
-      return !args.some((a) => a === '-o' || a.startsWith('--output') || a.startsWith('--compress-program') || /^-o./.test(a));
+      return !hasShortFlag(args, 'o') && !hasLongFlag(args, '--output') && !hasLongFlag(args, '--compress-program');
     case 'tree':
       return !args.includes('-o');
     case 'date':
-      return !args.some((a) => a === '-s' || a.startsWith('--set'));
+      return !hasShortFlag(args, 's') && !hasLongFlag(args, '--set');
     case 'hostname':
       return args.every((a) => a.startsWith('-'));
+    // `xxd IN OUT` writes OUT, so a second file argument is a write.
     case 'xxd':
-      return !args.some((a) => a === '-r' || a === '-revert');
+      return !args.some((a) => a === '-r' || a === '-revert') && positionalCount(args, XXD_OPTIONS_WITH_VALUE) <= 1;
+    // macOS base64 writes with `-o FILE` (and `-oFILE`).
     case 'base64':
-      return !args.some((a) => a === '-o' || a.startsWith('--output'));
+      return !hasShortFlag(args, 'o') && !hasLongFlag(args, '--output');
     case 'find':
       return !args.some((a) => UNSAFE_FIND_OPTIONS.has(a));
+    // `-z` in a cluster (`-iz`) still runs the decompressors, which are found
+    // through PATH.
     case 'rg':
       return !args.some(
-        (a) => a === '--search-zip' || a === '-z' || a === '--pre' || a.startsWith('--pre=') || a === '--hostname-bin' || a.startsWith('--hostname-bin='),
-      );
+        (a) => a === '--search-zip' || a === '--pre' || a.startsWith('--pre=') || a === '--hostname-bin' || a.startsWith('--hostname-bin='),
+      ) && !hasShortFlag(args, 'z');
     case 'sed':
       return isSafeSed(args);
     case 'git':
@@ -789,6 +806,33 @@ export function isSafeArgv(argv) {
   }
 }
 
+const XXD_OPTIONS_WITH_VALUE = new Set(['-c', '-cols', '-g', '-groupsize', '-l', '-len', '-o', '-offset', '-s', '-seek', '-n', '-name']);
+
+/** How many file arguments there are, skipping the options that take a value. */
+function positionalCount(args, withValue) {
+  let n = 0;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') return n + args.length - i - 1;
+    if (a.startsWith('-') && a !== '-') {
+      if (withValue.has(a)) i++;
+      continue;
+    }
+    n++;
+  }
+  return n;
+}
+
+/** Whether `time`'s own options, before the command it runs, name an output file. */
+function timeWritesFile(args) {
+  const own = [];
+  for (const a of args) {
+    if (a === '--' || !a.startsWith('-')) break;
+    own.push(a);
+  }
+  return hasShortFlag(own, 'o') || hasLongFlag(own, '--output');
+}
+
 function isSafeSed(args) {
   // Only `sed -n <print-range>p [file]`, mirroring Codex.
   if (args.length < 2 || args.length > 3) return false;
@@ -800,7 +844,7 @@ function isSafeGit(argv) {
   const { subcommand, args, globals } = gitSubcommand(argv);
   if (globals.some((g) => g === '-c' || g === '--config-env' || g.startsWith('--exec-path') || g === '-p' || g === '--paginate')) return false;
   if (!subcommand) return globals.includes('--version');
-  if (args.some((a) => UNSAFE_GIT_ARGS.has(a) || a.startsWith('--output=') || a.startsWith('--ext-diff') || a.startsWith('--upload-pack'))) {
+  if (args.some((a) => UNSAFE_GIT_ARGS.has(a)) || UNSAFE_GIT_LONG.some((o) => hasLongFlag(args, o)) || hasShortFlag(args, 'O')) {
     return false;
   }
   if (SAFE_GIT_SUBCOMMANDS.has(subcommand)) return true;
