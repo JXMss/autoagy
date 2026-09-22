@@ -5,8 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord, staleGrants, effectiveSetting } from '../plugin/lib/setup.mjs';
+import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord, staleGrants, effectiveSetting, networkGrantsFor } from '../plugin/lib/setup.mjs';
 import { executorPath } from '../plugin/lib/tokens.mjs';
+import { ownSandboxPossible, envBinaryPath } from '../plugin/lib/confine.mjs';
 import { configPath, loadConfig } from '../plugin/lib/config.mjs';
 import { configWith } from './helpers.mjs';
 import { removeTripwire, tripwireInstalled, tripwireRegistered, userHooksPath, registeredTripwirePath, registeredAutoagyHome, TRIPWIRE_KEY } from '../plugin/lib/tripwire.mjs';
@@ -140,9 +141,43 @@ test('networkGrants "all" is the one way to read_url(*), and no list entry widen
   assert.deepEqual(trustedDomainGrants(all), { grants: ['read_url(*)'], skipped: [] });
   assert.equal(grantsFor(all, { autoagyHome, home }).at(-1), 'read_url(*)');
   assert.ok(!grantsFor(all, { autoagyHome, home }).includes('read_url(docs.python.org)'), 'the wildcard already covers it');
-  assert.equal(loadConfig({ env: { AUTOAGY_HOME: path.join(root, 'no-config') }, home }).config.networkGrants, 'none', 'opt-in');
+  // The default is "auto": "all" only where autoagy's own sandbox can run the commands.
+  const defaults = loadConfig({ env: { AUTOAGY_HOME: path.join(root, 'no-config') }, home }).config;
+  assert.equal(defaults.networkGrants, 'auto');
+  assert.equal(networkGrantsFor(defaults, { ownSandboxPossible: true }), 'all');
+  assert.equal(networkGrantsFor(defaults, { ownSandboxPossible: false }), 'none');
+  assert.ok(grantsFor(defaults, { autoagyHome, home, ownSandboxPossible: true }).includes('read_url(*)'));
+  assert.ok(!grantsFor(defaults, { autoagyHome, home, ownSandboxPossible: false }).some((g) => g.startsWith('read_url(')));
+  // An explicit value is not second-guessed.
+  assert.equal(networkGrantsFor({ networkGrants: 'none' }, { ownSandboxPossible: true }), 'none');
   // A "*" in the list is still skipped under "trusted-domains".
   assert.deepEqual(trustedDomainGrants({ networkGrants: 'trusted-domains', trustedDomains: ['*'] }).grants, []);
+});
+
+test('commandGrant "auto" is the executor on Linux only, and an explicit value is kept', () => {
+  // The executor was measured end to end on a real Linux install (design.md,
+  // twentieth round). On Windows it cannot run as a program at all, and on
+  // macOS nobody has run it yet, so "auto" keeps the wildcard there.
+  const home = path.join(root, 'auto-grant-home');
+  const env = { AUTOAGY_HOME: path.join(home, '.gemini', 'autoagy') };
+  const load = (platform) => loadConfig({ env, home, platform });
+  assert.equal(load('linux').config.commandGrant, 'executor');
+  assert.equal(load('linux').resolved.commandGrant, 'auto', 'status can say where the value came from');
+  assert.equal(load('darwin').config.commandGrant, 'wildcard');
+  assert.equal(load('win32').config.commandGrant, 'wildcard');
+  fs.mkdirSync(env.AUTOAGY_HOME, { recursive: true });
+  fs.writeFileSync(path.join(env.AUTOAGY_HOME, 'config.json'), JSON.stringify({ commandGrant: 'wildcard' }));
+  assert.equal(load('linux').config.commandGrant, 'wildcard');
+  assert.equal(load('linux').resolved.commandGrant, undefined);
+});
+
+test('the own sandbox counts as possible only where it could start', () => {
+  const ok = () => ({ ok: true });
+  const no = () => ({ ok: false });
+  assert.equal(ownSandboxPossible({ ownSandbox: 'auto' }, root, { platform: 'darwin', probe: ok }), false);
+  assert.equal(ownSandboxPossible({ ownSandbox: 'off' }, root, { platform: 'linux', probe: ok }), false);
+  assert.equal(ownSandboxPossible({ ownSandbox: 'auto' }, root, { platform: 'linux', probe: no }), false);
+  assert.equal(ownSandboxPossible({ ownSandbox: 'auto' }, root, { platform: 'linux', probe: ok }), Boolean(envBinaryPath()));
 });
 
 test('reads anywhere are granted unless readGrant says none, and writes never are', () => {
@@ -412,7 +447,7 @@ test('teardown reverts through the pin, not through the environment', () => {
     const installed = run('setup');
     assert.equal(installed.status, 0, installed.stderr);
     const after = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-    assert.ok(after.permissions.allow.includes('command(*)'), 'setup wrote the grants into the pinned home');
+    assert.ok(after.permissions.allow.some((g) => g.startsWith('command(')), 'setup wrote the grants into the pinned home');
     assert.ok(fs.existsSync(path.join(pinned, 'setup.json')), 'and the record that makes them revertable');
     assert.ok(fs.readFileSync(path.join(pluginDir, 'hooks.json'), 'utf8').includes('--autoagy-home'), 'and pinned the hooks');
 

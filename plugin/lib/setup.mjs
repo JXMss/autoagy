@@ -7,11 +7,12 @@
 //   command(*)      agent-requested sandbox bypass no longer prompts natively
 //   mcp(*)          MCP tool calls no longer prompt natively
 //   execute_url(*)  browser interactions no longer prompt natively
-// read_url(*) is never granted by anything here: a read_url rule is also an entry
-// in the terminal sandbox's network allowlist (measured), so the wildcard would
-// let unreviewed sandboxed commands reach any host. Per-domain grants derived
-// from `trustedDomains` are opt-in — see `trustedDomainGrants` and
-// `networkGrants` in config.mjs.
+//   read_file(/)    reads outside the workspace no longer prompt (readGrant)
+// A read_url rule is also an entry in the terminal sandbox's network allowlist
+// (measured), so `read_url(*)` is written only where autoagy's own sandbox runs
+// the commands (networkGrants "all", or "auto" on such a machine), and once it
+// is granted agy's sandbox is not counted as one — see `trustedDomainGrants`,
+// `networkGrants` in config.mjs and `detectSandbox`.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -110,12 +111,13 @@ export function writableRootGrants(config, home = os.homedir()) {
  *   an entry silently dropped here is a domain that keeps prompting with no
  *   explanation.
  */
-export function trustedDomainGrants(config) {
+export function trustedDomainGrants(config, { ownSandboxPossible = false } = {}) {
   // "all" is the explicit switch for `read_url(*)`; see `networkGrants` in
   // config.mjs for why it is safe only while autoagy's own sandbox runs, and
   // `detectSandbox` for what happens to agy's sandbox once it is granted.
-  if (config?.networkGrants === 'all') return { grants: ['read_url(*)'], skipped: [] };
-  if (config?.networkGrants !== 'trusted-domains') return { grants: [], skipped: [] };
+  const mode = networkGrantsFor(config, { ownSandboxPossible });
+  if (mode === 'all') return { grants: ['read_url(*)'], skipped: [] };
+  if (mode !== 'trusted-domains') return { grants: [], skipped: [] };
   const grants = new Set();
   const skipped = [];
   for (const raw of config.trustedDomains ?? []) {
@@ -132,13 +134,25 @@ export function trustedDomainGrants(config) {
 }
 
 /**
+ * What `networkGrants` means on this machine: "auto" is "all" where autoagy's
+ * own sandbox can run — commands then never run in the sandbox `read_url(*)`
+ * opens — and "none" elsewhere.
+ * @param {{ ownSandboxPossible?: boolean }} where from `ownSandboxPossible` in confine.mjs
+ */
+export function networkGrantsFor(config, { ownSandboxPossible = false } = {}) {
+  const mode = config?.networkGrants ?? 'none';
+  if (mode !== 'auto') return mode;
+  return ownSandboxPossible ? 'all' : 'none';
+}
+
+/**
  * Every grant a configuration needs, in the order `autoagy setup` writes them.
  * @param {object} config
  * @param {{ autoagyHome: string, home?: string }} where
  */
-export function grantsFor(config, { autoagyHome, home = os.homedir() }) {
+export function grantsFor(config, { autoagyHome, home = os.homedir(), ownSandboxPossible = false }) {
   const command = config?.commandGrant === 'executor' ? `command(${executorPath(autoagyHome)})` : 'command(*)';
-  return [command, 'mcp(*)', 'execute_url(*)', ...readGrants(config), ...writableRootGrants(config, home), ...trustedDomainGrants(config).grants];
+  return [command, 'mcp(*)', 'execute_url(*)', ...readGrants(config), ...writableRootGrants(config, home), ...trustedDomainGrants(config, { ownSandboxPossible }).grants];
 }
 
 /**
@@ -170,8 +184,8 @@ export function readGrants(config) {
  * names them, so a file that was narrowed on paper only is visible.
  * @param {string[]} allow the file's `permissions.allow`
  */
-export function staleGrants(config, allow, { autoagyHome, home = os.homedir() }) {
-  const wanted = grantsFor(config, { autoagyHome, home });
+export function staleGrants(config, allow, { autoagyHome, home = os.homedir(), ownSandboxPossible = false }) {
+  const wanted = grantsFor(config, { autoagyHome, home, ownSandboxPossible });
   return (readSetupRecord(autoagyHome)?.addedGrants ?? []).filter((g) => allow.includes(g) && !wanted.includes(g));
 }
 

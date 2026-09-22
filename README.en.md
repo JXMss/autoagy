@@ -27,18 +27,20 @@ Every design decision in the full documentation carries the experiment behind it
 ## Read this before installing
 
 **It asks Antigravity for standing permissions, and they outlive the plugin.**
-`autoagy setup` adds `command(*)`, `mcp(*)` and `execute_url(*)` to
-`~/.gemini/antigravity-cli/settings.json`, because a hook's `allow` cannot
-override Antigravity's own permission prompts — without them, everything the
-reviewer approves would still pop up at you. Those three grants do not disappear
-when the plugin stops loading.
+`autoagy setup` adds a command grant (on Linux one that names a single
+token-redeeming program, elsewhere `command(*)`), `mcp(*)` and `execute_url(*)`
+to `~/.gemini/antigravity-cli/settings.json`, plus `read_file(/)` and — where
+its own sandbox runs — `read_url(*)` so reads and fetches do not prompt. A
+hook's `allow` cannot override Antigravity's own permission prompts; without
+these, everything the reviewer approves would still pop up at you. The grants
+do not disappear when the plugin stops loading.
 
 **So a sentinel watches them.** `setup` also registers a small program in
 `~/.gemini/config/hooks.json` under the key `autoagy-tripwire` — a file
 `agy plugin` does not manage, so it keeps running when the plugin is disabled,
 replaced, or never installed properly. When it finds the plugin gone, it
 **refuses every tool call**. agy will then be unable to do anything until you
-deal with it. That is deliberate: the alternative is those three grants applying
+deal with it. That is deliberate: the alternative is those grants applying
 with nobody reviewing, which is strictly worse than not having installed autoagy.
 
 **The way out, when agy refuses everything:**
@@ -84,7 +86,10 @@ and reverted by `teardown` / `--uninstall`.
 1. **`~/.gemini/config/plugins/autoagy`** — the plugin itself, via `agy plugin install`.
 2. **`~/.gemini/antigravity-cli/settings.json`** — backed up first to
    `<that file>.autoagy-backup-<timestamp>`, then:
-   - `permissions.allow` gains `command(*)`, `mcp(*)`, `execute_url(*)`;
+   - `permissions.allow` gains a command grant (`commandGrant` defaults to
+     `"auto"`: the one-program executor on Linux, `command(*)` elsewhere),
+     `mcp(*)`, `execute_url(*)`, and `read_url(*)` where autoagy's own sandbox
+     can run (`networkGrants` defaults to `"auto"`);
    - and `read_file(/)`: the `allowNonWorkspaceAccess: false` below caps reads
      as well as writes (measured: reading `/etc/hostname` prompted "outside
      workspace"), so without it every read outside the workspace — library
@@ -144,7 +149,7 @@ node scripts/install.mjs --uninstall   # revert the settings and remove the plug
 | `autoagy stats [--days 7]` | The same, counted: verdicts, review outcomes, review latency p50/p90/max, risk distribution. |
 | `autoagy denials` / `autoagy approve <id>` | What was refused, and letting one retry through once (the reviewer sees your approval; critical risks still refuse). |
 | `autoagy trust [<session>] [--all]` | Clears the sticky per-session marks and releases retained mount points. It refuses while a command may still be running; `--force` overrides. |
-| `autoagy mode auto\|ask\|off` | `auto` = the reviewer decides; `ask` = risky actions prompt you (Codex's "Ask for approval"); `off` = no review, and the actions those three grants cover prompt you instead. |
+| `autoagy mode auto\|ask\|off` | `auto` = the reviewer decides; `ask` = risky actions prompt you (Codex's "Ask for approval"); `off` = no review, and the actions those grants cover prompt you instead. |
 | `autoagy review --tool run_command --args '{...}'` | Asks what a single call would be judged as, without starting an agent. |
 | `autoagy setup` / `teardown` | Apply or revert the machine changes on their own. |
 
@@ -162,10 +167,10 @@ what you experience:
 | Field | Default | Why you would touch it |
 | --- | --- | --- |
 | `mode` | `"auto"` | `ask` to go back to prompts, `off` to pause everything. |
-| `commandGrant` | `"wildcard"` | `"executor"` replaces `command(*)` with a grant naming one program that only redeems one-shot tokens the hook wrote — the command class then becomes fail-closed instead of fail-open. |
+| `commandGrant` | `"auto"` | `"auto"` is `"executor"` on Linux (measured on a real install: commands, deletes and `git commit` ran without a prompt) and `"wildcard"` elsewhere — the executor cannot run as a program on Windows, and nobody has tried it on macOS yet. `"executor"` replaces `command(*)` with a grant naming one program that only redeems one-shot tokens the hook wrote — the command class then becomes fail-closed instead of fail-open. |
 | `ownSandbox` | `"auto"` | Whether autoagy's bubblewrap sandbox is used where it could be. |
 | `readGrant` | `"anywhere"` | `"none"` leaves out `read_file(/)`, so reads outside the workspace prompt again. When autoagy itself fails or times out, content reads are refused while the grant is on, since agy would no longer ask. |
-| `networkGrants` | `"none"` | `"trusted-domains"` stops the first fetch of each trusted domain from prompting. Cost depends on which sandbox is running; `autoagy status` says which. `"all"` grants `read_url(*)`: no fetch prompts at all, each fetch outside `trustedDomains` still reviewed. That grant also gives agy's terminal sandbox the whole network, so autoagy stops counting it as a sandbox — free where autoagy's own sandbox runs the commands (Linux + bubblewrap), and elsewhere every command off the known read-only list is reviewed. |
+| `networkGrants` | `"auto"` | `"auto"` is `"all"` where autoagy's own sandbox can run when `setup` runs (Linux, bubblewrap starts, `ownSandbox` not `"off"`), `"none"` elsewhere. `"trusted-domains"` stops the first fetch of each trusted domain from prompting. Cost depends on which sandbox is running; `autoagy status` says which. `"all"` grants `read_url(*)`: no fetch prompts at all, each fetch outside `trustedDomains` still reviewed. That grant also gives agy's terminal sandbox the whole network, so autoagy stops counting it as a sandbox — free where autoagy's own sandbox runs the commands (Linux + bubblewrap), and elsewhere every command off the known read-only list is reviewed. |
 
 Also: `writableRoots` (outside directories editable without review — re-run
 `autoagy setup` after changing it), `protectedPaths`, `credentialPaths`,

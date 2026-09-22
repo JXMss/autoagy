@@ -91,7 +91,13 @@ export const DEFAULT_CONFIG = Object.freeze({
   // since commands run there, without network; without it every command off
   // the known read-only list is reviewed. More reviews, never an unreviewed
   // networked command. Meant for Linux with bubblewrap.
-  networkGrants: 'none',
+  //
+  // "auto" (default): "all" where autoagy's own sandbox can run when `setup` is
+  // run (Linux, bubblewrap starts, `ownSandbox` not "off"), "none" elsewhere.
+  // Decided at setup time because the grant is written then; if bubblewrap
+  // stops working later, the rule above still keeps a networked sandbox from
+  // counting as one.
+  networkGrants: 'auto',
   // Domains browser navigation may reach without review. Empty by default: a
   // navigation runs the page's scripts in a networked, unsandboxed browser, and
   // a local dev server usually serves files the agent may have edited without
@@ -204,7 +210,12 @@ export const DEFAULT_CONFIG = Object.freeze({
   //   cannot write, so no hook means no tokens and the grant is worth nothing.
   //   Needs `autoagy setup` to have installed the executor and written that
   //   grant; see tokens.mjs for what the guarantee rests on.
-  commandGrant: 'wildcard',
+  // "auto" (default): "executor" on Linux, where it was measured end to end on
+  //   a real install (design.md, twentieth round); "wildcard" elsewhere. On
+  //   Windows the executor cannot run as a program at all, and on macOS nobody
+  //   has run it yet — set it there by hand to try it. Resolved by loadConfig,
+  //   so the rest of the code only ever sees the two concrete values.
+  commandGrant: 'auto',
   // Whether `autoagy setup` also grants Antigravity `read_file(/)`.
   //
   // setup turns off `allowNonWorkspaceAccess`, the one check agy makes at the
@@ -266,10 +277,10 @@ const ENUMS = {
   notebooks: ['review', 'allow'],
   pathDrift: ['sticky', 'graded'],
   'mcp.annotations': ['ignore', 'trust'],
-  networkGrants: ['none', 'trusted-domains', 'all'],
+  networkGrants: ['auto', 'none', 'trusted-domains', 'all'],
   webSearch: ['allow', 'review'],
   'commandEnv.mode': ['inherit', 'scrub'],
-  commandGrant: ['wildcard', 'executor'],
+  commandGrant: ['auto', 'wildcard', 'executor'],
   readGrant: ['anywhere', 'none'],
 };
 
@@ -460,7 +471,7 @@ function validate(config, warnings, home = os.homedir()) {
  * Loads the effective configuration.
  * @returns {{ config: typeof DEFAULT_CONFIG, warnings: string[], path: string, exists: boolean }}
  */
-export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
+export function loadConfig({ env = process.env, home = os.homedir(), platform = process.platform } = {}) {
   const warnings = [];
   const config = clone(DEFAULT_CONFIG);
   const file = configPath(env, home);
@@ -486,10 +497,17 @@ export function loadConfig({ env = process.env, home = os.homedir() } = {}) {
   // No environment variable may weaken the policy: the hook inherits agy's
   // environment, which an escalated command can set for an agy it starts.
   validate(config, warnings, home);
+  // "auto" is resolved here, so every reader sees "executor" or "wildcard";
+  // `resolved` keeps what was asked for, for `status` to say so.
+  const resolved = {};
+  if (config.commandGrant === 'auto') {
+    resolved.commandGrant = 'auto';
+    config.commandGrant = platform === 'linux' ? 'executor' : 'wildcard';
+  }
   // The hook runner caps the review deadline so it always answers inside the hook timeout.
   const cap = Number(env.AUTOAGY_REVIEW_TIMEOUT_CAP);
   if (Number.isFinite(cap) && cap > 0) config.reviewer.timeoutSec = Math.min(config.reviewer.timeoutSec, cap);
-  return { config, warnings, path: file, exists };
+  return { config, warnings, path: file, exists, resolved };
 }
 
 /** The default config file written by `autoagy setup`. */

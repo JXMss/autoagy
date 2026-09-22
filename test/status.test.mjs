@@ -296,7 +296,7 @@ test('status says how many domains the fetch prompt is off for, and what that co
   // configured" otherwise.
   const configFile = path.join(dirs.env.AUTOAGY_HOME, 'config.json');
   fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
-  fs.writeFileSync(configFile, JSON.stringify({ trustedDomains: ['localhost', 'docs.python.org'] }));
+  fs.writeFileSync(configFile, JSON.stringify({ networkGrants: 'none', trustedDomains: ['localhost', 'docs.python.org'] }));
   assert.match(status(), /network grants  none — a first fetch of any domain still prompts, including the 2/);
 
   fs.writeFileSync(configFile, JSON.stringify({ networkGrants: 'trusted-domains', trustedDomains: ['docs.python.org', '*.github.com', '*'] }));
@@ -333,7 +333,7 @@ test('the sandbox start check runs only where agy could have a workspace', { ski
   fs.mkdirSync(home, { recursive: true });
   const cfg = path.join(home, 'config.json');
   const had = fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : null;
-  fs.writeFileSync(cfg, JSON.stringify({ ownSandbox: 'on' }));
+  fs.writeFileSync(cfg, JSON.stringify({ ownSandbox: 'on', commandGrant: 'wildcard' }));
   try {
     const run = (cwd) => spawnSync(process.execPath, [BIN, 'status'], { env: dirs.env, cwd, encoding: 'utf8' }).stdout;
     const root = run('/');

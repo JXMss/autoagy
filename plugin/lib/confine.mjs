@@ -297,6 +297,15 @@ function commandGrantPresent(appDataDir, wanted) {
 }
 
 /**
+ * Whether autoagy's own sandbox could run on this machine, grants aside: what
+ * `networkGrants: "auto"` asks when `setup` decides whether `read_url(*)` is free.
+ */
+export function ownSandboxPossible(config, autoagyHome, { platform = process.platform, probe = probeBwrap } = {}) {
+  if (config.ownSandbox === 'off' || platform !== 'linux' || !envBinaryPath()) return false;
+  return probe(autoagyHome)?.ok === true;
+}
+
+/**
  * Decides whether sandboxed commands run inside autoagy's own sandbox.
  * `required` is set when the config demands it, so callers fail closed if it is unavailable.
  * @returns {{ active: boolean, required: boolean, bwrap?: string, detail: string }}

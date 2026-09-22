@@ -117,7 +117,7 @@ test('inside the own sandbox a command naming a credential store needs no review
 test('allowed sandboxed commands are rewritten into the own sandbox; escalations and denials are not', { skip: linuxOnly }, async () => {
   fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
   const run = (args, mock = 'allow') => {
-    const config = { ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: mock } } };
+    const config = { ownSandbox: 'on', commandGrant: 'wildcard', reviewer: { backend: 'mock', mock: { response: mock } } };
     fs.writeFileSync(path.join(dirs.env.AUTOAGY_HOME, 'config.json'), JSON.stringify(config));
     return handlePreToolUse(payloadFor(dirs, 'run_command', args), { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe });
   };
@@ -190,7 +190,7 @@ test('self-check: when agy ignores the rewrite, the own sandbox is switched off 
   const pre = (args, stepIdx) => handlePreToolUse(payloadFor(dirs, 'run_command', args, { stepIdx }), opts);
   const post = (args, stepIdx) => handlePostToolUse(payloadFor(dirs, 'run_command', args, { stepIdx }), opts);
   grant(true);
-  configure({ ownSandbox: 'auto' });
+  configure({ ownSandbox: 'auto', commandGrant: 'wildcard' });
 
   // agy ran exactly what autoagy asked for.
   const first = await pre({ CommandLine: 'npm test' }, 10);
@@ -211,14 +211,14 @@ test('self-check: when agy ignores the rewrite, the own sandbox is switched off 
   assert.deepEqual(await pre({ CommandLine: 'npm test' }, 16), { decision: 'allow' });
 
   // With ownSandbox "on", the failure fails closed: commands are no longer treated as sandboxed.
-  configure({ ownSandbox: 'on', reviewer: { backend: 'none' } });
+  configure({ ownSandbox: 'on', commandGrant: 'wildcard', reviewer: { backend: 'none' } });
   assert.equal((await pre({ CommandLine: 'npm test' }, 18)).decision, 'force_ask');
 
   // Another agy build (after an update) is checked again.
   const other = detectOwnSandbox({ config: configWith({ ownSandbox: 'on' }), host: cliHost(), appDataDir: dirs.appData, autoagyHome: home, build: 'another-build', platform: 'linux', probe: okProbe });
   assert.equal(other.active, true);
   // Commands the agent escalated itself are never rewritten, so they are not checked.
-  configure({ ownSandbox: 'auto' });
+  configure({ ownSandbox: 'auto', commandGrant: 'wildcard' });
   assert.deepEqual(post({ CommandLine: 'npm install', BypassSandbox: true }, 20), {});
 
   fs.rmSync(path.join(home, 'state', 'own-sandbox-check.json'));
@@ -451,7 +451,7 @@ async function untilQuiescent(probe, want, ms = 3000) {
 test('mount points are reclaimed only once no sandboxed command is running', { skip: linuxOnly || (flockPath() ? false : 'no trusted flock on this host') }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', commandGrant: 'wildcard', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
   // Its own conversation: the state below is per-conversation and must not leak.
   const bg = { conversationId: '99999999-0000-4000-8000-ba6c6700d001', stepIdx: 40 };
   const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
@@ -495,7 +495,7 @@ test('a daemon command is noted as possibly still running even without WaitMsBef
   // trusted flock, so it still has to notice the documented daemon case.
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', commandGrant: 'wildcard', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
   const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
   const cases = [
     [1, { CommandLine: 'npm run dev', IsDaemon: true }],
@@ -519,7 +519,7 @@ test('a daemon command is noted as possibly still running even without WaitMsBef
 test('a mount point a command wrote into is kept and marks the conversation untrusted', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', commandGrant: 'wildcard', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
   const conversationId = '99999999-0000-4000-8000-d1r7y0000001';
   const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
   const target = path.join(dirs.workspace, '.agents');
@@ -576,7 +576,7 @@ test('a protected directory that exists stays readable inside the sandbox', { sk
 test('the mount points for missing protected directories exist only while the command runs', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', commandGrant: 'wildcard', reviewer: { backend: 'mock', mock: { response: 'allow' } } }));
   const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
   const target = path.join(dirs.workspace, '.agents');
   fs.rmSync(target, { recursive: true, force: true });
@@ -660,6 +660,7 @@ test('a repository nested in the workspace keeps its .git read-only too', () => 
 
 const plantedConfig = (capture) => ({
   ownSandbox: 'on',
+  commandGrant: 'wildcard',
   reviewer: { backend: 'mock', mock: { response: 'allow', capture } },
 });
 
@@ -881,7 +882,7 @@ test('a nested .git is protected once it exists, and not while it is being creat
 test('a workspace full of nested repositories does not turn the check off', { skip: linuxOnly }, async () => {
   const home = dirs.env.AUTOAGY_HOME;
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on' }));
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ ownSandbox: 'on', commandGrant: 'wildcard' }));
   const conversationId = '99999999-0000-4000-8000-p1a17ed00004';
   const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
   // An empty `.git` holds nothing runnable, so creating one is never a finding.

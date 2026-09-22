@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR, detectSandbox, resolveReviewerCommand, protectedPathShapes } from '../lib/context.mjs';
 import { findExecutable, globToRegExp } from '../lib/paths.mjs';
-import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath, sandboxStartCheck } from '../lib/confine.mjs';
+import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath, sandboxStartCheck, ownSandboxPossible } from '../lib/confine.mjs';
 import { KNOWN_TOOL_NAMES, classify, failOpenOutput } from '../lib/policy.mjs';
 import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
@@ -21,7 +21,7 @@ import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INST
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, readAllDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins, effectiveSetting } from '../lib/setup.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins, effectiveSetting, networkGrantsFor } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled, executorPathIsBare } from '../lib/tokens.mjs';
 import { installTripwire, tripwireInstallable, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, installedPluginDir } from '../lib/tripwire.mjs';
 import { scanMcpServers, readMcpCache, readMcpServers, mcpConfigFiles, MCP_CACHE_FILE } from '../lib/mcp.mjs';
@@ -315,7 +315,11 @@ function status() {
   // `userHome` (not `home`) so a later call cannot silently take the user's
   // home directory where the configuration directory is meant.
   const { env, home: userHome, autoagyHome, pins } = managementContext();
-  const { config, warnings, path: cfgPath, exists } = loadConfig({ env, home: userHome });
+  const { config, warnings, path: cfgPath, exists, resolved } = loadConfig({ env, home: userHome });
+  // What the two "auto" settings came to on this machine, for every line below
+  // that reports a grant — including whether one in the settings file is stale.
+  const possible = ownSandboxPossible(config, autoagyHome);
+  const network = networkGrantsFor(config, { ownSandboxPossible: possible });
   const lines = [];
   lines.push(`autoagy — Codex-style auto mode for Antigravity`);
   lines.push(`  plugin dir      ${PLUGIN_DIR}`);
@@ -411,7 +415,7 @@ function status() {
   // What the command grant is worth when the hook is not running is the whole
   // reason the executor exists, so say which of the two shapes is in force.
   if (config.commandGrant === 'executor') {
-    lines.push(`  command grant   one program (${executorPath(autoagyHome)})${executorInstalled(autoagyHome) ? '' : ' — NOT INSTALLED, run `autoagy setup`'}`);
+    lines.push(`  command grant   one program (${executorPath(autoagyHome)})${resolved?.commandGrant === 'auto' ? ' (commandGrant "auto")' : ''}${executorInstalled(autoagyHome) ? '' : ' — NOT INSTALLED, run `autoagy setup`'}`);
     // agy matches the grant against the command line as written, and a path the
     // shell needs quoted cannot be written the way the grant names it.
     if (!executorPathIsBare(autoagyHome)) {
@@ -490,26 +494,27 @@ function status() {
   // without it the same grant is also an entry in agy's terminal sandbox
   // allowlist. Whether the grants are actually present is the `missing grants`
   // line further down; `grantsFor` includes them, so it needs nothing extra.
-  const network = trustedDomainGrants(config);
-  if (config.networkGrants === 'all') {
-    lines.push('  network grants  read_url(*) — no fetch prompts; every fetch outside trustedDomains is reviewed');
+  const domainGrants = trustedDomainGrants(config, { ownSandboxPossible: possible });
+  const autoNote = config.networkGrants === 'auto' ? ' (networkGrants "auto")' : '';
+  if (network === 'all') {
+    lines.push(`  network grants  read_url(*)${autoNote} — no fetch prompts; every fetch outside trustedDomains is reviewed`);
     if (!own.active) {
       lines.push("  ! that grant gives agy's terminal sandbox the whole network, so autoagy no longer counts it as a");
       lines.push("                  sandbox: every command off the known read-only list is reviewed. autoagy's own sandbox");
       lines.push('                  is what makes the grant free, and it is not running here.');
     }
-  } else if (config.networkGrants === 'trusted-domains') {
-    lines.push(`  network grants  ${network.grants.length} read_url grant(s) from trustedDomains${network.grants.length ? `: ${network.grants.join(', ')}` : ''}`);
-    if (network.grants.length > 0 && !own.active) {
+  } else if (network === 'trusted-domains') {
+    lines.push(`  network grants  ${domainGrants.grants.length} read_url grant(s) from trustedDomains${domainGrants.grants.length ? `: ${domainGrants.grants.join(', ')}` : ''}`);
+    if (domainGrants.grants.length > 0 && !own.active) {
       lines.push("                  those hosts are reachable from commands in agy's terminal sandbox without review;");
       lines.push("                  autoagy's own sandbox is what would keep them out, and it is not running here");
     }
-    for (const entry of network.skipped) {
+    for (const entry of domainGrants.skipped) {
       lines.push(`  ! network grants trustedDomains entry ${JSON.stringify(entry)} got no read_url grant: it is not a plain`);
       lines.push('                  hostname, so fetching it still prompts. A wildcard is never widened into a grant.');
     }
   } else if ((config.trustedDomains ?? []).length > 0) {
-    lines.push(`  network grants  none — a first fetch of any domain still prompts, including the ${config.trustedDomains.length} in trustedDomains (see networkGrants)`);
+    lines.push(`  network grants  none${autoNote} — a first fetch of any domain still prompts, including the ${config.trustedDomains.length} in trustedDomains (see networkGrants)`);
   }
   lines.push(
     config.readGrant === 'none'
@@ -566,7 +571,7 @@ function status() {
     const nonWorkspace = settings.allowNonWorkspaceAccess === undefined ? `${effectiveSetting(settings, 'allowNonWorkspaceAccess')} (not in the file: agy's default, and agy drops the key when it saves)` : settings.allowNonWorkspaceAccess;
     lines.push(`  allowNonWorkspaceAccess ${nonWorkspace}`);
     lines.push(`  permissions.allow       ${JSON.stringify(allow)}`);
-    const wanted = grantsFor(config, { autoagyHome, home: userHome });
+    const wanted = grantsFor(config, { autoagyHome, home: userHome, ownSandboxPossible: possible });
     const missing = wanted.filter((g) => !allow.includes(g));
     if (missing.length) lines.push(`  ! missing grants ${missing.join(', ')} — approved actions may still prompt; run \`autoagy setup\``);
     // The grants are read once when agy starts (measured), so a writableRoots
@@ -579,7 +584,7 @@ function status() {
     // Read from the file, not worked out from the configuration: the network and
     // command-grant lines above say what the configuration asks for, and an
     // earlier setup may have left more than that in place.
-    const stale = staleGrants(config, allow, { autoagyHome, home: userHome });
+    const stale = staleGrants(config, allow, { autoagyHome, home: userHome, ownSandboxPossible: possible });
     if (stale.length) {
       lines.push(`  ! stale grants    ${stale.join(', ')} — added by an earlier \`autoagy setup\` and no longer in the configuration,`);
       lines.push('    so they still apply although the lines above do not list them. Re-run `autoagy setup` to take them out.');
@@ -591,7 +596,7 @@ function status() {
     // grant costs here. One written by hand gets the same treatment from the
     // policy — agy's sandbox stops counting as one — and is named so it is not
     // a surprise that more commands are reviewed.
-    if (allow.some((g) => /^read_url\(\*\)$/.test(g)) && config.networkGrants !== 'all' && !stale.includes('read_url(*)')) {
+    if (allow.some((g) => /^read_url\(\*\)$/.test(g)) && network !== 'all' && !stale.includes('read_url(*)')) {
       lines.push("  ! read_url(*) is granted by hand: it gives agy's terminal sandbox the whole network, so autoagy does not");
       lines.push("    count that sandbox — commands off the known read-only list are reviewed unless autoagy's own sandbox runs them");
     }
@@ -879,7 +884,10 @@ function setup(flags) {
     process.exitCode = 1;
     return;
   }
-  const report = applySetup({ dryRun, env, home, grants: grantsFor(config, { autoagyHome, home }) });
+  // "auto" is decided here, where the grant is written: read_url(*) only where
+  // autoagy's own sandbox can run the commands.
+  const possible = ownSandboxPossible(config, autoagyHome);
+  const report = applySetup({ dryRun, env, home, grants: grantsFor(config, { autoagyHome, home, ownSandboxPossible: possible }) });
   // The tripwire exists because those grants do: it is installed where the
   // grants are, and `--no-settings` (which writes none) returns above, so
   // reaching here means grants were written. It used to be conditional on this
@@ -911,9 +919,9 @@ function setup(flags) {
   if (report.backup) console.log(`  backup: ${report.backup}`);
   // This line used to be unconditional, and with `networkGrants` set it
   // contradicted the plan printed a few lines above it.
-  const network = trustedDomainGrants(config);
-  if (config.networkGrants === 'all') {
-    console.log('\nread_url(*) is granted (networkGrants: "all"), so no fetch prompts; every fetch outside trustedDomains is still reviewed.');
+  const network = trustedDomainGrants(config, { ownSandboxPossible: possible });
+  if (networkGrantsFor(config, { ownSandboxPossible: possible }) === 'all') {
+    console.log(`\nread_url(*) is granted (networkGrants: "${config.networkGrants}"), so no fetch prompts; every fetch outside trustedDomains is still reviewed.`);
     console.log("It also opens agy's terminal sandbox to the network, so autoagy stops counting that sandbox: where its own sandbox is not running, every command off the known read-only list is reviewed.");
   } else if (network.grants.length > 0) {
     console.log(`\n${network.grants.length} read_url grant(s) come from trustedDomains (networkGrants: "trusted-domains"), so fetching those domains stops prompting.`);
