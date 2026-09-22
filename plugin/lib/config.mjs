@@ -63,8 +63,8 @@ export const DEFAULT_CONFIG = Object.freeze({
   //
   // It has to be a switch, because a `read_url` rule is two things at once
   // (measured): permission for the fetch tool, and an entry in the *terminal
-  // sandbox's* network allowlist. That is why `read_url(*)` is never written by
-  // anything here.
+  // sandbox's* network allowlist. That is why `read_url(*)` is written only
+  // under the explicit "all" below, and what it does to agy's sandbox is handled.
   //
   // "none" (default) keeps today's behavior: autoagy can approve a fetch, but agy
   // still asks for its own permission the first time a domain comes up, and that
@@ -82,6 +82,15 @@ export const DEFAULT_CONFIG = Object.freeze({
   // hosts, which is Codex's network-allowlist model rather than a departure from
   // it. Entries are taken as written minus a leading `*.`, and an entry that
   // still holds a wildcard is skipped rather than widened.
+  //
+  // "all" writes `read_url(*)`, so no fetch prompts at all; every fetch outside
+  // `trustedDomains` is still reviewed, which is how Codex treats a network
+  // request. The grant also gives agy's terminal sandbox the whole network, so
+  // once it is in the settings autoagy stops counting that sandbox as one
+  // (`detectSandbox`): with autoagy's own sandbox running this costs nothing,
+  // since commands run there, without network; without it every command off
+  // the known read-only list is reviewed. More reviews, never an unreviewed
+  // networked command. Meant for Linux with bubblewrap.
   networkGrants: 'none',
   // Domains browser navigation may reach without review. Empty by default: a
   // navigation runs the page's scripts in a networked, unsandboxed browser, and
@@ -257,7 +266,7 @@ const ENUMS = {
   notebooks: ['review', 'allow'],
   pathDrift: ['sticky', 'graded'],
   'mcp.annotations': ['ignore', 'trust'],
-  networkGrants: ['none', 'trusted-domains'],
+  networkGrants: ['none', 'trusted-domains', 'all'],
   webSearch: ['allow', 'review'],
   'commandEnv.mode': ['inherit', 'scrub'],
   commandGrant: ['wildcard', 'executor'],

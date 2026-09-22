@@ -9,7 +9,7 @@
 //   {} / invalid JSON / non-zero exit / timeout -> the tool call fails
 
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
-import { HookContext, HOST_INSPECTABLE_PLATFORMS, newNestedGitPlantings } from './context.mjs';
+import { HookContext, HOST_INSPECTABLE_PLATFORMS, newNestedGitPlantings, grantsReadUrlEverywhere } from './context.mjs';
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets, readTargets, canonicalPathArgs, classifyWriteTarget, isCredentialPath } from './policy.mjs';
 import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
@@ -65,15 +65,25 @@ export function withoutUnanswerablePrompt(output, ctx) {
 
 /**
  * Mode "off": no review, but the grants `autoagy setup` added (command(*),
- * mcp(*), execute_url(*)) must not let the actions they cover run unchecked.
+ * mcp(*), execute_url(*), and read_url(*) under networkGrants "all") must not
+ * let the actions they cover run unchecked.
  * Those actions go back to the user, as they would without autoagy.
  */
 export function offModeOutput(ctx, state = {}) {
   const name = ctx.toolName;
+  // `read_url(*)` (networkGrants "all") is one of setup's grants too, and it
+  // also opens agy's terminal sandbox to the network. With the mode off nothing
+  // is rewritten into autoagy's own sandbox, so a command runs in agy's — which
+  // then confines nothing a review would care about, whatever `ctx.sandbox` says
+  // about the own one.
+  const agyNetworked = grantsReadUrlEverywhere(ctx.cliSettings);
   let what = null;
   if (name === 'run_command') {
+    const known = isKnownSafeCommandLine(String(ctx.args.CommandLine ?? ''));
     if (ctx.args.BypassSandbox === true) what = 'a command outside the terminal sandbox';
-    else if (!ctx.sandbox.active && !isKnownSafeCommandLine(String(ctx.args.CommandLine ?? ''))) what = 'a command the terminal sandbox does not confine';
+    else if ((!ctx.sandbox.active || agyNetworked) && !known) what = 'a command the terminal sandbox does not confine';
+  } else if (name === 'read_url_content' && agyNetworked) {
+    what = 'a web fetch';
   } else if (name === 'call_mcp_tool' || name.startsWith('mcp_')) {
     what = 'an MCP tool call';
   } else if (BROWSER_ACTION_TOOLS.has(name) || name === 'open_browser_url' || name === 'browser_subagent') {

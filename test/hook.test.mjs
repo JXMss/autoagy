@@ -11,7 +11,7 @@ import { makeSandboxDirs, payloadFor, contextFor, configWith } from './helpers.m
 import { readDecisions } from '../plugin/lib/log.mjs';
 import { readState, updateState } from '../plugin/lib/state.mjs';
 import { readSandboxCheck } from '../plugin/lib/confine.mjs';
-import { handlePreToolUse, failClosedOutput, driftIsContained } from '../plugin/lib/hook.mjs';
+import { handlePreToolUse, failClosedOutput, driftIsContained, offModeOutput } from '../plugin/lib/hook.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from '../plugin/lib/context.mjs';
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin', 'bin', 'autoagy.mjs');
@@ -663,4 +663,26 @@ test('an action the user is asked about still gets the path checks', async () =>
   assert.equal(out.overwrite?.TargetFile, path.join(real, '.git', 'config'), 'the target is resolved before the call');
   assert.ok(readState(dirs.env.AUTOAGY_HOME, dirs.conversationId).pendingEdits?.[3], 'and recorded, so PostToolUse compares where it landed');
   fs.rmSync(linked, { force: true });
+});
+
+test('mode off hands back what read_url(*) would otherwise let through unasked', () => {
+  // With the mode off nothing is rewritten into autoagy's own sandbox, so a
+  // command runs in agy's — which read_url(*) has opened to the network.
+  const settingsFile = path.join(dirs.appData, 'settings.json');
+  const original = fs.readFileSync(settingsFile, 'utf8');
+  const off = (name, args, extra = {}) => offModeOutput(contextFor(dirs, name, args, { config: configWith({ mode: 'off', ...extra }) }));
+  try {
+    fs.writeFileSync(settingsFile, JSON.stringify({ enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox', permissions: { allow: ['read_url(*)'] } }));
+    assert.equal(off('read_url_content', { Url: 'https://example.com' })?.decision, 'force_ask');
+    assert.equal(off('run_command', { CommandLine: 'npm test' })?.decision, 'force_ask');
+    assert.equal(off('run_command', { CommandLine: 'npm test' }, { ownSandbox: 'on', sandbox: 'on' })?.decision, 'force_ask', 'not rewritten when off, so the own sandbox does not help');
+    assert.equal(off('run_command', { CommandLine: 'ls' }), null, 'known read-only commands stay as they were');
+
+    // Without the grant, mode off keeps its old shape.
+    fs.writeFileSync(settingsFile, original);
+    assert.equal(off('read_url_content', { Url: 'https://example.com' }), null);
+    assert.equal(off('run_command', { CommandLine: 'npm test' }), null);
+  } finally {
+    fs.writeFileSync(settingsFile, original);
+  }
 });

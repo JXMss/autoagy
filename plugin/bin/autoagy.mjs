@@ -491,7 +491,14 @@ function status() {
   // allowlist. Whether the grants are actually present is the `missing grants`
   // line further down; `grantsFor` includes them, so it needs nothing extra.
   const network = trustedDomainGrants(config);
-  if (config.networkGrants === 'trusted-domains') {
+  if (config.networkGrants === 'all') {
+    lines.push('  network grants  read_url(*) — no fetch prompts; every fetch outside trustedDomains is reviewed');
+    if (!own.active) {
+      lines.push("  ! that grant gives agy's terminal sandbox the whole network, so autoagy no longer counts it as a");
+      lines.push("                  sandbox: every command off the known read-only list is reviewed. autoagy's own sandbox");
+      lines.push('                  is what makes the grant free, and it is not running here.');
+    }
+  } else if (config.networkGrants === 'trusted-domains') {
     lines.push(`  network grants  ${network.grants.length} read_url grant(s) from trustedDomains${network.grants.length ? `: ${network.grants.join(', ')}` : ''}`);
     if (network.grants.length > 0 && !own.active) {
       lines.push("                  those hosts are reachable from commands in agy's terminal sandbox without review;");
@@ -580,7 +587,14 @@ function status() {
     if (config.commandGrant === 'executor' && allow.includes('command(*)') && !stale.includes('command(*)')) {
       lines.push('  ! command(*) is still granted, which makes the narrow executor grant pointless — remove it');
     }
-    if (allow.some((g) => /^read_url\(\*\)$/.test(g))) lines.push('  ! read_url(*) is granted: sandboxed commands can reach any host without review');
+    // Under networkGrants "all" the network line above already says what the
+    // grant costs here. One written by hand gets the same treatment from the
+    // policy — agy's sandbox stops counting as one — and is named so it is not
+    // a surprise that more commands are reviewed.
+    if (allow.some((g) => /^read_url\(\*\)$/.test(g)) && config.networkGrants !== 'all' && !stale.includes('read_url(*)')) {
+      lines.push("  ! read_url(*) is granted by hand: it gives agy's terminal sandbox the whole network, so autoagy does not");
+      lines.push("    count that sandbox — commands off the known read-only list are reviewed unless autoagy's own sandbox runs them");
+    }
     // Report what the policy will actually conclude, not what the file says: on
     // a platform where the process arguments cannot be read, detectSandbox
     // refuses to trust this file, and the difference is worth showing.
@@ -898,10 +912,13 @@ function setup(flags) {
   // This line used to be unconditional, and with `networkGrants` set it
   // contradicted the plan printed a few lines above it.
   const network = trustedDomainGrants(config);
-  if (network.grants.length > 0) {
+  if (config.networkGrants === 'all') {
+    console.log('\nread_url(*) is granted (networkGrants: "all"), so no fetch prompts; every fetch outside trustedDomains is still reviewed.');
+    console.log("It also opens agy's terminal sandbox to the network, so autoagy stops counting that sandbox: where its own sandbox is not running, every command off the known read-only list is reviewed.");
+  } else if (network.grants.length > 0) {
     console.log(`\n${network.grants.length} read_url grant(s) come from trustedDomains (networkGrants: "trusted-domains"), so fetching those domains stops prompting.`);
     console.log('A read_url rule is also the terminal sandbox\'s network allowlist: where autoagy\'s own sandbox is not running, unreviewed commands can reach those hosts too.');
-    console.log('read_url(*) is never granted, and an entry that is not a plain hostname is skipped — `autoagy status` names any that were.');
+    console.log('An entry never widens into read_url(*) (that is networkGrants "all"), and one that is not a plain hostname is skipped — `autoagy status` names any that were.');
   } else {
     console.log('\nread_url(...) is not granted: it would also open the terminal sandbox to the network. Per-domain grants are opt-in, see `networkGrants`.');
   }

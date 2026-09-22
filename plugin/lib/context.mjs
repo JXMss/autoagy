@@ -490,6 +490,12 @@ export const HOST_INSPECTABLE_PLATFORMS = ['linux', 'darwin'];
  * autoagy's own when active, otherwise Antigravity's.
  * @returns {{ active: boolean, source: string, detail: string }}
  */
+/** True when the CLI settings grant `read_url(*)`, the network-wide fetch grant. */
+export function grantsReadUrlEverywhere(settings) {
+  const allow = Array.isArray(settings?.permissions?.allow) ? settings.permissions.allow : [];
+  return allow.some((rule) => /^read_url\(\s*\*\s*\)$/.test(String(rule).trim()));
+}
+
 export function detectSandbox({ config, host, appDataDir, own, platform = process.platform }) {
   if (own?.active) {
     return { active: true, source: 'autoagy', detail: `${own.detail}; workspace and temp dirs writable, .git and agent metadata read-only, no network` };
@@ -504,10 +510,21 @@ export function detectSandbox({ config, host, appDataDir, own, platform = proces
   if (host?.flags?.skipPermissions) {
     return { active: false, source: 'flag', detail: 'agy was started with --dangerously-skip-permissions (terminal sandbox bypassed)' };
   }
+  const settings = appDataDir ? readJson(path.join(appDataDir, 'settings.json')) : null;
+  // A `read_url` grant is also an entry in the terminal sandbox's network
+  // allowlist (measured), so `read_url(*)` leaves that sandbox with the whole
+  // network. Everything autoagy lets run unreviewed "in the sandbox" rests on it
+  // having none, so from here on it is not counted as a sandbox — a command is
+  // then reviewed unless it is on the known read-only list. autoagy's own
+  // sandbox, above, is unaffected: it has no network of its own. Before the
+  // config for the same reason as the flag: an observed fact outweighs a
+  // declaration.
+  if (grantsReadUrlEverywhere(settings)) {
+    return { active: false, source: 'settings', detail: "read_url(*) is granted, which opens Antigravity's terminal sandbox to every host" };
+  }
   if (config.sandbox === 'on') return { active: true, source: 'config', detail: 'sandbox: "on" in autoagy config' };
   if (config.sandbox === 'off') return { active: false, source: 'config', detail: 'sandbox: "off" in autoagy config' };
   if (host?.flags?.sandbox) return { active: true, source: 'flag', detail: 'agy was started with --sandbox' };
-  const settings = appDataDir ? readJson(path.join(appDataDir, 'settings.json')) : null;
   // The settings file records what the CLI was configured to do, not what it is
   // doing. It is the only signal the IDE path can offer, so it is used — but
   // only where the process arguments could have been read to confirm or

@@ -97,19 +97,24 @@ export function writableRootGrants(config, home = os.homedir()) {
  * "off"`) an unreviewed command can reach those hosts, which is the shape of
  * Codex's own network allowlist.
  *
- * `*` is the line that is not crossed. A leading `*.` is stripped, because
- * `isTrustedHost` treats `*.example.com` and `example.com` as the same rule, but
- * an entry that still holds a wildcard after that is skipped and reported rather
- * than turned into something wider than it looks — `read_url(*)` must not be
- * reachable from a configuration file. Anything that is not hostname-shaped is
- * skipped for the same reason: it would be a rule nobody can predict the meaning
- * of.
+ * A `trustedDomains` entry never widens into `*`. A leading `*.` is stripped,
+ * because `isTrustedHost` treats `*.example.com` and `example.com` as the same
+ * rule, but an entry that still holds a wildcard after that is skipped and
+ * reported rather than turned into something wider than it looks. The
+ * network-wide grant exists only as its own explicit value, `networkGrants:
+ * "all"`, never as a side effect of a list entry. Anything that is not
+ * hostname-shaped is skipped for the same reason: it would be a rule nobody can
+ * predict the meaning of.
  *
  * @returns {{ grants: string[], skipped: string[] }} `skipped` is for reporting;
  *   an entry silently dropped here is a domain that keeps prompting with no
  *   explanation.
  */
 export function trustedDomainGrants(config) {
+  // "all" is the explicit switch for `read_url(*)`; see `networkGrants` in
+  // config.mjs for why it is safe only while autoagy's own sandbox runs, and
+  // `detectSandbox` for what happens to agy's sandbox once it is granted.
+  if (config?.networkGrants === 'all') return { grants: ['read_url(*)'], skipped: [] };
   if (config?.networkGrants !== 'trusted-domains') return { grants: [], skipped: [] };
   const grants = new Set();
   const skipped = [];

@@ -165,7 +165,7 @@ what you experience:
 | `commandGrant` | `"wildcard"` | `"executor"` replaces `command(*)` with a grant naming one program that only redeems one-shot tokens the hook wrote — the command class then becomes fail-closed instead of fail-open. |
 | `ownSandbox` | `"auto"` | Whether autoagy's bubblewrap sandbox is used where it could be. |
 | `readGrant` | `"anywhere"` | `"none"` leaves out `read_file(/)`, so reads outside the workspace prompt again. When autoagy itself fails or times out, content reads are refused while the grant is on, since agy would no longer ask. |
-| `networkGrants` | `"none"` | `"trusted-domains"` stops the first fetch of each trusted domain from prompting. Cost depends on which sandbox is running; `autoagy status` says which. |
+| `networkGrants` | `"none"` | `"trusted-domains"` stops the first fetch of each trusted domain from prompting. Cost depends on which sandbox is running; `autoagy status` says which. `"all"` grants `read_url(*)`: no fetch prompts at all, each fetch outside `trustedDomains` still reviewed. That grant also gives agy's terminal sandbox the whole network, so autoagy stops counting it as a sandbox — free where autoagy's own sandbox runs the commands (Linux + bubblewrap), and elsewhere every command off the known read-only list is reviewed. |
 
 Also: `writableRoots` (outside directories editable without review — re-run
 `autoagy setup` after changing it), `protectedPaths`, `credentialPaths`,

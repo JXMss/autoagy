@@ -133,6 +133,18 @@ test('the grants follow the configuration: the command shape, and one per writab
   assert.deepEqual(grantsFor(config, { autoagyHome, home }).slice(4), writableRootGrants(config, home));
 });
 
+test('networkGrants "all" is the one way to read_url(*), and no list entry widens into it', () => {
+  const home = path.join(root, 'all-network-home');
+  const autoagyHome = path.join(home, '.gemini', 'autoagy');
+  const all = { networkGrants: 'all', trustedDomains: ['docs.python.org', '*'] };
+  assert.deepEqual(trustedDomainGrants(all), { grants: ['read_url(*)'], skipped: [] });
+  assert.equal(grantsFor(all, { autoagyHome, home }).at(-1), 'read_url(*)');
+  assert.ok(!grantsFor(all, { autoagyHome, home }).includes('read_url(docs.python.org)'), 'the wildcard already covers it');
+  assert.equal(loadConfig({ env: { AUTOAGY_HOME: path.join(root, 'no-config') }, home }).config.networkGrants, 'none', 'opt-in');
+  // A "*" in the list is still skipped under "trusted-domains".
+  assert.deepEqual(trustedDomainGrants({ networkGrants: 'trusted-domains', trustedDomains: ['*'] }).grants, []);
+});
+
 test('reads anywhere are granted unless readGrant says none, and writes never are', () => {
   // Measured on agy 1.2.7: with `allowNonWorkspaceAccess: false`, `view_file
   // /etc/hostname` asked "Reason: outside workspace" after autoagy had allowed

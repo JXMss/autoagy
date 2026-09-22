@@ -305,7 +305,9 @@ test('status says how many domains the fetch prompt is off for, and what that co
   // The wildcard entry is named rather than dropped in silence: it is a domain
   // that keeps prompting, and the reason is not guessable from the outside.
   assert.match(out, /trustedDomains entry "\*" got no read_url grant/);
-  assert.doesNotMatch(out, /read_url\(\*\)/);
+  // Only the network line: the settings lines further down come from the
+  // account's real settings file, which a test cannot isolate.
+  assert.doesNotMatch(out.split('\n').find((l) => l.includes('network grants')), /read_url\(\*\)/);
 });
 
 test('status does not call a truncated probe cache an untrusted conversation', () => {

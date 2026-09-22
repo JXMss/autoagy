@@ -213,3 +213,26 @@ test('a relative policy.file no longer breaks every tool call', () => {
   const tilde = contextFor(dirs, 'run_command', { CommandLine: 'ls' }, { config: configWith({ policy: { file: '~/.gemini/autoagy/policy.md' } }) });
   assert.ok(tilde.selfPaths.includes(fs.realpathSync(file)), 'the file selfPaths protects is the one the reviewer reads');
 });
+
+test('agy\'s sandbox stops counting as one once read_url(*) gives it the whole network', () => {
+  // A read_url grant is also the terminal sandbox's network allowlist
+  // (measured), so `networkGrants: "all"` leaves that sandbox with every host.
+  // autoagy's own sandbox has no network of its own and is unaffected.
+  const settingsFile = path.join(dirs.appData, 'settings.json');
+  const original = fs.readFileSync(settingsFile, 'utf8');
+  try {
+    fs.writeFileSync(settingsFile, JSON.stringify({ enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox', permissions: { allow: ['read_url(*)'] } }));
+    const networked = detect({ platform: 'linux' });
+    assert.equal(networked.active, false);
+    assert.match(networked.detail, /read_url\(\*\)/);
+    // A declaration does not outweigh it either.
+    assert.equal(detect({ platform: 'linux', config: configWith({ sandbox: 'on' }) }).active, false);
+    // The own sandbox is still a sandbox.
+    assert.equal(detect({ platform: 'linux', own: { active: true, detail: 'bwrap' } }).active, true);
+    // One domain is Codex's allowlist shape, not the whole network.
+    fs.writeFileSync(settingsFile, JSON.stringify({ enableTerminalSandbox: true, toolPermission: 'proceed-in-sandbox', permissions: { allow: ['read_url(docs.python.org)'] } }));
+    assert.equal(detect({ platform: 'linux' }).active, true);
+  } finally {
+    fs.writeFileSync(settingsFile, original);
+  }
+});
