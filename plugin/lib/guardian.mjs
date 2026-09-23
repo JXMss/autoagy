@@ -2,9 +2,11 @@
 // policy, the compact transcript and the planned action, asks a reviewer model,
 // and turns its assessment into a hook decision.
 //
-// Behavior follows codex-rs/core/src/guardian: a 90-second deadline with up to
-// three attempts, a tolerant JSON parser, fail-closed on errors, and Codex's
-// rejection / timeout instructions for the agent.
+// Behavior follows codex-rs/core/src/guardian: up to three attempts, a tolerant
+// JSON parser, fail-closed on errors, and Codex's rejection / timeout
+// instructions for the agent. Codex's single 90-second deadline is the
+// per-attempt budget here, inside a longer overall deadline, so one stalled
+// attempt no longer spends the whole review (see `runReview`).
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -421,10 +423,19 @@ export class ReviewTimeoutError extends Error {
  * @param {{ timeoutSec: number, maxAttempts: number }} options
  * @returns {Promise<{ status: 'approved' | 'denied' | 'timed_out' | 'failed', assessment?: object, error?: string, attempts: number, latencyMs: number, raw?: string }>}
  */
-export async function runReview(prompt, reviewer, { timeoutSec, maxAttempts }) {
+export async function runReview(prompt, reviewer, { timeoutSec, maxAttempts, attemptTimeoutSec }) {
   const started = Date.now();
   const deadline = started + timeoutSec * 1000;
+  // Each attempt gets its own budget, and a timed-out attempt is retried like
+  // any other failure. Measured on 2026-09-23, with the whole deadline going to
+  // one attempt and the first `ReviewTimeoutError` ending the review: 7 actions
+  // were denied after a 90-second stall, and the agent's own retry of the same
+  // action was approved seconds later (4.7s, 17.3s). Reviews that answer slowly
+  // rather than stalling are the reason the budget is not smaller — the same day
+  // had 13 reviews between 60s and 80s that all ended in an approval.
+  const attemptMs = Math.max(1000, Math.min(attemptTimeoutSec ?? timeoutSec, timeoutSec) * 1000);
   let lastError = 'no attempt was made';
+  let lastWasTimeout = false;
   let attempts = 0;
   let raw;
   while (attempts < maxAttempts) {
@@ -434,7 +445,7 @@ export async function runReview(prompt, reviewer, { timeoutSec, maxAttempts }) {
     }
     attempts++;
     try {
-      raw = await reviewer.review(prompt, { timeoutMs: remaining });
+      raw = await reviewer.review(prompt, { timeoutMs: Math.min(remaining, attemptMs) });
       const assessment = parseAssessment(raw);
       return {
         status: assessment.outcome === 'allow' ? 'approved' : 'denied',
@@ -444,13 +455,14 @@ export async function runReview(prompt, reviewer, { timeoutSec, maxAttempts }) {
         raw,
       };
     } catch (err) {
-      if (err instanceof ReviewTimeoutError) {
-        return { status: 'timed_out', error: err.message, attempts, latencyMs: Date.now() - started, raw };
-      }
       lastError = err?.message ?? String(err);
+      lastWasTimeout = err instanceof ReviewTimeoutError;
     }
   }
-  return { status: 'failed', error: lastError, attempts, latencyMs: Date.now() - started, raw };
+  // A review that ran out of time is reported as a timeout even when an earlier
+  // attempt failed some other way: `onTimeout` is the setting that covers it, and
+  // the agent is told it may retry rather than that the reviewer broke.
+  return { status: lastWasTimeout ? 'timed_out' : 'failed', error: lastError, attempts, latencyMs: Date.now() - started, raw };
 }
 
 /** Codex's message to the agent after a denial. */

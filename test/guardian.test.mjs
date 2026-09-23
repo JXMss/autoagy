@@ -80,7 +80,7 @@ const reviewerOf = (...responses) => {
     },
   };
 };
-const opts = { timeoutSec: 30, maxAttempts: 3 };
+const opts = { timeoutSec: 30, maxAttempts: 3, attemptTimeoutSec: 10 };
 
 test('runReview maps outcomes and retries transient failures', async () => {
   assert.equal((await runReview({}, reviewerOf('{"outcome":"allow"}'), opts)).status, 'approved');
@@ -93,6 +93,34 @@ test('runReview maps outcomes and retries transient failures', async () => {
   assert.equal(failed.error, 'boom');
   const timedOut = await runReview({}, reviewerOf(new ReviewTimeoutError()), opts);
   assert.equal(timedOut.status, 'timed_out');
+  assert.equal(timedOut.attempts, 3);
+});
+
+test('a stalled attempt is killed on its own budget and asked again', async () => {
+  // The measured failure: one stall used to spend the whole deadline and deny.
+  const recovered = await runReview({}, reviewerOf(new ReviewTimeoutError(), '{"outcome":"allow"}'), opts);
+  assert.equal(recovered.status, 'approved');
+  assert.equal(recovered.attempts, 2);
+  // Each attempt is given the per-attempt budget, not the whole deadline, so
+  // there is time left to ask again.
+  const budgets = [];
+  const recording = {
+    name: 'test',
+    async review(_prompt, { timeoutMs }) {
+      budgets.push(timeoutMs);
+      throw new ReviewTimeoutError();
+    },
+  };
+  const out = await runReview({}, recording, { timeoutSec: 30, maxAttempts: 3, attemptTimeoutSec: 10 });
+  assert.equal(out.status, 'timed_out');
+  assert.deepEqual(budgets.map((ms) => ms <= 10_000), [true, true, true]);
+  // A budget larger than the deadline cannot outlast it.
+  budgets.length = 0;
+  await runReview({}, recording, { timeoutSec: 6, maxAttempts: 2, attemptTimeoutSec: 90 });
+  assert.ok(budgets[0] <= 6000, `${budgets[0]} is inside the deadline`);
+  // An earlier failure of another kind does not turn a timeout into an error.
+  const mixed = await runReview({}, reviewerOf(new Error('503'), new ReviewTimeoutError()), opts);
+  assert.equal(mixed.status, 'timed_out');
 });
 
 test('decisions follow Codex messages and the on* settings', () => {

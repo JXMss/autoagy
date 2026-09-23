@@ -29,7 +29,12 @@ export const DEFAULT_CONFIG = Object.freeze({
     // "openai": any OpenAI-compatible Chat Completions endpoint (OpenAI, Gemini, DeepSeek, ...).
     // "none": no reviewer model; behaves like mode "ask".
     backend: 'agy',
-    timeoutSec: 90,
+    // The whole review, retries included, must answer inside the pre-tool-use
+    // hook's own timeout (150s in hooks.json), which is what caps this.
+    timeoutSec: 140,
+    // One attempt's budget: Codex's deadline, kept as the point where a stalled
+    // attempt is killed and asked again.
+    attemptTimeoutSec: 90,
     maxAttempts: 3,
     agy: {
       command: 'agy',
@@ -443,6 +448,10 @@ function validate(config, warnings, home = os.homedir()) {
   if (!(Number.isFinite(r.timeoutSec) && r.timeoutSec >= 5 && r.timeoutSec <= 600)) {
     warnings.push('reviewer.timeoutSec must be between 5 and 600; using default');
     r.timeoutSec = DEFAULT_CONFIG.reviewer.timeoutSec;
+  }
+  if (!(Number.isFinite(r.attemptTimeoutSec) && r.attemptTimeoutSec >= 5 && r.attemptTimeoutSec <= 600)) {
+    warnings.push('reviewer.attemptTimeoutSec must be between 5 and 600; using default');
+    r.attemptTimeoutSec = DEFAULT_CONFIG.reviewer.attemptTimeoutSec;
   }
   if (!(Number.isInteger(r.maxAttempts) && r.maxAttempts >= 1 && r.maxAttempts <= 5)) {
     r.maxAttempts = DEFAULT_CONFIG.reviewer.maxAttempts;

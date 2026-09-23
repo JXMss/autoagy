@@ -149,7 +149,7 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 
 ## 审核后端
 
-默认用 **agy**：插件自带一个无工具的 `autoagy-guardian` agent，用你的 Antigravity 登录态以 headless 方式运行，无需额外 API key。模型是你 agy 当前的默认模型，推理强度 `low`。实测每次审核约 4～12 秒，每次都花你的 Antigravity 额度。审核会话会出现在 `agy` 的历史里，归在 `~/.gemini/autoagy/guardian` 这个工作区下，不影响你项目里的 `agy -c`。
+默认用 **agy**：插件自带一个无工具的 `autoagy-guardian` agent，用你的 Antigravity 登录态以 headless 方式运行，无需额外 API key。模型是你 agy 当前的默认模型，推理强度 `low`。实测每次审核约 4～12 秒，每次都花你的 Antigravity 额度——它和主 agent 用的是同一个账号，所以主 agent 正忙的时候审核也会慢：连续用两天的实测里，一天的中位数 4.3 秒，另一天 9.1 秒、有 13 次落在 60～80 秒（同一台机器空载时重测仍是 2～5 秒，把 6 个核心全部跑满也只有 5 秒，所以慢的是后端而不是本机）。审核会话会出现在 `agy` 的历史里，归在 `~/.gemini/autoagy/guardian` 这个工作区下，不影响你项目里的 `agy -c`。
 
 换审核用的模型或推理强度：
 
@@ -198,7 +198,7 @@ autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandb
 | `readGrant` | `"anywhere"` | `"anywhere"` 时 `autoagy setup` 写一条 `read_file(/)` 授权，读项目外的文件不再弹窗；写项目外的文件照旧要过 `allowNonWorkspaceAccess: false` 那道关。凭据读取在 agy 之前已由 autoagy 送审。autoagy 自己出错或超时时，读文件内容的操作一律拒绝，因为此时 agy 不会再问。`"none"`：不写这条，项目外的读取照 agy 的默认弹窗 |
 | `ownSandbox` | `"auto"` | autoagy 自己的 bubblewrap 沙箱（见上文）：`auto` 满足条件时启用，`on` 强制启用（不可用时命令送审），`off` 不使用 |
 | `reviewer.backend` | `"agy"` | `agy` / `openai` / `none`（`none` 等同 `ask`） |
-| `reviewer.timeoutSec` / `maxAttempts` | `90` / `3` | Codex 的审核期限与重试次数 |
+| `reviewer.timeoutSec` / `attemptTimeoutSec` / `maxAttempts` | `140` / `90` / `3` | 整次审核的期限、单次尝试的期限、尝试次数。Codex 的 90 秒在这里是**单次**预算：卡住的那次被杀掉后会重问（实测卡住后重问通常几秒就答），整个期限用完才算超时（按 `onTimeout` 处理，默认拒绝）。整次期限受 hook 自己的超时（`hooks.json` 里的 150 秒）封顶 |
 | `reviewer.agy.model` / `effort` | 默认模型 / `"low"` | 审核用的 agy 模型（`agy models` 的第一列）与推理强度（`low` / `medium` / `high`） |
 | `reviewer.openai.baseUrl` / `apiKeyEnv` / `model` | `https://api.openai.com/v1` / `OPENAI_API_KEY` / `gpt-5-mini` | `backend: "openai"` 时用的接口地址、存密钥的环境变量名、模型名，见「审核后端」 |
 | `reviewer.openai.headers` / `jsonMode` | `{}` / `true` | 额外请求头；是否要求接口按 JSON 格式回答（接口不支持时设为 `false`） |

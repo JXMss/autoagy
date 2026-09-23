@@ -182,7 +182,14 @@ reviewer backend (next section).
 By default (`backend: "agy"`) the plugin's tool-less `autoagy-guardian` agent runs
 headless under your own Antigravity login — no extra API key. It uses your agy's
 current default model at reasoning effort `low`. A review takes 4–12 seconds and
-each one spends your Antigravity quota. Review sessions show up in `agy`'s
+each one spends your Antigravity quota — the same account the main agent uses, so
+reviews slow down while it is busy. Measured over two days of ordinary use: a
+median of 4.3s on one day, 9.1s on the next with 13 reviews between 60s and 80s
+(the same machine idle measured 2–5s again, and 5s with all six cores pegged, so
+it is the backend and not the machine). `reviewer.timeoutSec` (140) is the
+deadline for the whole review, `attemptTimeoutSec` (90, Codex's number) the
+budget for one attempt: a stalled attempt is killed and asked again, and only the
+whole deadline running out counts as a timeout. Review sessions show up in `agy`'s
 history under the `~/.gemini/autoagy/guardian` workspace, so they do not hijack
 `agy -c` in your projects.
 
