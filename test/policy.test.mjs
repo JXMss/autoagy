@@ -369,6 +369,21 @@ test('relocating HOME or starting another agy needs review', () => {
   assert.equal(verdict('run_command', { CommandLine: 'XDG_CONFIG_HOME=/tmp/x ls' }).category, 'sandboxed-command');
 });
 
+test('inside the own sandbox a relocated HOME is not a security question', { skip: linuxOnly }, () => {
+  // The mounts do not follow HOME, so the usual way to give a tool a writable
+  // home runs confined, unreviewed, instead of being pushed out of the sandbox.
+  const own = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe };
+  const prog = 'mkdir -p /tmp/h && HOME=/tmp/h ./prog --run';
+  assert.equal(verdict('run_command', { CommandLine: prog }, own).category, 'sandboxed-command');
+  // Leaving the sandbox keeps the note, and starting agy is still its own question.
+  const escalated = verdict('run_command', { CommandLine: prog, BypassSandbox: true }, own);
+  assert.equal(escalated.category, 'sandbox-escalation');
+  assert.match(escalated.reason, /security controls/);
+  assert.equal(verdict('run_command', { CommandLine: 'HOME=/tmp/x agy -p hi' }, own).category, 'starts-antigravity');
+  // The paths themselves are still named, sandbox or not.
+  assert.equal(verdict('run_command', { CommandLine: 'cat ~/.gemini/autoagy/config.json' }, own).category, 'touches-security-controls');
+});
+
 test('an untrusted conversation refuses a command that touches the security controls', () => {
   assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'cat ~/.gemini/autoagy/config.json' }), { untrusted: true }).verdict, 'deny');
   // Everything else keeps its normal verdict: it is reviewed or allowed on its

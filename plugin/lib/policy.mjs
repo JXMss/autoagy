@@ -898,8 +898,14 @@ function resolvedTargets(ctx, raws) {
 // An assignment rather than a bare substring: `XDG_CONFIG_HOME=` must not match.
 const ENV_ASSIGNMENT_RE = /(?:^|[\s;&|(])(HOME|AGY_[A-Z_]*|ANTIGRAVITY_[A-Z_]*|JETSKI_[A-Z_]*)=/;
 
-function mentionsSelf(ctx, commandLine) {
-  if (ENV_ASSIGNMENT_RE.test(commandLine)) return true;
+function mentionsSelf(ctx, commandLine, { confined = false } = {}) {
+  // Inside autoagy's own sandbox an assignment relocates nothing that matters:
+  // the mounts are fixed before the command starts, whatever HOME says, and an
+  // agy started in there has no network. Measured on 2026-09-22: `HOME=/tmp/x
+  // <program>`, pointing HOME at a writable directory, was reviewed and denied as
+  // a shadowed variable, and the agent escalated the same run out of the sandbox
+  // instead — where it was less confined than the version that had been blocked.
+  if (!confined && ENV_ASSIGNMENT_RE.test(commandLine)) return true;
   // AUTOAGY_*: variables such as AUTOAGY_HOME relocate autoagy's config for an agy the command starts.
   const needles = new Set(['.system_generated', 'AUTOAGY_']);
   for (const p of ctx.selfPaths) {
@@ -1009,8 +1015,8 @@ function classifyCommand(ctx, state = {}) {
   }
   const bypass = ctx.args.BypassSandbox === true;
   const analysis = analyzeCommandLine(commandLine);
-  const selfNote = mentionsSelf(ctx, commandLine)
-    ? ' The command references autoagy’s own files or environment variables, or Antigravity’s conversation logs, which are security controls and review evidence.'
+  const selfNote = mentionsSelf(ctx, commandLine, { confined: ctx.ownSandbox.active && !bypass })
+    ?' The command references autoagy’s own files or environment variables, or Antigravity’s conversation logs, which are security controls and review evidence.'
     : '';
   // In an untrusted conversation the review evidence is exactly what is in
   // doubt, so a command that reaches for it is refused rather than judged.

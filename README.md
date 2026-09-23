@@ -225,7 +225,7 @@ autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandb
 
 配置只从全局文件读取：工作区里的文件 agent 自己能改，所以不接受工作区级配置。环境变量也不能改变策略（hook 继承 agy 的环境变量，而一条获批的越权命令可以给它启动的 agy 设任意环境变量）。
 
-配置目录和 `home` 有两个来源：环境变量（`AUTOAGY_HOME`，否则 `HOME`）和 `autoagy setup` 在安装时写进 `hooks.json` 的绝对路径。装了插件之后**以钉子为准**，环境变量说了不算——否则一条命令就能把 hook 指向它自己写的配置目录，或者用 `HOME=/tmp/x` 把整个 `~`（连同凭据清单和「不可编辑路径」）搬走。`hooks.json` 在插件目录里，而插件目录属于策略的「不可编辑路径」，所以 agent 改不动这个钉子。另外，以 `agy` 为可执行名的命令、以及给 `HOME`/`AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值的命令都会送审。`reviewer.backend: "mock"` 只在设置了 `AUTOAGY_UNSAFE_MOCK_REVIEWER=1`（测试用）时生效，否则回退到默认后端。
+配置目录和 `home` 有两个来源：环境变量（`AUTOAGY_HOME`，否则 `HOME`）和 `autoagy setup` 在安装时写进 `hooks.json` 的绝对路径。装了插件之后**以钉子为准**，环境变量说了不算——否则一条命令就能把 hook 指向它自己写的配置目录，或者用 `HOME=/tmp/x` 把整个 `~`（连同凭据清单和「不可编辑路径」）搬走。`hooks.json` 在插件目录里，而插件目录属于策略的「不可编辑路径」，所以 agent 改不动这个钉子。另外，以 `agy` 为可执行名的命令都会送审；给 `HOME`/`AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值的命令，只要不在 autoagy 自己的沙箱里跑（没有这个沙箱，或要求离开沙箱），也送审——沙箱里的挂载在命令启动前就定了，不跟着 `HOME` 走，所以 `HOME=/tmp/x <程序>` 这种把 `HOME` 指到可写目录的常见写法在沙箱里照常免审。`reviewer.backend: "mock"` 只在设置了 `AUTOAGY_UNSAFE_MOCK_REVIEWER=1`（测试用）时生效，否则回退到默认后端。
 
 ## 决策规则（第一层，无模型）
 
@@ -242,7 +242,7 @@ autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandb
 | `invoke_subagent` 启动不继承 customizations、又带工具的自定义 agent | 审核（这种 agent 的工具调用不经过 autoagy） |
 | `browser_subagent`、`generate_image`、`delete_knowledge` | 审核：前者的导航和点击是它自己做的，不逐条经过本策略；后者写出的路径策略看不到；删除的知识无法从工作区恢复 |
 | 以 `agy` 为可执行名的命令（启动另一个 Antigravity 实例） | 审核：那个实例是否加载这些 hook，由它自己的配置和环境决定，而这条命令两样都能设 |
-| 命令里给 `HOME` 或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值 | 审核：`HOME` 决定 `~` 指向哪里，也就决定了策略里的凭据清单和「不可编辑路径」 |
+| 命令里给 `HOME` 或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值 | 审核：`HOME` 决定 `~` 指向哪里，也就决定了策略里的凭据清单和「不可编辑路径」。autoagy 自己的沙箱里不审：挂载不随 `HOME` 变 |
 | `send_command_input` | 只在 autoagy 自己的沙箱生效时放行（`config.sandbox: "on"` 是声明，Antigravity 的沙箱也让 `.git` 和日志可写）；macOS/Windows/无 bwrap 时一律审核 |
 | 向用户申请权限（`ask_permission`、`ask_custom_permission`） | 放行——正常情况下弹窗会到你手里，由你决定，autoagy 没什么可加的。但 `--dangerously-skip-permissions` 下 agy 会自己同意所有工具权限（它自己的字符串就是这么写的：`auto-approving all tool permissions`），平台读不到 agy 参数时也无法排除这个标志——那时没有人能回答，申请就送审（策略里「削弱 agent 自身的监管」属于持续性安全削弱） |
 | MCP（含 `read_resource` / `list_resources` 这类 MCP 资源读取）、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核（未知工具名可用 `tools.allow` 免审——**只有**未知的那些，见配置表） |
