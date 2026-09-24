@@ -384,6 +384,35 @@ test('inside the own sandbox a relocated HOME is not a security question', { ski
   assert.equal(verdict('run_command', { CommandLine: 'cat ~/.gemini/autoagy/config.json' }, own).category, 'touches-security-controls');
 });
 
+test('the home dotfiles that run themselves are reviewed when the workspace is the home directory', () => {
+  // Nothing changes for an ordinary project: the home directory is outside the
+  // writable roots there. This is the case where it is inside them.
+  const atHome = { host: { kind: 'cli', cwd: dirs.home, argv: ['agy'], flags: { skipPermissions: false, sandbox: false, addDirs: [] } } };
+  for (const file of ['.bashrc', '.profile', '.config/systemd/user/x.service', '.config/autostart/x.desktop', '.local/bin/tool', '.gitconfig']) {
+    const out = verdict('write_to_file', { TargetFile: path.join(dirs.home, file), CodeContent: 'x' }, atHome);
+    assert.equal(out.category, 'write-protected', file);
+  }
+  // An ordinary file in the same workspace still goes through untouched.
+  assert.equal(verdict('write_to_file', { TargetFile: path.join(dirs.home, 'notes.md'), CodeContent: 'x' }, atHome).verdict, 'allow');
+  // A command that writes one is reviewed as well, which is what the mount side
+  // of `protectedPaths` (readOnlyPaths) enforces for the ones it cannot name.
+  assert.equal(verdict('run_command', { CommandLine: `echo pwn >> ${path.join(dirs.home, '.bashrc')}` }, atHome).category, 'protected-path');
+});
+
+test('an escalation says when the file that would run is agent-writable', () => {
+  const bin = path.join(dirs.workspace, 'tools');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'run.sh'), '#!/bin/sh\necho hi\n');
+  const out = verdict('run_command', { CommandLine: './tools/run.sh --all', BypassSandbox: true });
+  assert.equal(out.category, 'sandbox-escalation');
+  assert.match(out.reason, /tools\/run\.sh, inside a directory the agent can write/);
+  // Outside the sandbox is the point: the same binary confined needs no such note.
+  const confined = verdict('run_command', { CommandLine: './tools/run.sh --all' });
+  assert.ok(!/inside a directory the agent can write/.test(confined.reason ?? ''), confined.reason);
+  // A binary that resolves outside every writable root says nothing.
+  assert.ok(!/agent can write/.test(verdict('run_command', { CommandLine: '/bin/ls -la', BypassSandbox: true }).reason));
+});
+
 test('an untrusted conversation refuses a command that touches the security controls', () => {
   assert.equal(classify(contextFor(dirs, 'run_command', { CommandLine: 'cat ~/.gemini/autoagy/config.json' }), { untrusted: true }).verdict, 'deny');
   // Everything else keeps its normal verdict: it is reviewed or allowed on its

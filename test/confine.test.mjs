@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync, spawn } from 'node:child_process';
-import { detectOwnSandbox, confinedCommandLine, scrubbedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath, envBinaryPath, sandboxStartCheck } from '../plugin/lib/confine.mjs';
+import { detectOwnSandbox, confinedCommandLine, privilegedSocketPaths, scrubbedCommandLine, probeBwrap, readOnlyPaths, readSandboxCheck, removeControlPlaceholders, sandboxEnv, lockQuiescent, workspaceLockFile, flockPath, envBinaryPath, sandboxStartCheck } from '../plugin/lib/confine.mjs';
 import { seccompProgram, seccompSupported } from '../plugin/lib/seccomp.mjs';
 import { HookContext, PROTECTED_WORKSPACE_DIRS, findNestedGitPaths } from '../plugin/lib/context.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
@@ -590,6 +590,24 @@ test('the mount points for missing protected directories exist only while the co
   assert.deepEqual(handlePostToolUse(payloadFor(dirs, 'run_command', pre.overwrite, { stepIdx: 30 }), opts), {});
   assert.equal(fs.existsSync(target), false, 'removed after the command');
   fs.rmSync(path.join(home, 'config.json'));
+});
+
+test('privileged daemon sockets are masked inside the sandbox', { skip: linuxOnly }, () => {
+  // `--unshare-net` does not cover a unix socket and the seccomp filter allows
+  // AF_UNIX, so a container daemon behind one would run work outside the sandbox
+  // as root. Until now the only thing stopping it was bwrap dropping the docker
+  // group, which a 666 socket would not have needed.
+  const sockets = privilegedSocketPaths();
+  for (const p of sockets) {
+    assert.ok(path.isAbsolute(p), `${p} is absolute`);
+    assert.ok(fs.existsSync(p), `${p} exists`);
+    assert.ok(!fs.lstatSync(p).isSymbolicLink(), `${p} is the real path, not a link bwrap would refuse`);
+  }
+  assert.equal(new Set(sockets).size, sockets.length, 'no duplicates');
+  const line = confinedCommandLine(ctxFor({ CommandLine: 'echo hi' }), 'echo hi');
+  for (const p of sockets) assert.ok(line.includes(`'--ro-bind' '/dev/null' '${p}'`), `${p} is masked: ${line.slice(0, 200)}`);
+  // Nothing is invented: a machine with no such daemon gets no mounts for them.
+  if (sockets.length === 0) assert.ok(!line.includes('docker.sock'));
 });
 
 test('the env scrub runs the command under env -i with the sandbox allowlist', () => {

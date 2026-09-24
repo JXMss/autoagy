@@ -345,3 +345,20 @@ test('the sandbox start check runs only where agy could have a workspace', { ski
     else fs.writeFileSync(cfg, had);
   }
 });
+
+test('status says when the config file pins a default this version moved on from', () => {
+  // `setup` writes the whole template, so a default that changed later is still
+  // sitting in the file. Measured on the first real install: a pinned
+  // `timeoutSec: 90` inside a 90s per-attempt budget left nothing for the retry
+  // the new default exists for, and nothing said so.
+  fs.mkdirSync(dirs.env.AUTOAGY_HOME, { recursive: true });
+  fs.writeFileSync(path.join(dirs.env.AUTOAGY_HOME, 'config.json'), JSON.stringify({ commandGrant: 'wildcard', reviewer: { timeoutSec: 90 } }));
+  const out = status();
+  assert.match(out, /reviewer\.timeoutSec is 90 in your file, which was the old default; it is now 140/);
+  assert.match(out, /commandGrant is "wildcard" in your file/);
+  // A value the user chose that was never a default is not reported, and neither
+  // is one that matches today's default.
+  fs.writeFileSync(path.join(dirs.env.AUTOAGY_HOME, 'config.json'), JSON.stringify({ commandGrant: 'executor', reviewer: { timeoutSec: 140 } }));
+  const chosen = status();
+  assert.ok(!/was the old default/.test(chosen), chosen);
+});

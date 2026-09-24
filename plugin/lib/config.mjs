@@ -115,8 +115,35 @@ export const DEFAULT_CONFIG = Object.freeze({
   // rest, so anything listed here is readable by commands that run without
   // review — treat it as weakening the sandbox.
   ownSandboxEnvPassThrough: [],
-  // Extra paths whose modification always needs review.
-  protectedPaths: [],
+  // Extra paths whose modification always needs review. The defaults are the
+  // files that run themselves later, outside every sandbox: the next login
+  // shell, the next `systemctl --user` start, the next desktop session, and a git
+  // config that can name a hooks directory or an alias. They only matter when the
+  // workspace *is* the home directory — measured 2026-09-22 with `--workspace
+  // /home/<user>`, writing `~/.bashrc` and `~/.config/systemd/user/x.service` was
+  // `allow (write-workspace)`, unreviewed — and everywhere else the home
+  // directory is already outside the writable roots. Entries are absolute, so
+  // they name themselves: the edit tools review them, and inside autoagy's own
+  // sandbox they become read-only mounts, which is what stops a command that
+  // never spells the path out.
+  protectedPaths: [
+    '~/.bashrc',
+    '~/.bash_profile',
+    '~/.bash_login',
+    '~/.bash_logout',
+    '~/.profile',
+    '~/.zshrc',
+    '~/.zshenv',
+    '~/.zprofile',
+    '~/.zlogin',
+    '~/.config/fish/**',
+    '~/.config/systemd/user/**',
+    '~/.config/autostart/**',
+    '~/.config/environment.d/**',
+    '~/.local/bin/**',
+    '~/.gitconfig',
+    '~/.config/git/**',
+  ],
   // Reads of these paths need review (credential probing). `~` is expanded.
   credentialPaths: [
     '~/.ssh/**',
@@ -380,6 +407,45 @@ function merge(base, override, warnings, prefix = '') {
   }
 }
 
+/**
+ * Values an earlier version wrote into `config.json` as its default.
+ *
+ * `autoagy setup` writes the whole template, so a setting the user never chose is
+ * still pinned in their file, and changing the default in this file cannot reach
+ * them. Measured on this machine: the file pinned `reviewer.timeoutSec: 90` after
+ * the default became 140, which switched off the retry that default exists for —
+ * a 90-second attempt inside a 90-second deadline leaves nothing for a second
+ * try. The same thing happened with `commandGrant` and `networkGrants`.
+ *
+ * So a changed default adds its old value here, and `autoagy status` says the
+ * file is holding it. Reported, never rewritten: this cannot tell a stale default
+ * from someone who chose that same value on purpose, and editing a user's
+ * configuration on their behalf is the worse of the two mistakes.
+ */
+export const SUPERSEDED_DEFAULTS = Object.freeze({
+  commandGrant: ['wildcard'],
+  networkGrants: ['none'],
+  'reviewer.timeoutSec': [90],
+});
+
+/**
+ * The settings whose value in `config.json` is a default this version has moved on
+ * from.
+ * @param {object|null} fileValues the parsed `config.json`, before defaults are merged
+ * @returns {{ key: string, value: unknown, now: unknown }[]}
+ */
+export function staleDefaults(fileValues) {
+  if (!isPlainObject(fileValues)) return [];
+  const out = [];
+  for (const [keyPath, superseded] of Object.entries(SUPERSEDED_DEFAULTS)) {
+    const value = getPath(fileValues, keyPath);
+    const now = getPath(DEFAULT_CONFIG, keyPath);
+    if (value === undefined || value === now || !superseded.includes(value)) continue;
+    out.push({ key: keyPath, value, now });
+  }
+  return out;
+}
+
 function getPath(obj, keyPath) {
   return keyPath.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
 }
@@ -485,12 +551,17 @@ export function loadConfig({ env = process.env, home = os.homedir(), platform = 
   const config = clone(DEFAULT_CONFIG);
   const file = configPath(env, home);
   let exists = false;
+  let fileValues = null;
   try {
     const text = fs.readFileSync(file, 'utf8');
     exists = true;
     const parsed = JSON.parse(text);
-    if (isPlainObject(parsed)) merge(config, parsed, warnings);
-    else warnings.push(`${file} must contain a JSON object`);
+    if (isPlainObject(parsed)) {
+      merge(config, parsed, warnings);
+      // Kept unmerged so `staleDefaults` can tell what the file actually says
+      // from what the defaults filled in.
+      fileValues = parsed;
+    } else warnings.push(`${file} must contain a JSON object`);
   } catch (err) {
     if (err.code !== 'ENOENT') warnings.push(`could not read ${file}: ${err.message}`);
   }
@@ -516,7 +587,7 @@ export function loadConfig({ env = process.env, home = os.homedir(), platform = 
   // The hook runner caps the review deadline so it always answers inside the hook timeout.
   const cap = Number(env.AUTOAGY_REVIEW_TIMEOUT_CAP);
   if (Number.isFinite(cap) && cap > 0) config.reviewer.timeoutSec = Math.min(config.reviewer.timeoutSec, cap);
-  return { config, warnings, path: file, exists, resolved };
+  return { config, warnings, path: file, exists, resolved, fileValues };
 }
 
 /** The default config file written by `autoagy setup`. */

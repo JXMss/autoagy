@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { loadConfig, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
+import { loadConfig, staleDefaults, autoagyHome as resolveAutoagyHome, configPath } from '../lib/config.mjs';
 import { HookContext, PLUGIN_DIR, detectSandbox, resolveReviewerCommand, protectedPathShapes } from '../lib/context.mjs';
 import { findExecutable, globToRegExp } from '../lib/paths.mjs';
 import { detectOwnSandbox, readSandboxCheck, envBinaryPath, removeControlPlaceholders, lockQuiescent, flockPath, sandboxStartCheck, ownSandboxPossible } from '../lib/confine.mjs';
@@ -315,7 +315,7 @@ function status() {
   // `userHome` (not `home`) so a later call cannot silently take the user's
   // home directory where the configuration directory is meant.
   const { env, home: userHome, autoagyHome, pins } = managementContext();
-  const { config, warnings, path: cfgPath, exists, resolved } = loadConfig({ env, home: userHome });
+  const { config, warnings, path: cfgPath, exists, resolved, fileValues } = loadConfig({ env, home: userHome });
   // What the two "auto" settings came to on this machine, for every line below
   // that reports a grant — including whether one in the settings file is stale.
   const possible = ownSandboxPossible(config, autoagyHome);
@@ -361,7 +361,7 @@ function status() {
   }
   lines.push(`  mode            ${config.mode}${config.mode === 'auto' ? ' (Approve for me: risky actions go to the reviewer model)' : config.mode === 'ask' ? ' (risky actions prompt you)' : ' (no review; sandbox escapes, MCP and browser actions prompt you)'}`);
   const model = config.reviewer.backend === 'agy' ? config.reviewer.agy.model ?? '(your default agy model)' : config.reviewer.openai.model;
-  lines.push(`  reviewer        ${config.reviewer.backend}${config.reviewer.backend === 'none' ? '' : `, model ${model}, ${config.reviewer.timeoutSec}s deadline`}`);
+  lines.push(`  reviewer        ${config.reviewer.backend}${config.reviewer.backend === 'none' ? '' : `, model ${model}, ${config.reviewer.timeoutSec}s deadline (${Math.min(config.reviewer.attemptTimeoutSec, config.reviewer.timeoutSec)}s per attempt, up to ${config.reviewer.maxAttempts})`}`);
   if (config.reviewer.backend === 'openai') {
     lines.push(`  api key         ${config.reviewer.openai.apiKeyEnv} ${process.env[config.reviewer.openai.apiKeyEnv] ? 'is set' : 'is NOT set'}`);
   }
@@ -555,6 +555,11 @@ function status() {
     }
   }
   for (const w of warnings) lines.push(`  ! config: ${w}`);
+  // `setup` writes the whole template, so a default that changed later is still
+  // pinned in the file; the value is the user's to change, so this only says so.
+  for (const s of staleDefaults(fileValues)) {
+    lines.push(`  ! config: ${s.key} is ${JSON.stringify(s.value)} in your file, which was the old default; it is now ${JSON.stringify(s.now)}. Delete the key to follow the default.`);
+  }
 
   const settingsFile = cliSettingsPath(userHome);
   const settings = readJsonQuiet(settingsFile);

@@ -1068,12 +1068,22 @@ function classifyCommand(ctx, state = {}) {
   if (rules.decision === 'allow' && !selfNote && !credential && !envExposure && !planted && !protectedHit) return allow('rule-allow', describeRule(rules.rule));
 
   if (bypass) {
+    // The binary matters most here, where nothing confines what it does: a
+    // `python3` or `git` that resolves into a directory the agent can write runs
+    // outside every sandbox, with the environment agy was started with. The same
+    // check below only ran on the no-sandbox known-safe path, so the escalations
+    // that need it most — measured 2026-09-23: 9 `[bypass] python3 …` in one day
+    // — were reviewed without it being mentioned.
+    const shadowed = executableFromWritableRoot(ctx, analysis);
+    const shadowNote = shadowed
+      ? ` The file that would run is ${shadowed}, inside a directory the agent can write, and outside the sandbox nothing confines it.`
+      : '';
     // `plantedNote` belongs here most of all: leaving the sandbox is how a hook
     // planted in a nested repository gets to run at all, and `git commit` with a
     // `Cwd` inside it names nothing the reviewer could connect on its own.
     return review(
       'sandbox-escalation',
-      `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}${credentialNote}${envNote}${plantedNote}`,
+      `The agent asked to run this command outside the terminal sandbox (BypassSandbox: true).${selfNote}${credentialNote}${envNote}${shadowNote}${plantedNote}`,
     );
   }
   // The sandbox may mount the conversation's artifact directory writable, so

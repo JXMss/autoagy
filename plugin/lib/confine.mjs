@@ -382,6 +382,48 @@ export function scrubbedCommandLine(ctx, commandLine) {
   return `${parts.join(' ')} ${quote(shellPath())} -c ${quote(commandLine)}`;
 }
 
+/**
+ * The daemon sockets this sandbox masks, at the real path and only when they
+ * exist.
+ *
+ * `--unshare-net` covers the network and the seccomp filter allows `AF_UNIX`,
+ * because a command legitimately talks to a local socket. A container or VM
+ * daemon behind one of these takes a request and runs it *outside* the sandbox
+ * as root — `docker run -v /:/host` is a complete escape — so the socket is a
+ * hole of a different kind from a credential file.
+ *
+ * Measured 2026-09-23 on the real install: `docker ps` inside the sandbox
+ * already failed with "permission denied while trying to connect", because bwrap
+ * drops supplementary groups in the user namespace, so the `660 root:docker`
+ * socket cannot be opened. That is a side effect of the namespace, not a
+ * decision: a socket with looser permissions (`666`, or a daemon running as the
+ * user) would have been reachable. Masked with `/dev/null` the answer becomes
+ * "Is the docker daemon running?" whatever the mode bits say (measured on bwrap
+ * 0.9.0; the bind needs the real path, since `/var/run` is a symlink to `/run`).
+ *
+ * Not masked: the session and system D-Bus. A privileged D-Bus service is the
+ * same class of hole, and blocking it breaks ordinary desktop tooling, so it is
+ * recorded in docs/open-issues.md instead of guessed at here.
+ *
+ * @returns {string[]} existing socket paths, symlinks resolved
+ */
+export function privilegedSocketPaths() {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const candidates = [
+    '/run/docker.sock',
+    '/var/run/docker.sock',
+    '/run/podman/podman.sock',
+    '/run/containerd/containerd.sock',
+    '/run/crio/crio.sock',
+    '/run/libvirt/libvirt-sock',
+    '/run/libvirt/libvirt-sock-ro',
+    '/var/run/libvirt/libvirt-sock',
+    '/run/systemd/private',
+    ...(uid === null ? [] : [`/run/user/${uid}/podman/podman.sock`, `/run/user/${uid}/docker.sock`]),
+  ];
+  return uniquePaths(candidates.map(resolveReal).filter((p) => fs.existsSync(p)));
+}
+
 /** Paths that stay read-only inside the sandbox even when they lie in a writable root. */
 export function readOnlyPaths(ctx) {
   const logs = [ctx.artifactDir ? path.join(ctx.artifactDir, '.system_generated') : null, ctx.transcriptPath ? path.dirname(ctx.transcriptPath) : null];
@@ -587,6 +629,10 @@ export function confinedCommandLine(ctx, commandLine, { placeholders } = {}) {
       // gone since it was listed
     }
   }
+  // Sockets that hand out work to a privileged daemon: reaching one is a way out
+  // of this sandbox, not a credential read, so they are masked whether or not
+  // they look readable.
+  for (const p of privilegedSocketPaths()) args.push('--ro-bind', '/dev/null', p);
   // --clearenv must come before every --setenv, or it clears the values back
   // out again. The mounts above are already in place; the environment comes last
   // so the ordering is visible in one place.
