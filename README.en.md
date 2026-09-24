@@ -251,6 +251,10 @@ autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandb
 
 ## What it does not protect against
 
+These are the boundaries the design has. Things that are not finished yet, and
+meant to be fixed, are listed in [docs/open-issues.md](docs/open-issues.md)
+(Chinese, like the design notes).
+
 These are documented, accepted limits — the full reasoning is in the
 [design record](docs/design.md):
 
