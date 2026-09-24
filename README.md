@@ -2,6 +2,8 @@
 
 [English](README.en.md) ｜ [设计依据与实测记录](docs/design.md)
 
+> 感谢 [LinuxDo](https://linux.do) 社区的支持。
+
 autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 OpenAI Codex 的 **“Approve for me”（auto-review）** 模式实现了 Antigravity 的 auto 模式：
 
 - 安全的操作（读文件、改工作区内的文件、在终端沙箱里跑命令……）**直接执行**，不打断你；
@@ -178,10 +180,6 @@ scripts/install.mjs      安装/卸载
 test/                    node:test 测试
 docs/design.md           调研记录、实测的 Antigravity 行为、与 Codex 的差异
 ```
-
-## 致谢
-
-感谢 [LinuxDo](https://linux.do) 社区的支持。
 
 ## 许可
 

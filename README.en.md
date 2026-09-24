@@ -2,6 +2,8 @@
 
 [中文完整版 README.md](README.md) ｜ [设计依据与实测记录 docs/design.md](docs/design.md)
 
+> Thanks to the [LinuxDo](https://linux.do) community for their support.
+
 autoagy is a [Google Antigravity](https://antigravity.google) plugin that
 implements Codex's **"Approve for me"** (auto-review) mode:
 
@@ -300,10 +302,6 @@ real autoagy install exists — that is CI's case, and CI enforces the zero, bec
 a skipped sandbox test means the sandbox was never started while the run still
 looks green. On a machine that does have one, `status.test.mjs` skips a single
 test rather than writing over it.
-
-## Acknowledgements
-
-Thanks to the [LinuxDo](https://linux.do) community for their support.
 
 ## License
 
