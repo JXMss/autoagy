@@ -16,7 +16,7 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 
 | Codex “Approve for me” | autoagy |
 | --- | --- |
-| workspace-write 沙箱内的命令直接运行 | Linux 上在 autoagy 自己的 bubblewrap 沙箱里直接运行（规则同 workspace-write，见下文）；否则在 Antigravity 终端沙箱里运行 |
+| workspace-write 沙箱内的命令直接运行 | Linux 上在 autoagy 自己的 bubblewrap 沙箱里直接运行（规则同 workspace-write，[细节见参考手册](docs/reference.md#autoagy-自己的沙箱)）；否则在 Antigravity 终端沙箱里运行 |
 | `sandbox_permissions: require_escalated` 走审核 | `BypassSandbox: true` 走审核 |
 | 强制 `rm`（含 `sudo`/`env`/`bash -c` 嵌套）走审核 | 同左，另加破坏性 git 命令（Antigravity 沙箱不保护 `.git`） |
 | `apply_patch` 只写可写根目录则放行，`.git/.agents/.codex` 只读 | 编辑工具同理；`.git/.agents/.gemini`、`~/.gemini` 等需审核。autoagy 自己的沙箱里 shell 命令对这些目录同样只读 |
@@ -24,22 +24,26 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 | execpolicy `prefix_rule` allow/prompt/forbidden | `rules` 配置，语义相同 |
 | guardian：策略 prompt + 精简 transcript + planned action JSON | 同左（策略文本改编自 Codex，transcript 预算与选取规则相同） |
 | 输出 `{risk_level, user_authorization, outcome, rationale}` | 同左 |
-| 90 秒期限、最多 3 次尝试、出错即拒绝（fail closed） | 同左 |
+| 90 秒期限、最多 3 次尝试、出错即拒绝（fail closed） | 90 秒是**单次**尝试的期限，整次审核 140 秒（卡住的那次会被杀掉重问）；出错即拒绝同左 |
 | 拒绝/超时时给 agent 的指令 | 原文照搬 |
 | 同一轮连续 3 次或最近 50 次中 10 次被拒 → 中断本轮 | 同左（PostInvocation hook 终止循环） |
 | “Auto-review Denials” 面板手动放行一次 | `autoagy denials` + `autoagy approve <id>`，或直接在对话里明确同意 |
 
-## 安装
+## 装它之前要知道的
 
-> **装它之前要知道的一件事。** autoagy 要向 Antigravity 申请几条长期授权——命令（Linux 上默认只授权一个执行器程序，其他平台是 `command(*)`）、`mcp(*)`、`execute_url(*)`，再加上免得读取和抓取弹窗的 `read_file(/)` 与（自带沙箱能跑时的）`read_url(*)`——之后 hook 就是唯一的闸门。这些授权**不会跟着插件一起消失**：插件被 `agy plugin disable`、被 `agy plugin install` 用未钉住的 `hooks.json` 覆盖、或者根本没装到 agy 加载插件的位置，授权都还在。所以 `setup` 写授权的同时，会在 `~/.gemini/config/hooks.json` 里登记一个**哨兵**（键名 `autoagy-tripwire`）。这个文件不归 `agy plugin` 管，上面几种情况下它照样运行（agy 1.2.7 CLI 实测）；它发现插件不在、被停用或没钉住时，**拒绝每一次工具调用**，而不是让授权在没人审的情况下生效。钉住的解释器失效时，hook 本身跑不起来，工具调用同样失败。所以在 CLI 上这几种失效是 **fail-closed** 的——代价是发生时 agy 什么都做不了，直到你处理。
->
-> **如果 agy 突然什么工具都用不了**，提示里说 autoagy 没在审核：按提示跑 `autoagy status`，然后重装（`node scripts/install.mjs`）或卸载（`node scripts/install.mjs --uninstall`）。连这些命令都跑不了时，**不需要任何命令的出路**是删掉 `~/.gemini/config/hooks.json` 里 `autoagy-tripwire` 这一个键——同一个文件里别的键属于别人，别动。删掉之后授权重新无人把守，所以要紧接着卸载或重装。
->
-> 仍然 fail-open 的只剩两种：哨兵被人删掉而授权还在；以及 Antigravity IDE／2.0——那里的授权是你在设置界面里手动加的，`setup` 不写它们、也不为它们登记哨兵（IDE 是否加载这个文件也没有实测过）。
->
-> **命令这一类可以收窄。** 把 `commandGrant` 设成 `"executor"` 之后，授权从 `command(*)` 变成 `command(<~/.gemini/autoagy/bin/exec-confined.mjs>)`——一个只会兑换 hook 写下的一次性令牌的程序。hook 不跑了就没人写令牌，那条授权拿在手里也没用，**命令这一类因此是 fail-closed 的**。详见下文配置表。`mcp(*)` 和 `execute_url(*)` 没有对应的收窄办法（它们不是命令），那两类只靠哨兵兜底。
->
-> 这跟 Codex 的形状仍然不同：Codex 本来不需要放宽任何宿主权限，关掉 auto 模式就回到更严格的状态；autoagy 需要先放宽宿主权限，所以「插件还在不在」这件事本身得有东西盯着——哨兵就是它。`autoagy status` 会报哨兵在不在，以及「hooks 最后一次运行」的时间。彻底的解法是不授予这三条通配，代价是 autoagy 大部分能力失效。
+**它会向 Antigravity 申请几条长期授权**——命令（Linux 上默认只授权一个一次性令牌的执行器，其他平台是 `command(*)`）、`mcp(*)`、`execute_url(*)`，加上免得读取和抓取弹窗的 `read_file(/)` 与 `read_url(*)`。之后 hook 就是唯一的闸门，而**这些授权不会跟着插件一起消失**。
+
+**所以 `setup` 同时在 `~/.gemini/config/hooks.json` 里登记一个哨兵**（键名 `autoagy-tripwire`）。那个文件不归 `agy plugin` 管，所以插件被停用、被覆盖、或根本没装到位时它照样运行——发现插件不在，它**拒绝每一次工具调用**。宁可让 agy 全面罢工，也不让那几条授权在没人审的情况下生效。
+
+**agy 突然什么都干不了时的出路**：跑 `autoagy status`，然后重装（`node scripts/install.mjs`）或卸载（`node scripts/install.mjs --uninstall`）。连命令都跑不了，就删掉 `~/.gemini/config/hooks.json` 里 `autoagy-tripwire` 这**一个**键——同一个文件里别的键是别人的，别动；删完紧接着卸载或重装，因为授权此刻又没人把守了。
+
+**仍然 fail-open 的只剩两种**：哨兵被人手动删掉而授权还在；以及 Antigravity IDE／2.0——那里的授权是你在设置界面手动加的，`setup` 不写、也不为它们登记哨兵。
+
+命令这一类可以收窄成 fail-closed（`commandGrant: "executor"`，Linux 默认就是），`mcp(*)` 和 `execute_url(*)` 没有对应办法，只靠哨兵兜着。完整清单见[参考手册](docs/reference.md#安装到底改了你机器上的什么)。
+
+**这跟 Codex 的形状确实不同**：Codex 不需要放宽任何宿主权限，关掉 auto 模式就回到更严格的状态；autoagy 必须先放宽，所以「插件还在不在」这件事本身需要有东西盯着——哨兵就是它，`autoagy status` 会报它在不在、以及 hook 最后一次运行的时间。彻底的解法是不授予这几条通配，代价是 autoagy 大部分能力失效。
+
+## 安装、卸载、升级
 
 要求：Node.js ≥ 20，Antigravity CLI（`agy`）≥ 1.2。
 
@@ -50,34 +54,31 @@ node scripts/install.mjs            # 先看会改什么：node scripts/install.
 
 **用 `node scripts/install.mjs`，不要只跑 `autoagy setup`。** 两者不是一回事：`setup` 只改 Antigravity 的设置（写那三条授权、钉住配置目录），它**不会把插件装到 agy 会加载的位置**。只跑 `setup` 的结果是三条授权生效、而一个 hook 都不会运行——正是本节开头那条 fail-open，自己造出来的。真发生了也能兜住：`setup` 写授权的同时一定会装哨兵，而哨兵盯的是 `~/.gemini/config/plugins/autoagy`（agy 唯一加载插件 hook 的位置），插件不在那儿就拒绝一切工具调用；`autoagy status` 也会在第一行喊出来。补救是 `agy plugin install ./plugin` 然后重跑 `autoagy setup`，或者 `autoagy teardown` 把授权收回去。
 
-安装脚本会：
-
-1. `agy plugin install ./plugin`，插件装到 `~/.gemini/config/plugins/autoagy`；
-2. 在插件的 `hooks.json` 里把 `node` 固定为当前 Node 的绝对路径（避免 Antigravity 找不到 node 导致所有工具调用失败）；
-3. 创建 `~/.gemini/autoagy/config.json`；
-4. 修改 `~/.gemini/antigravity-cli/settings.json`（先备份）：
-   - `permissions.allow` 加入命令授权（`commandGrant` 默认 `"auto"`：Linux 上是只认一次性令牌的执行器 `command(<执行器>)`，其他平台是 `command(*)`）、`mcp(*)`、`execute_url(*)`——否则被 autoagy 批准的操作仍会被 Antigravity 自己再弹窗；自带沙箱能跑时还有 `read_url(*)`（`networkGrants` 默认 `"auto"`，见配置表），抓网页不再弹窗、每次仍先送审；
-   - 还有 `read_file(/)`：下面那条 `allowNonWorkspaceAccess: false` 同时也拦**读取**（实测：读 `/etc/hostname` 会弹「outside workspace」），没有这条，读项目外的任何文件（依赖库源码、系统头文件）都会弹窗。Codex 本来就能读全盘；读凭据（`~/.ssh`、`.env` 等）autoagy 仍会先送审。不想要就设 `readGrant: "none"`；
-   - 确保 `enableTerminalSandbox: true`、`toolPermission: "proceed-in-sandbox"`；
-   - 设 `allowNonWorkspaceAccess: false`——这是**唯一一道在写入那一刻生效**的检查（agy 会跟着符号链接判落点），堵的是「autoagy 检查完、agy 落笔前路径被换掉」那条缝。`writableRoots` 里列的目录会各自拿到一条 `write_file(<目录>)` 授权，照常免审编辑；没事先声明的临时区外编辑则会多一次确认（headless 下失败）。agy 保存设置时会把值为 `false` 的这一项删掉（比如你信任一个新目录时），而**没写就等于 `false`**（agy 1.2.7 实测），所以文件里看不到它是正常的，`autoagy status` 会显示 `false (not in the file…)`。只有原来是 `true` 时 setup 才会改它，卸载时再改回去。
-5. 在 `~/.gemini/config/hooks.json` 里登记哨兵，并把它的程序装到 `~/.gemini/autoagy/bin/tripwire.mjs`（见本节开头）。这是 `agy plugin` 之外、你自己的文件；登记是合并进去的，里面原有的 hook 不动，文件读不懂时 `setup` 整个停下、一条授权也不写；
-6. `commandGrant: "executor"` 时，把执行器装到 `~/.gemini/autoagy/bin/exec-confined.mjs`。
-
-**永不授予 `read_url(*)`**：Antigravity 会把 `read_url` 规则同时当作终端沙箱的网络白名单，授予后沙箱内未经审核的命令就能访问任意网络（等于关掉 Codex 的“沙箱无网络”这一层）。这条通配符授权不会由任何配置生成。
-
-**但逐个域名可以选择授予**：`networkGrants: "trusted-domains"` 会让 `autoagy setup` 为 `trustedDomains` 里每一项写一条 `read_url(<域名>)`。这是为了消掉**唯一一个 autoagy 答不了的弹窗**——hook 返回 `allow` 盖不过 Antigravity 自己对未授权域名的权限询问（实测），所以第一次抓取任何一个新域名都会问到你。代价取决于哪个沙箱在跑：**autoagy 自己的沙箱生效时代价为零**（那里根本没有网络：`--unshare-net`，而且 seccomp 只允许 AF_UNIX socket，被授权的域名在沙箱里照样访问不到，白名单管的是 agy 的终端沙箱——而改写正是把命令从那个沙箱里搬出来）；**没有它的时候**（macOS、Windows、没装 bubblewrap、`ownSandbox: "off"`），沙箱内未经审核的命令就能访问这几个域名——这正是 Codex 网络白名单的形状，不是对它的背离。条目按原样取（去掉开头的 `*.`），**去掉之后仍含通配符的条目会被跳过并在 `autoagy status` 里点名**，不会被放宽成一条更大的规则。默认 `"none"`，也就是今天的行为。
-
-卸载（还原上面的设置改动并移除插件）：
+卸载（还原下面列出的全部改动并移除插件）：
 
 ```bash
-node scripts/install.mjs --uninstall          # 加 --purge 同时删除 ~/.gemini/autoagy
+node scripts/install.mjs --uninstall            # 加 --purge 同时删掉 ~/.gemini/autoagy（配置、状态、日志）
+node scripts/install.mjs --uninstall --dry-run  # 只打印会撤掉什么，什么都不动
 ```
 
 卸载先撤授权，撤成功了才拆别的。撤不回来的时候（通常是 `settings.json` 不是合法 JSON）它会整个停下、退出码 1：插件、哨兵和 setup 记录都原样保留——它们正是站在那几条授权后面的东西，而 setup 记录是日后还能撤回授权的唯一依据，`--purge` 也不例外。修好文件再跑一次即可。`autoagy teardown` 同理。
 
 > 注意：不要用 `agy plugin disable autoagy` 来暂停。授权不会跟着消失，所以哨兵会因此拒绝**每一次**工具调用——这是故意的，否则绕过沙箱的命令、MCP 调用和浏览器操作会不经审核、也不弹窗直接执行。要暂停用 `autoagy mode off`（此时这三类操作会改为弹窗问你；但如果 agy 是用 `--dangerously-skip-permissions` 启动的，弹窗会被自动同意，所以那种情况下改为直接拒绝），或用 `--uninstall` 彻底卸载。
 
-**Antigravity IDE / Antigravity 2.0**：插件格式相同，但权限在设置界面里（Settings → Permission Grants）。请手动加上同样三条授权并保持终端沙箱开启，然后在 `config.json` 里设 `"sandbox": "on"`（autoagy 只能自动识别 CLI 的沙箱设置）。这是一句声明，不是观测：能观测到 `--dangerously-skip-permissions` 时（它会让 Antigravity 的沙箱失效），以那个标志为准。
+**升级**：`git pull` 之后再跑一次 `node scripts/install.mjs`。agy 没有插件更新命令（`agy plugin` 只有 `install`／`uninstall`／`enable`／`disable`／`validate` 这些），所以**任何** agy 插件都不会自己更新，autoagy 也一样。别直接用 `agy plugin install ./plugin` 升级：那样会用插件自带的、没钉住解释器的 `hooks.json` 覆盖掉已装的那份，`autoagy status` 会就此告警。
+
+它在你机器上改了哪些文件、写了哪几条授权，逐项列在[参考手册](docs/reference.md#安装到底改了你机器上的什么)；`node scripts/install.mjs --dry-run` 会先把要改的东西打印出来。
+
+## 平台支持
+
+| 平台 | 自带沙箱 | 实际形态 |
+| --- | --- | --- |
+| **Linux + bubblewrap** | 有 | 主要目标。命令在 autoagy 自己的 bwrap 沙箱里跑：工作区和临时目录可写，`.git` 与 agent 元数据只读，凭据位置被遮盖，**没有网络**，环境按白名单重建，socket 只放 AF_UNIX。 |
+| **Linux 无 bubblewrap、macOS** | 没有 | 命令留在 Antigravity 的终端沙箱里。那里 `.git` 和会话日志**可写**，所以一条命令可以植 git hook 或改审核要读的 transcript；审核模型会被告知这份 transcript 里的用户消息不可信。 |
+| **Windows** | 没有 | 另外也没法清理环境（没有 `env -i`），沙箱状态推断不出来，弹窗也到不了你——所以几乎每条命令都会送审，该弹窗的地方直接变成拒绝。能用，但很重。 |
+| **IDE / Antigravity 2.0** | 你自己定 | 手动加那几条授权、保持终端沙箱开着，然后在配置里写 `"sandbox": "on"`。那是一句声明，不是观测。 |
+
+macOS 是最大的缺口：Codex 在那儿用 seatbelt 沙箱解决同一个问题，autoagy 还没有对应实现。
 
 ## 使用
 
@@ -94,7 +95,7 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 | `autoagy stats [--days 7]` | 把决策日志汇总成数字：审核次数与结果（通过/拒绝/失败/超时）、审核耗时 p50/p90/最大值与总计、风险分布、按类别与工具的次数。**免审放行的操作默认不记**（`log.allowed` 打开后每个工具调用一行），所以那一栏会显示 `0` 并说明原因——这是刻意分开的两件事：`allow` 里既有"审核后放行"也有"根本不用审核" |
 | `autoagy denials` | 最近被拒绝的操作及理由 |
 | `autoagy approve <id>` | 对某次拒绝放行**一次重试**（审核模型会看到你的批准；critical 风险仍会拒绝） |
-| `autoagy trust [<会话>] [--all] [--force]` | 解除会话的标记（见下文「会话信任」）、清除嵌套仓库的 hook 植入记录，并释放为它保留的只读挂载点。不带参数时只列出被标记的会话。执行前它自己会先查一次工作区锁：还有命令在跑就拒绝，`--force` 才强行释放 |
+| `autoagy trust [<会话>] [--all] [--force]` | 解除会话的标记（[会话信任](docs/reference.md#会话信任)）、清除嵌套仓库的 hook 植入记录，并释放为它保留的只读挂载点。不带参数时只列出被标记的会话。执行前它自己会先查一次工作区锁：还有命令在跑就拒绝，`--force` 才强行释放 |
 | `autoagy mode auto\|ask\|off` | `auto`=审核模型裁决；`ask`=有风险的操作弹窗问你（相当于 Codex “Ask for approval”）；`off`=不审核；上述授权覆盖的操作（绕过沙箱的命令、MCP、浏览器操作）改为弹窗问你，其余交给 Antigravity 自己的权限流程。`off` 下弹窗在 `--dangerously-skip-permissions` 里会被自动同意，所以那个模式下改为直接拒绝；不可信会话的编辑和读取也照常弹窗 |
 | `autoagy review --tool run_command --args '{"CommandLine":"...","BypassSandbox":true}'` | 不启动 agent，直接测试某个操作会被怎么判 |
 | `autoagy mcp-scan [--timeout 10]` | 逐个启动配置里的 MCP 服务器，问它 `tools/list`，把每个工具的只读/破坏性注解记成快照（配合 `mcp.annotations: "trust"`）。会逐条打印哪个工具声明了什么、以及连不上的服务器 |
@@ -102,50 +103,21 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 
 被拒绝时，agent 会收到 Codex 的原文指令（不得绕过；只能换更安全的做法，或向你说明风险并请求明确批准）。如果你确认要做，直接在对话里说明“我确认要执行 xxx”，下一次审核会把你的明确批准计入（Codex 的 post-denial approval 规则）。
 
-## autoagy 自己的沙箱（Linux）
+## 配置（`~/.gemini/autoagy/config.json`）
 
-Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写本会话的对话日志 `brain/<id>/.system_generated/logs/`（agy 1.2.6 实测）。前者让沙箱内的命令可以植入 git hook，等到下次在沙箱外运行 git 时执行；后者让它可以伪造 transcript，而审核模型正是从 transcript 里判断用户授权的。Codex 的沙箱把 `.git` 设为只读，所以没有这个问题。
+改完下一次工具调用就生效。下面是最常改的几项，[全表在参考手册](docs/reference.md#配置全表)（含 `rules`、`protectedPaths`、`credentialPaths`、`writableRoots`、MCP、浏览器、环境清理等三十多项）。
 
-因此在 Linux 上，autoagy 改用自己的 [bubblewrap](https://github.com/containers/bubblewrap) 沙箱：agent 没有请求绕过沙箱的命令，会被 hook 的 `overwrite` 改写成在 bwrap 里运行。在 Antigravity 看来这是一条 `BypassSandbox` 命令，所以需要 setup 加的 `command(*)` 授权。沙箱规则与 Codex 的 workspace-write 相同：
-
-- 可写：工作区、临时目录、本会话的 artifact 和 scratch 目录、`writableRoots`；
-- 只读：其余所有路径，其中包括工作区里的 `.git`、`.agents`、`.gemini` 等目录，autoagy 自己的目录，以及对话日志；**工作区里嵌套仓库（submodule、vendored checkout）的 `.git` 同样只读**——植在那里的 hook 会被下一条在那个目录里运行的 git 命令执行，而写操作的 git 命令必须离开沙箱才能成功，也就是在沙箱外执行。查找是有预算的广度优先扫描（最深 5 层、最多 1500 个目录、**最多 0.5 秒**，跳过 `node_modules`、`target`、`.venv` 等），埋得更深的仓库找不到——找不到只是回到没有这条之前的状态，不会影响其它保护。多出来的那道**时间**预算是有理由的：目录数说不了一次扫描要多久——在 `/mnt` 这类 9p 挂载上（实测）一次 `readdir` 要 2.4～3.6ms，ext4 上只要 0.01ms——而每条沙箱命令要付两次这样的扫描（PreToolUse 的挂载表、PostToolUse 的植入检查），于是同一个仓库在这两种盘上是「每条命令等 8 秒」和「等 0.05 秒」的区别，而后者的看门狗只有 10 秒：走不完不是变慢，是自检整条不跑。所以慢盘上扫描会**更早截断**（实测：三个真实仓库各走 ~200 个目录、0.5 秒），这也意味着那台机器上嵌套 `.git` 的保护范围比 ext4 上小——**`autoagy status` 会报最近一次扫描走了多少个目录、有没有截断**，所以这件事在你自己的机器上是看得见的，不用从文档里推；但**命令自己造出来的 `.git` 挂不上**：`--ro-bind-try` 会跳过构建命令行时还不存在的路径，而占位机制只覆盖顶层那几个名字，所以那一步只能事后发现。命令跑完后若出现新的嵌套 `.git` 且里面有会执行的东西——`hooks/` 下非 `.sample` 的文件，或 `config` 里让 git 执行命令的键（`hooksPath`、`sshCommand`、`pager`、`helper`、`clean`/`smudge`、`textconv`、`templateDir`……一整套，记录里写出命中的是哪个键），或 `[alias]`、`[include]`、`[includeIf]` 这几个 section（`[include]` 会让 git 去读另一个**不在 `.git` 里**的配置文件，所以按键列举追不上它）——就记一条 `planted-git-hook`、在 stderr 上告警，并且**之后触碰那个仓库的命令一律送审**（审核材料里带上 hook 内容），直到 `autoagy trust`。只看 `git init` 留下的空仓库是有意的：造仓库是日常操作，而合法的 husky／pre-commit／lefthook 安装在新造的嵌套仓库里与植入是同一个形状——这正是响应是"送审"而不是"把整个会话标记为不可信"的原因。
-- 所有挂载都按路径**真正的落点**挂：`~/.gemini` 放在 dotfiles 仓库里（stow、chezmoi 的常见布局）、工作区的 `.codex` 用绝对路径指到别处，这类符号链接在沙箱里照样通向同一个只读挂载，不论命令怎么拼写路径。（之前路径里任何一段是绝对符号链接，bwrap 都会在启动前失败，于是**每一条**沙箱命令都失败。）但符号链接这个目录项本身还在可写的工作区里：命令可以删掉它、换一个真目录上去，这一点与相对符号链接一样没有覆盖。`writableRoots` 里还不存在的目录，要等它建出来之后的下一条命令才开始保护其中的 `.git` 等名字；
-- 隐藏：`credentialPaths` 里以 `~/` 开头的凭据位置（`~/.ssh`、`~/.aws`、`~/.netrc`……）在沙箱里显示为空目录或空文件；
-- 无网络；`socket`/`socketpair` 只允许 `AF_UNIX`，建立和使用的调用（`connect`、`bind`、`listen`、`sendto`、`sendmsg`……）一律以 `EPERM` 失败，另外禁掉 `ptrace`、`process_vm_*`、`io_uring_*`（`--unshare-net` 只挡 IP 网络，挡不住文件系统上的 Unix socket）。x86-64 上带 bit 30 的系统调用号（x32 ABI）一并拒绝——`seccomp_data.arch` 区分不了这两个 ABI，只比系统调用号的表会被它整个绕过，实测 `socket(AF_INET)` 是 `EPERM` 而 `0x40000000|41` 返回了描述符；
-- 环境变量从白名单重建（`--clearenv` + `--setenv`）：`PATH`、`HOME`、`USER`、`LOGNAME`、`SHELL`、`TERM`、`TMPDIR`、`TZ`、`PWD`、`LANG` 和 `LC_*`，值原样传递。hook 继承的是 agy 的环境，里面通常有你 export 的 API key；不清理的话，沙箱里一条 `printenv` 就能读到它，而且这条命令是免审的。需要额外变量时用 `ownSandboxEnvPassThrough`（见下表）。
-
-  注意两点。一是这些变量（包括 `PATH` 和 `HOME`）的值会逐字写进改写后的命令行（`--setenv NAME VALUE`），而改写后的参数是 agent 能看到的内容，所以**白名单和 `ownSandboxEnvPassThrough` 里都不要放密钥**。二是 autoagy **不会**过滤 `PATH`：沙箱内工作区是可写且可执行的，命令本来就能按路径运行工作区里的任何文件，过滤 `PATH` 买不到任何隔离，只会让 `.venv/bin`、`node_modules/.bin` 里的工具找不到或用错解释器。真正危险的是**沙箱外**的命令通过工作区里的 `PATH` 目录解析到被改过的可执行文件——那条路会送审（见「已知限制」里的 `command-from-writable-root`）。
-
-  这个沙箱不生效时（macOS、Windows、没装 bwrap），命令拿到的就是 hook 继承来的那份环境——**注意 Antigravity 自己的终端沙箱并不清环境**，所以「有沙箱」不等于读不到。判据因此不是「有没有沙箱」，而是**这条命令的环境有没有被重建**：只有 autoagy 自己的沙箱（`--clearenv`）和 `commandEnv.mode: "scrub"`（`env -i`）会重建它。两者都不生效时，读环境按凭据读取处理，送审的有：`printenv`、裸 `env`、`ps` 和 `jq` 取环境的写法、`busybox <applet>` 形式的同一个命令、打印变量的 shell 内建（`export -p`、`declare -x`、裸 `set`、`compgen -e`，以及点名一个变量的 `declare -p NAME`）、解释器内联代码里读环境的写法（`node -e`／`python3 -c`／`ruby -e`／`perl -e`／`awk` 程序文本），以及**命令展开的任何 `$变量`，只要这个名字不在沙箱白名单里、而继承来的环境里确实有它**。所以 `$PATH`、`$HOME` 照常免审，循环里的 `$f` 这种不在环境里的名字也照常，`$OPENAI_API_KEY` 和 `$JAVA_HOME` 送审——判据就是「沙箱会不会把这个变量传进去」，`ownSandboxEnvPassThrough` 同时放宽两边。写环境不算读（`node -e "process.env.NODE_ENV='test'"` 放行）。这一份仍然是枚举出来的清单：动态拼出来的名字（`eval`、`base64 | sh`）、表里没列的语言、每个工具新增的取值方式都拦不住，见「已知限制」。
-
-工作区里还不存在的受保护目录（比如不是 git 仓库时的 `.git`）：`--ro-bind` 对不存在的路径会直接跳过，而工作区是可写的，沙箱里的命令本来可以把它建出来，等它被别的工具在沙箱外加载。所以这类路径会被就地挂一个只读空 tmpfs。副作用：命令执行的那一瞬间，工作区里会短暂出现一个空的 `.agents` 之类的目录（Codex 用同样的做法）。占位只覆盖顶层那几个名字；嵌套层没有可以提前挂载的目标（可能变成仓库的目录是无界的），走的是上面说的事后检测。
-
-  `writableRoots` 里声明的目录同样如此：那 8 个受保护名字（`.git`、`.agents`、`.agent`、`_agents`、`_agent`、`.gemini`、`.codex`、`.claude`）在声明根下也受保护（编辑工具与沙箱一致），所以它们在其中不存在时也会这样短暂出现——**一个不是 git 仓库的目录里冒出一个空的 `.git`** 是最显眼的一个，看见不必惊慌，命令结束就没了。这里的窗口比工作区略宽：声明根往往是别的进程也在用的目录（构建输出、共享的 checkout），命令执行期间若有东西写进占位目录，就是上面那条 `placeholder-dirty`（见「会话信任」，只有 PostToolUse 回收时才会标记会话）。
-
-每个受保护目录会被**挂两次**：先一个空的只读挂载，再一个指向真实目录的只读绑定（后挂的赢）。目录存在时按真实内容只读绑定，所以沙箱里 `.git` 照样能读；目录不存在（或在这条命令启动前被回收掉了）时那个绑定被跳过，空挂载留下。这一点是必须的——只挂一个绑定时，目录一旦在「构造命令行」和「bwrap 启动」之间消失，绑定会静默跳过，命令就会写进真实的受保护目录（实测过）。
-
-挂载点什么时候能回收，取决于**还有没有命令在跑**。autoagy 从不自己启动 bwrap（执行改写后命令行的是 agy），拿不到进程号，所以它让每条被改写的命令行自己持有证据：命令行最前面加一层 `flock -s <锁文件> <bwrap> …`，共享锁从 bwrap 启动一直持有到它退出，后台命令也一样。要回收挂载点时，autoagy 去抢排他锁——抢得到说明没有命令在跑，抢不到就保留。锁文件放在 `~/.gemini/autoagy/state/` 下（沙箱内是只读挂载，命令删不掉也重建不了，这是这个办法成立的前提）。
-
-在拿不到可信 `flock` 的主机上退回一个弱信号（`IsDaemon: true`、`Blocking: false`、正的 `WaitMsBeforeAsync`，或出现过终端类工具）：一旦出现，本会话的挂载点就保留到 `autoagy trust` 为止。`autoagy status` 会明确报告这种降级状态——`flock` 来自 util-linux，正常机器上都在，所以真碰上了值得看一眼。开新会话**不会**释放旧的——挂载点按会话记录，而删掉另一个会话的挂载点正是上面那条要避免的事。保留的代价只是工作区里多出一个空的 `.agents` 之类的目录；保护本身不丢，`autoagy status` 会列出这些会话。
-
-保留是刻意的，因为**提前回收会真的拆掉保护**：bwrap 把只读 tmpfs 挂在子进程自己的 mount namespace 里、挂在一个目录项上，而 `rmdir` 会把宿主上那个目录项摘掉——子进程里这条路径随之不再解析，而工作区根仍是可写的 bind，于是**还在运行的命令会重建这个目录，直接写到宿主上**。实测：不回收时 `mkdir .agents/hooks/pre-commit` 得到 `Read-only file system`；在命令还在跑时回收，同一条命令就在宿主上把文件建出来了。这正是占位机制要拦的那件事。
-
-（`--tmpfs` 挂到一个已被删掉的目录**不会**让 bwrap 失败：在工作区这种可写 bind 下 bwrap 会自己把挂载点建出来，实测退出码 0；只有父目录只读时才会 `Can't mkdir ... : Read-only file system` 退出 1。）
-
-如果回收时发现挂载点里**有东西**：bwrap 的 tmpfs 挂在子进程的 namespace 里，宿主上这个目录在命令期间应当是空的，所以有内容说明有东西绕过了挂载。autoagy 保留目录作为证据、记一条 `placeholder-dirty`、并在 stderr 上告警。**是否把会话标记为不可信取决于谁在回收**：只有 PostToolUse（刚跑完的确实是一条沙箱命令）才会标记；回合结束时的兜底清扫只记录，因为那时目录也可能是 agy 自己的编辑工具写进去的——它本来就写在所有沙箱之外，为一次已获批准的正常编辑把整个会话标黑是误报。
-
-`ownSandbox: "auto"`（默认）的启用条件：Linux；`/usr/bin/bwrap`（root 所有）存在且能创建沙箱，这需要非特权 user namespace；CLI 设置里有 `command(*)`。安装 bubblewrap：`sudo apt install bubblewrap`，或用发行版对应的包。`autoagy status` 会显示它是否生效。
-
-与 Antigravity 的沙箱相比，有这些变化：
-
-- 会写 `.git` 的 git 命令（`commit`、`checkout`、`stash`……）在沙箱里会失败，agent 需要加 `BypassSandbox: true` 重试并经过审核，这一点与 Codex 相同；
-- 沙箱里完全没有网络，`read_url(...)` 授权过的域名在沙箱里也访问不到（这正是 `networkGrants` 在这里代价为零的原因）；
-- agent 看到的工具结果前面会多一行 “A pre-tool hook changed the arguments of this tool call”。
-
-**自检**：这套做法依赖 agy 没有公开的行为，而 agy 会自动更新。所以每条被改写的命令执行后，autoagy 都会在 PostToolUse 里核对 agy 实际执行的参数。只要有一次对不上（比如更新后的 agy 不再执行改写），autoagy 就对这个 agy 版本停用自己的沙箱：`auto` 退回 Antigravity 的沙箱，`on` 改为把命令送审。同时会拒绝下一条命令一次，让 agent 告诉你发生了什么。agy 换了版本会重新检查。`autoagy status` 会显示自检结果。
-
-`ownSandbox: "on"`：不满足条件时不退回 Antigravity 的沙箱，而是把所有非只读命令送审。IDE 用户需要手动设为 `"on"`，因为 autoagy 读不到 IDE 的授权设置。`"off"`：不使用。
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `mode` | `"auto"` | `ask` 回到弹窗，`off` 全部暂停。 |
+| `ownSandbox` | `"auto"` | 自带沙箱。`"on"` 表示条件不满足时不退回 agy 的沙箱，而是把所有非只读命令送审（IDE 用户要手动设）。 |
+| `commandGrant` | `"auto"` | Linux 上是只认一次性令牌的执行器（命令这一类因此 fail-closed），其他平台是 `command(*)`。 |
+| `networkGrants` | `"auto"` | 自带沙箱能跑时写 `read_url(*)`，抓网页不再弹窗（每次仍先送审）；否则 `"none"`。 |
+| `readGrant` | `"anywhere"` | 写 `read_file(/)`，读项目外的文件不弹窗；凭据仍然先送审。 |
+| `reviewer.backend` | `"agy"` | `"openai"` 换任何 OpenAI 兼容接口，`"none"` 等于 `mode: "ask"`。 |
+| `reviewer.timeoutSec` / `attemptTimeoutSec` / `maxAttempts` | `140` / `90` / `3` | 整次审核期限、单次尝试期限、尝试次数。卡住的那次会被杀掉重问，期限用完才算超时（按 `onTimeout`，默认拒绝）。 |
+| `onDenied` / `onTimeout` / `onError` | 都是 `"deny"` | Codex 的行为。改成 `"ask"` 就把这一类交还给你决定。 |
+| `writableRoots` | `[]` | 工作区外可免审编辑的目录（改完要重跑 `autoagy setup`）。 |
 
 ## 审核后端
 
@@ -159,28 +131,7 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 
 `model` 填 `agy models` 输出的第一列（上面只是示例）；填错了每次审核都会失败，按拒绝处理。`effort` 可选 `low` / `medium` / `high`。
 
-也可以用任意 **OpenAI 兼容**接口（Chat Completions；更快，但按量付费），例如 Gemini：
-
-```json
-{
-  "reviewer": {
-    "backend": "openai",
-    "openai": {
-      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
-      "apiKeyEnv": "GEMINI_API_KEY",
-      "model": "gemini-flash-latest"
-    }
-  }
-}
-```
-
-OpenAI、DeepSeek 等同理，改 `baseUrl` / `apiKeyEnv` / `model` 即可。需要注意：
-
-- **密钥只从环境变量读，配置文件里只写变量名。** 读的是 hook 的环境，也就是 agy 启动时的环境，所以要在**启动 agy 的那个终端**里先 `export GEMINI_API_KEY=...`（或写进 shell 的启动文件），之后重启 agy。`autoagy status` 里的 `api key … is set`、以及 `autoagy review`，看的都是你运行它们的那个终端，不代表 agy 那边也有。这个变量在 autoagy 自己的沙箱里对命令不可见（环境会被清空）；没有自带沙箱时，读它的已知写法会送审，但拦不全，见「已知限制」。
-- 密钥没读到、地址不通或模型名写错时，每次审核都会失败并按拒绝处理；连续 3 次会中断本轮，agent 会让你去看 `autoagy status`。
-- 本地 Ollama：`baseUrl` 写 `http://localhost:11434/v1`。Ollama 不校验密钥，但 autoagy 总会带上 `Authorization` 头，所以 `apiKeyEnv` 指向的变量设成任意非空值即可。
-- 接口不支持 `response_format: {"type": "json_object"}` 时，把 `jsonMode` 设为 `false`；网关要求额外的请求头时写在 `headers` 里。
-- 每次审核发出去的内容见「隐私与数据流向」：只截断，不脱敏。
+也可以换成任何 **OpenAI 兼容**接口（Chat Completions，更快但按量付费，Gemini／OpenAI／DeepSeek／本地 Ollama 都行）：配置样例和注意事项（密钥只从环境变量读、失败按拒绝处理、`jsonMode`）在[参考手册](docs/reference.md#审核后端-openai-兼容接口)。
 
 配置改完，下一次工具调用就生效。想先试一下，可以不启动 agent，单独审一条命令：
 
@@ -188,133 +139,27 @@ OpenAI、DeepSeek 等同理，改 `baseUrl` / `apiKeyEnv` / `model` 即可。需
 autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandbox":true}'
 ```
 
-## 配置（`~/.gemini/autoagy/config.json`）
+## 决策规则与会话信任
 
-| 字段 | 默认 | 说明 |
-| --- | --- | --- |
-| `mode` | `"auto"` | `auto` / `ask` / `off` |
-| `sandbox` | `"auto"` | Antigravity 的沙箱是否真的隔离命令；`auto` 从 CLI 设置和启动参数判断，`on`/`off` 强制指定。没有沙箱时只有已知只读命令免审。**`on`/`off` 是用户的声明，不是探测结果**：IDE / Antigravity 2.0 用户探不到设置文件，只能自己声明（`autoagy status` 会把它标成 `(config)`，和探测出来的 `(settings)`、`(flag)` 区分开）。所以声明成 `on` 之前请确认那个沙箱真的开着——声明错了不会有人拦你 |
-| `commandGrant` | `"auto"` | `auto`（默认）：Linux 上等于 `executor`（真机实测过：命令、删除、`git commit` 都不弹窗），其他平台等于 `wildcard`——Windows 上执行器没法当程序运行，macOS 还没人试过，想试可以手动设 `executor`。自带沙箱的改写要离开 Antigravity 的沙箱，这需要一条 `command(...)` 授权。`wildcard` 给 `command(*)`——能跑任何东西，而且 **hook 停了它还在**（README 开头那条结构性风险就是它）。`executor` 改为只授权一个程序：`autoagy setup` 会把 `bin/exec-confined.mjs` 装进 `~/.gemini/autoagy/bin/`，改写后的调用变成 `<那个程序> <32 位令牌>`（路径不加引号：agy 按命令的字面文字匹配授权，带引号就对不上，真机实测每条命令都会弹窗），令牌由 hook 写进 `~/.gemini/autoagy/state/pending/`（沙箱外只读、`selfPaths` 拒绝编辑），一次性、五分钟过期、回合末清空。**没有 hook 就没有令牌，授权因此失效。** 换配置后要重跑 `autoagy setup`：它会把自己先前加的 `command(*)` 一并撤掉（你手写的授权它不碰）。注意这层保证依赖执行器本身不可被改写——`allowNonWorkspaceAccess: false` 时才完全成立，`status` 会在不成立时说出来。**升级命令也走令牌**：授权是**按命令内容匹配**的（实测 agy 1.2.7：只授予 `command(echo)` 时，带 `BypassSandbox` 的 `echo` 能跑，`whoami` 被拒），所以 agent 主动请求升级的 `git push` 原本匹配不上 `command(<执行器>)`——交互下每次弹窗，**headless 下直接拒绝、agent 根本无法升级**。现在审核模型批准的升级同样铸一个令牌、改写成兑换它，令牌里就是那条被批准的原始命令（不进沙箱，这正是"批准升级"的意思）。授权说的仍然是同一句话：唯一能跑的程序，只会兑换 hook 写下的那一行 |
-| `readGrant` | `"anywhere"` | `"anywhere"` 时 `autoagy setup` 写一条 `read_file(/)` 授权，读项目外的文件不再弹窗；写项目外的文件照旧要过 `allowNonWorkspaceAccess: false` 那道关。凭据读取在 agy 之前已由 autoagy 送审。autoagy 自己出错或超时时，读文件内容的操作一律拒绝，因为此时 agy 不会再问。`"none"`：不写这条，项目外的读取照 agy 的默认弹窗 |
-| `ownSandbox` | `"auto"` | autoagy 自己的 bubblewrap 沙箱（见上文）：`auto` 满足条件时启用，`on` 强制启用（不可用时命令送审），`off` 不使用 |
-| `reviewer.backend` | `"agy"` | `agy` / `openai` / `none`（`none` 等同 `ask`） |
-| `reviewer.timeoutSec` / `attemptTimeoutSec` / `maxAttempts` | `140` / `90` / `3` | 整次审核的期限、单次尝试的期限、尝试次数。Codex 的 90 秒在这里是**单次**预算：卡住的那次被杀掉后会重问（实测卡住后重问通常几秒就答），整个期限用完才算超时（按 `onTimeout` 处理，默认拒绝）。整次期限受 hook 自己的超时（`hooks.json` 里的 150 秒）封顶 |
-| `reviewer.agy.model` / `effort` | 默认模型 / `"low"` | 审核用的 agy 模型（`agy models` 的第一列）与推理强度（`low` / `medium` / `high`） |
-| `reviewer.openai.baseUrl` / `apiKeyEnv` / `model` | `https://api.openai.com/v1` / `OPENAI_API_KEY` / `gpt-5-mini` | `backend: "openai"` 时用的接口地址、存密钥的环境变量名、模型名，见「审核后端」 |
-| `reviewer.openai.headers` / `jsonMode` | `{}` / `true` | 额外请求头；是否要求接口按 JSON 格式回答（接口不支持时设为 `false`） |
-| `onDenied` / `onTimeout` / `onError` | `"deny"` | 改为 `"ask"` 时，审核拒绝/超时/出错会转为弹窗让你决定 |
-| `trustedDomains` | `localhost` 等 | **抓取**网页到这些域名（含子域名）免审 |
-| `networkGrants` | `"auto"` | `auto`（默认）：`autoagy setup` 时自带沙箱能跑（Linux、bubblewrap 能启动、`ownSandbox` 不是 `off`）就等于 `all`，否则等于 `none`。`"trusted-domains"` 时，`autoagy setup` 为 `trustedDomains` 每一项写一条 `read_url(<域名>)` 授权，于是这些域名的抓取不再由 Antigravity 弹窗询问（那是 hook 的 `allow` 盖不过去的唯一一类弹窗）。代价：`read_url` 规则同时是**终端沙箱**的出网白名单，所以在 autoagy 自己的沙箱**没有**生效的机器上（macOS、Windows、无 bwrap、`ownSandbox: "off"`），沙箱内免审的命令也能访问这些域名；自带沙箱生效时代价为零（那里没有网络）。`*.x.com` 按 `x.com` 授予；去掉 `*.` 后仍含通配符的条目跳过并在 `status` 里点名——`read_url(*)` 不会被生成。`"all"`：授予 `read_url(*)`，任何域名的抓取都不弹窗、仍先送审；它会让 agy 的终端沙箱能访问所有网站，所以授予后 autoagy 不再把 agy 的沙箱当沙箱（自带沙箱生效时没有代价，否则已知只读以外的命令都送审）。适合 Linux＋bubblewrap |
-| `browserTrustedDomains` | `[]` | **浏览器导航**到这些域名免审。默认空白：抓取拿到的是文本，导航会把页面脚本放进一个能联网、不在任何沙箱里的浏览器里跑，而本地开发服务器提供的页面通常正是 agent 免审就能改的工作区文件。要恢复「浏览器打开 localhost 免审」就把 `localhost` 加进来 |
-| `webSearch` | `"allow"` | `search_web` 是否送审。搜索把 agent 写的 query 发给搜索引擎，而请求是 agy 自己发的——没有任何沙箱在这条路上（`--unshare-net` 挡的是沙箱内命令的网络）。默认 `"allow"`，与 Codex 一致：Codex 的 web search 是托管工具，不经过审批流程，改由配置限制（`web_search` 模式、受管 `requirements.toml` 里的 `allowed_web_search_modes`）。需要审核每次搜索就设为 `"review"`，此时 autoagy 自身出错或超时的那条失败路径也照样拒绝——否则它恰好在监管最弱的时候失效 |
-| `ownSandboxEnvPassThrough` | `[]` | 除白名单外额外传给沙箱内命令的环境变量名（支持 `PREFIX_*`）。沙箱默认清空环境，列在这里的变量对免审命令可读，属于削弱沙箱。**值会写进改写后的命令行，agent 能看到，不要放密钥** |
-| `commandEnv` | `{"mode": "inherit"}` | 没有自己沙箱的平台（macOS、没装 bwrap——**Windows 不在内**：那里没有 root 所有的 `env`，这条改写跑不起来，`status` 会直说而不是假装待命）上命令用什么环境。`inherit`（默认）＝命令拿到 hook 继承的环境，也就是你 export 的那些——Codex 的 `shell_environment_policy` 默认同样是 `inherit = all` 且默认排除关闭。`scrub` 会把命令改写成在 `env -i` 下运行，环境用与沙箱**同一份**白名单（外加 `ownSandboxEnvPassThrough`）重建，`HOME` 取钉住的那个（与沙箱一致，这样命令里的 `~` 就是凭据清单依据的 `~`），于是免审命令打不出环境变量，已批准的命令也倒不进 transcript。实测：agy 会应用不带 `BypassSandbox` 的 `overwrite`，命令仍在 Antigravity 的沙箱里，所以**不需要 `command(*)` 授权**。autoagy 自己的沙箱始终清空环境，这个开关只管没有沙箱的平台 |
-| `writableRoots` | `[]` | 额外允许免审编辑的工作区外目录。因为 setup 会设 `allowNonWorkspaceAccess: false`，这里的每一项都需要一条 `write_file(<绝对路径>)` 授权，由 `autoagy setup` 一并写入——实测该授权覆盖整棵子树、不外溢到兄弟目录、并按解析后的落点判（目录里塞个指向外面的符号链接也逃不出去）。**改了这一项必须重跑 `autoagy setup`**：授权是 agy 启动时读一次的，没有对应授权的目录会被 agy 直接拒绝，无论 autoagy 怎么判。`autoagy status` 会检查这种不一致。**必须是绝对路径**（`~` 会展开；相对路径会被丢弃并在 `autoagy status` 里告警——它会按进程所在目录变成不同的目录）。**声明的是目录里的普通文件，不是它内部的控制面**：`.git`、`.agents`、`.codex`、`.gemini` 这些名字在声明的根下照样受保护（Codex 对每个可写根也是这么做的），所以写 `~` 不会把 `~/.gemini` 一起交出去 |
-| `protectedPaths` | 家目录里会自己被执行的那些文件（见下） | 额外需要审核才能修改的路径（glob）。**默认值**是登录 shell 的 rc 文件（`~/.bashrc`、`~/.profile`、`~/.zshrc`……）、`~/.config/systemd/user/**`、`~/.config/autostart/**`、`~/.config/environment.d/**`、`~/.config/fish/**`、`~/.local/bin/**`、`~/.gitconfig`、`~/.config/git/**`：它们都会在**沙箱之外**被执行（下次登录、下次 `systemctl --user`、下次开机自启，或者 git 读到一个指向别处的 `core.hooksPath`）。只在**工作区就是家目录**时起作用，别的情况下家目录本来就在可写根之外（实测 2026-09-22：工作区设成家目录时写 `~/.bashrc` 是 `allow (write-workspace)`，没人看）。**要么写绝对路径，要么用 `**/` 开头**（`.husky/**` 这种相对写法永远匹配不到绝对路径，会被丢弃并告警；`**/.husky/**` 可以，它**也匹配 `.husky` 目录本身**，所以 `rm -rf .husky` 同样送审）。编辑工具按解析后的落点判；**命令里字面写出这个路径的也送审**（`echo x > .husky/pre-commit`）——这是它存在的理由，因为「写了之后在沙箱外执行」的那一类（`.husky/`、`.envrc`、`postinstall`）正是命令写的。辨认是尽力而为，和命令分析的其它部分一样：运行时拼出来的路径（`$d/x`）找不到，`make` 这种读自己配置文件的工具也不会被这条拦下。**而在 autoagy 自己的沙箱里，能指出具体位置的条目还会被挂成只读**——那才是拦住而不只是认出来：`p=.husky/pre-commit; echo x > $p` 这种命令行上没有字面路径的写法，检测看不见，挂载挡得住。能挂的是：去掉开头 `**/` 和结尾 `/**` 之后不含 `**` 的条目（相对的按每个可写根的顶层拼，和 `.git`/`.agents` 同一条规则），以及落在某个可写根内的绝对路径（根外本来就是只读）。`src/**/gen*` 这种 `**` 在中间的**不挂**——它只能解析到 `src`，把整个源码树挂只读不是这条条目要的东西。**只保护已经存在的路径**：`--ro-bind-try` 会跳过不存在的路径，而唯一能覆盖「还不存在」的机制会在宿主上把挂载点建出来——对 `.envrc`、`Makefile` 这种文件名做这件事，等于每条命令都在工作区里造一个同名目录，direnv 和 make 会当场坏掉；新造的那一个仍由上面那条命令侧检测兜着。**`autoagy status` 会点名指不出位置的条目**（例如绝对路径里 `**` 在中间的），它们只送审、永远不会被挂载——相对且带 `/` 的那种由配置校验直接丢弃并告警 |
-| `credentialPaths` | `~/.ssh/**`、`**/.env` 等 | 凭据位置。文件工具读取这些文件（包括经符号链接读取）、`grep_search` 搜索包含它们的目录需要审核。以 `~/` 或绝对路径开头的条目还会在 autoagy 自己的沙箱里被隐藏；没有固定位置的模式（`**/.env`、`**/*.pem`）隐藏不了，所以命令行里字面写出这种路径（`cat .env`）也要审核，沙箱内外一样。不在该沙箱里时，命令行里直接写出**任何**这类路径的命令都需要审核——**经符号链接写出的也算**，和文件工具一样按链接的落点判（尽力而为：只识别字面路径、`~` 和 `$HOME`，不解析变量）。另外 `/proc` 一概按凭据位置处理：`/proc/<pid>/environ`、`/proc/<pid>/cmdline` 这类文件被直接读到要审核，而 `/proc` 本身或其中**目录**被遍历（`grep_search /proc`、`grep -r /proc`）也要审核——遍历会读到一个进程一份的 environ；`/proc/cpuinfo`、`/proc/self/status` 这种单个文件不受影响。沙箱内这些都不送审：那里是私有的 /proc，里面每个进程都是在清空后的环境里启动的——**包括 PID 1**：`--unshare-pid` 让 bwrap 自己留在沙箱里当 PID 1，而 `--clearenv` 只管得到命令，管不到它，所以 bwrap 本身是在 `env -i` 下启动的（没有 root 所有的 `env` 就不启用这个沙箱）。修这条之前，`cat /proc/1/environ` 在沙箱里免审、而且读得到你 export 的全部密钥 |
-| `rules` | `[]` | Codex execpolicy 风格前缀规则，例如 `{"pattern": ["terraform", "destroy"], "decision": "forbidden"}`；`allow` 仅对不含重定向、替换、变量、通配的简单命令生效。**注意 `allow` 也覆盖带 `BypassSandbox: true` 的同一条命令**（Codex 的 execpolicy 同样先于沙箱/升级判定，见 [docs/design.md](docs/design.md) §1）：写 `{"pattern": ["npm", "test"], "decision": "allow"}` 等于同时允许它在宿主上带完整权限和网络免审运行。要区分两者就用 `prompt`，或者不写这条规则 |
-| `mcp.allow` | `[]` | 免审的 MCP 工具（`"server/tool"` glob，如 `"github/get_*"`），与其它路径类配置用同一套 glob：支持 `*`、`?`、`{a,b}`，`*` 不跨 `/` |
-| `mcp.annotations` | `"ignore"` | `"trust"` 时相信 MCP 服务器自己给工具打的标签，也就是 Codex 的规则：`readOnlyHint` 免审、`destructiveHint` 送审、没标签送审。标签是**写这个服务器的人**写的，所以这是一个信任决定：Codex 在运行时隐式地信，这里要你先跑一次 `autoagy mcp-scan` 把快照记下来（落在 agent 写不到的 `$AUTOAGY_HOME/state`，自带沙箱里还是只读挂载），再把这个开关打开。`mcp.allow` 是"只信你自己"的那个版本，它先于这条生效。改过服务器或升级过版本要重新 scan——快照只代表当时那一刻 |
-| `tools.allow` | `[]` | 免审的**工具名** glob。**只对 autoagy 不认识的工具名生效**（`unknown-tool` 那条兜底）：上面每一条规则都在兜底之前返回，所以写一个它已经有规则的名字（`run_command`、`view_*`、`mcp_*`…）不会有任何效果——`autoagy status` 会点名这种条目。这也是 `*` 在这里安全的原因：它够不到命令、编辑、凭据读取那些规则。它存在是因为工具名列表是 agy 1.2.x 的快照而 agy 会自动更新，下个月新增的工具会每次调用都送审，而唯一的出路本来是改插件目录——那是策略禁止任何东西写入的地方 |
-| `pathDrift` | `"sticky"` | 检查与执行之间路径被换掉时的后果。`"sticky"`＝整个会话不可信、之后每次读写都送审、只能 `autoagy trust` 解除（历来的行为）；`"graded"`＝按新落点判，落在工作区/临时目录等"本来就能写的地方"且不是凭据/受保护路径时只中断本轮、不粘住会话。详见「会话信任」一节 |
-| `notebooks` | `"review"` | `"allow"` 时 `notebook_execution` 免审。默认送审，且**不再声称**它在沙箱外执行：agy 二进制里没有任何 notebook kernel（连 jupyter/kernel 符号都没有），而它唯一的沙箱组件在 command 子系统下、notebook 工具和它的 handler 都不经过那里——这是证据不是证明，所以交给审核模型的理由如实写成「确认不了有什么在约束它」。**实测：CLI（agy 1.2.7）里根本没有这个工具**，所以这个开关只对 IDE 有意义。notebook 跑的是任意代码，所以这是这张表里最宽的一个开关 |
-| `browser` | `"review"` | 浏览器点击/输入/执行 JS，以及 `browser_subagent` 是否审核 |
-| `policy.file` / `policy.extra` | — | 替换/追加组织安全策略（对应 Codex 的 tenant policy），例如声明哪些仓库、域名是可信的。**必须是绝对路径**（`~` 会被展开，相对路径不接受——那样它会按进程所在的目录解析，同一个值在不同场合指向不同文件）。**写在 agent 能写的地方等于没写**：指到工作区里，agent 就能免审改写审核所依据的策略本身。这两种情况都**不会被加载**，autoagy 退回内置策略并在 stderr 上说明原因。放在 `~/.gemini/autoagy/` 下或别的 agent 写不到的位置 |
-| `circuitBreaker` | `3 / 10 / 50` | 连续拒绝次数 / 窗口内拒绝次数 / 窗口大小 |
-| `log.allowed` / `log.reviews` | `false` | 记录所有放行的操作 / 保存完整审核 prompt 与回复（`logs/reviews/` 下只保留最近 200 份，每份是一整个 prompt，合计几十 MB 以内） |
-
-配置只从全局文件读取：工作区里的文件 agent 自己能改，所以不接受工作区级配置。环境变量也不能改变策略（hook 继承 agy 的环境变量，而一条获批的越权命令可以给它启动的 agy 设任意环境变量）。
-
-配置目录和 `home` 有两个来源：环境变量（`AUTOAGY_HOME`，否则 `HOME`）和 `autoagy setup` 在安装时写进 `hooks.json` 的绝对路径。装了插件之后**以钉子为准**，环境变量说了不算——否则一条命令就能把 hook 指向它自己写的配置目录，或者用 `HOME=/tmp/x` 把整个 `~`（连同凭据清单和「不可编辑路径」）搬走。`hooks.json` 在插件目录里，而插件目录属于策略的「不可编辑路径」，所以 agent 改不动这个钉子。另外，以 `agy` 为可执行名的命令都会送审；给 `HOME`/`AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值的命令，只要不在 autoagy 自己的沙箱里跑（没有这个沙箱，或要求离开沙箱），也送审——沙箱里的挂载在命令启动前就定了，不跟着 `HOME` 走，所以 `HOME=/tmp/x <程序>` 这种把 `HOME` 指到可写目录的常见写法在沙箱里照常免审。`reviewer.backend: "mock"` 只在设置了 `AUTOAGY_UNSAFE_MOCK_REVIEWER=1`（测试用）时生效，否则回退到默认后端。
-
-## 决策规则（第一层，无模型）
-
-| 工具调用 | 结果 |
-| --- | --- |
-| 读文件、列目录、搜索、查看终端/任务状态、`search_web` | 放行（读取凭据类文件、搜索包含凭据位置的目录需审核；`webSearch: "review"` 时 `search_web` 送审） |
-| 编辑工作区、会话 artifact 目录、临时目录内的文件 | 放行 |
-| 编辑工作区外的文件，或 `.git`、`.agents`、`~/.gemini` 等 | 审核 |
-| 编辑 autoagy 自己的配置/插件目录，或**任何能注册 hook 的位置**（`~/.gemini/config/hooks.json`、`~/.gemini/config/plugins/` 下的任何目录） | 直接拒绝。写进这些位置的文件会成为 agy 在**每次工具调用前执行的命令，且在所有沙箱之外**——等于 agent 给自己装监管者。这个问题只该问人，不该由模型判一次然后一直生效 |
-| 沙箱内的命令 | 放行（Linux 上改写为在 autoagy 自己的沙箱里运行）；破坏性命令（强制 `rm`、`git reset --hard`、`git clean -f`、`find -delete`……）审核 |
-| 读进程环境的命令（`printenv`、裸 `env`、`ps auxe`、`jq env`、打印变量的 shell 内建（`export -p`、`declare -x`、裸 `set`、`compgen -e`）、`busybox <applet>` 形式的同一个命令、解释器内联代码里的 `process.env`／`os.environ`／`ENV`／`$ENV`／`ENVIRON`，或展开一个沙箱白名单之外、而环境里确实存在的 `$变量`） | 审核——除非这条命令的环境已被重建（autoagy 自己的沙箱，或 `commandEnv.mode: "scrub"`），那时它读不到东西，不送审 |
-| `BypassSandbox: true` 的命令、`notebook_execution` | 审核（notebook 可用 `notebooks: "allow"` 关掉；它执行的是任意代码，而且确认不了有什么在约束它） |
-| 无沙箱环境（关闭沙箱或 `--dangerously-skip-permissions`） | 已知只读命令放行，其余审核 |
-| `invoke_subagent` 启动不继承 customizations、又带工具的自定义 agent | 审核（这种 agent 的工具调用不经过 autoagy） |
-| `browser_subagent`、`generate_image`、`delete_knowledge` | 审核：前者的导航和点击是它自己做的，不逐条经过本策略；后者写出的路径策略看不到；删除的知识无法从工作区恢复 |
-| 以 `agy` 为可执行名的命令（启动另一个 Antigravity 实例） | 审核：那个实例是否加载这些 hook，由它自己的配置和环境决定，而这条命令两样都能设 |
-| 命令里给 `HOME` 或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值 | 审核：`HOME` 决定 `~` 指向哪里，也就决定了策略里的凭据清单和「不可编辑路径」。autoagy 自己的沙箱里不审：挂载不随 `HOME` 变 |
-| `send_command_input` | 只在 autoagy 自己的沙箱生效时放行（`config.sandbox: "on"` 是声明，Antigravity 的沙箱也让 `.git` 和日志可写）；macOS/Windows/无 bwrap 时一律审核 |
-| 向用户申请权限（`ask_permission`、`ask_custom_permission`） | 放行——正常情况下弹窗会到你手里，由你决定，autoagy 没什么可加的。但 `--dangerously-skip-permissions` 下 agy 会自己同意所有工具权限（它自己的字符串就是这么写的：`auto-approving all tool permissions`），平台读不到 agy 参数时也无法排除这个标志——那时没有人能回答，申请就送审（策略里「削弱 agent 自身的监管」属于持续性安全削弱） |
-| MCP（含 `read_resource` / `list_resources` 这类 MCP 资源读取）、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核（未知工具名可用 `tools.allow` 免审——**只有**未知的那些，见配置表） |
-| **会话被标记为不可信之后**（见下）的文件编辑和读取文件内容 | 审核；触及监管文件的命令改为直接拒绝 |
-
-被审核的删除命令（`rm`/`rmdir`/`shred`/`unlink`、`git clean`、`git rm -f`、`find -delete`、`truncate`、`dd of=`）会附带 autoagy 预先检查的目标事实（是否存在、类型、条目数、是否在工作区内、是否是 git 仓库；路径经过符号链接时，按 `rm` 实际会删除的位置判断，并给出 `resolves_to`），弥补审核模型没有工具、无法像 Codex 那样自己去看的问题。
-
-## 会话信任
-
-有两种情况说明「环境做了监管没批准的事」，autoagy 会把**整个会话**标记为不可信：
-
-1. 文件编辑的目标在批准时和执行时解析到了不同位置（`edit-target-changed`）——agy 的写入不在任何沙箱里，只能在写之前检查一次；
-2. 只读挂载点里出现了文件（`placeholder-dirty`）——一条刚跑完的沙箱命令写进了本该被它挡住的位置。仅限 PostToolUse 判定；回合结束时的兜底清扫只记录不标记，理由见上文。
-
-后果：文件编辑和「读取文件内容」的工具从这时起一律送审；触及 autoagy 自身、`AUTOAGY_*` 或对话日志的命令改为**直接拒绝**（此时审核所依据的正是可疑的那部分证据）。审核材料里会带上漂移的原因和最近编辑过的文件清单。
-
-这个标记**不随新一轮对话自动清除**：换了轮次，磁盘上被换掉的符号链接并不会自己变回去。确认磁盘现状之后用 `autoagy trust [<会话 id 前缀>]`（或 `--all`）解除；不带参数时它只列出被标记的会话，因为一次性解除所有会话是关于磁盘状态的判断，应该由人来做。`autoagy approve` 只放行一次重试，不解除此标记。
-
-**这条围栏可以按落点分级**（`pathDrift: "graded"`，默认 `"sticky"` 即上面的行为）。分级之后，漂移的**新落点**决定后果：仍在工作区里（或 agy 自己的 scratch／artifact／临时目录里）、且不是凭据位置、不是 `.git` 这类受保护元数据、不是 `protectedPaths` 点名的路径、不是 autoagy 自身文件、不是对话日志——那么这一轮照样中断、日志照样记（带 `contained: true`），但**整个会话不再被标记**，也就不需要你去敲 `autoagy trust`。落到别处（工作区外、凭据路径、任何监管面）与从前完全一样。
-
-判据是「这次调用落在一个它本来就能直接点名的文件上吗」。它对读和写用同一条规则，虽然读错地方更不可逆——因为让这种情况无害的不是"它是个读"，而是"那个文件本来就读得到"。**明确让出去的是**：工作区里那些"写了之后会被别的工具执行"的文件（`.envrc`、`.husky/`、`Makefile`）按这条判据算普通工作区文件，漂到它们身上不再粘住——`protectedPaths` 就是为这个准备的（它点名的路径被排除在外，而且在 Linux 上还会被真正挂成只读）。`/tmp` 是个容易意外的例子：它是可写根，所以漂到临时目录**算**"被包住"，这是有意的，理由和工作区一样。
-
-同一个 `trust` 也负责释放「可能有后台命令在跑」时保留的只读挂载点——那个标记同样不会自动消失。**执行前请确认后台命令确实已经结束**，否则释放等于把上面说的那个提前回收做一遍。
-
-它同时清除嵌套仓库的 hook 植入记录（`planted-git-hook`）。那条记录不标记会话不可信（理由见上文沙箱一节），但会让触碰那个仓库的命令一直送审，所以它也需要人来收尾：去看一眼那个路径里到底是什么，再 `autoagy trust` 解除。记录会出现在 `autoagy status` 的「被标记的会话」和 `autoagy log` 里。
-
-审核材料里会带上漂移的原因和最近编辑过的文件清单；后者只覆盖**编辑工具**改过的文件（路径），经沙箱命令改写的文件不在其中。
+第一层是不用模型的确定性规则（哪些动作直接放行、哪些必须送审、哪些一律拒绝），加上一条「同一会话里路径漂移过就不再免审」的围栏。两节全文都在参考手册：[决策规则](docs/reference.md#决策规则)、[会话信任](docs/reference.md#会话信任)。
 
 ## 已知限制
 
-下面这些是**设计上就存在**的边界。还没做完、准备要修的事另记在 [docs/open-issues.md](docs/open-issues.md)。
+下面挑的是**会影响你怎么用它**的几条，设计上就存在。[完整清单在参考手册](docs/reference.md#已知限制完整清单)（20 条），还没做完、准备要修的事在 [docs/open-issues.md](docs/open-issues.md)。
 
 - **没有启用 autoagy 自己的沙箱时**（macOS、Windows、没装 bubblewrap、IDE 没设 `ownSandbox: "on"`），沙箱内的命令仍然能写 `.git`（植入 git hook）和对话日志（伪造审核模型看到的用户消息）。autoagy 能做的只有把命令里字面出现 `.system_generated`、autoagy 自身路径或凭据位置的命令送审——这是原始命令行上的子串匹配，变量拼接或 base64 之类可以绕过，而且事后没有任何完整性校验能发现日志被改过。**这不是「和 Linux 上差不多」，而是明显更弱**，也不能靠配置补上。审核模型现在会收到一行明确的提示，知道在此配置下不能把 transcript 里的用户发言当作已确立的授权。
-- **环境变量：判据是「这条命令的环境有没有被重建」，不是「有没有沙箱」。** hook 继承的是 agy 的环境，里面通常有你 export 的 API key，而 Antigravity 自己的终端沙箱**不清环境**——只有 autoagy 自己的沙箱（`--clearenv`）和 `commandEnv.mode: "scrub"`（`env -i`）会重建它。两者都不生效时（macOS、Windows、没装 bwrap、IDE 没设 `ownSandbox: "on"`，且 `commandEnv` 仍是默认的 `inherit`），这些会送审：`printenv`、裸 `env`、`ps` 里取环境变量的写法（`ps auxe`、`ps eww`、`-E`、`-o env`；`ps -ef` 是「所有进程」，不受影响）、`jq` 的 `env` 与 `$ENV` 内建、**PowerShell 的 `Env:` 提供程序**（按**参数**判定而不是按命令名——`ls`、`cat`、`type` 是那两个 cmdlet 的别名，按名字列的白名单永远列不全自己的别名，所以 `ls Env:`、`cat Env:\OPENAI_API_KEY` 一样送审）、`/proc/<pid>/environ` 与 `/proc/<pid>/cmdline`、对 `/proc` 或其中目录做遍历的搜索（`grep_search /proc`、`grep -r /proc`），以及**命令展开的任何 `$变量`，只要那个名字不在沙箱白名单里而环境里确实有它**（包括 `bash -c`、不带引号的 heredoc 这类外层看不见的位置）。这条把「读环境」从枚举命令名换成了枚举变量名，又补上了三类**根本不写 `$NAME`** 的途径：打印变量的 shell 内建（含 `declare -p NAME` 这种点名一个变量的形式——它按「那个名字沙箱传不传」判，和 `$NAME` 同一条判据）（`export -p`、`declare -x`/`typeset -x`、裸 `set`、`compgen -e`）、多调用二进制（`busybox env`／`busybox printenv`——applet 会被解包，所以 `busybox rm -rf /` 也一并进入危险命令判定）、以及解释器内联代码（`node -e`／`python3 -c`／`ruby -e`／`perl -e`／`php -r`／`awk` 程序文本里的 `process.env`、`os.environ`、`ENV`、`$ENV`、`ENVIRON`）。解释器那张表是**按语言**分的，因为一条通用的 `\bENV\b` 会把 `node -e "const ENV=1"` 也算进去；**写环境不算读**（`node -e "process.env.NODE_ENV='test'"` 放行），这条排除是启发式、不是证明（`Object.assign(process.env, …)` 之类仍然漏）。
-但这一切**仍然不是证明**：残余是**任何不写出 `$NAME` 又能读到环境的途径**——运行时拼出来的名字拦不住（`eval`、`base64 | sh`、`${X}${Y}`），表里没列的语言（`lua -e`、`Rscript -e`……）、某个命令新版本新增的取值方式、以及新版本新增的内建与选项也一样。真正的缓解是 autoagy 自己的沙箱，或者在没有它的平台上打开 `commandEnv.mode: "scrub"`（把命令改写到 `env -i` 下、环境按同一份白名单重建——那才是闭合集合；自检失败时会自动停用并告警一次，不会假装还在 scrub），再或者不要把密钥放在环境里。（**Windows 例外**：没有 root 所有的 `env` 可用，这条改写跑不起来，那里只有上面这份清单。）
 - **临时的工作区外编辑批准了也执行不了。** setup 设的 `allowNonWorkspaceAccess: false` 是在写入那一刻按真实落点判的，所以「帮我改一下 `~/.gitconfig`」这种事先没声明的区外编辑，即使审核模型批准，agy 仍会要一次 `write_file` 权限——交互下多一次确认，**headless 下直接失败**。autoagy 补不上这个：授权是 agy 启动时读一次就缓存的（实测），没法在批准的那一刻即时补一条。固定要写的目录请放进 `writableRoots`（会拿到自己的窄授权）；真要恢复旧行为就把 `allowNonWorkspaceAccess` 设回 `true`，代价是丢掉问题里唯一一道写入时的封顶。
 - **凭据读取的审核是按路径名判的，按目录搜索就绕过去了。** `read_file .env`、`cat .env` 会送审，但 `grep_search {SearchPath: <工作区>}` 和沙箱里的 `grep -r API_KEY .` 读的是同一个文件、返回的是命中行，两者都免审。原因是 `**/.env`、`**/*.pem` 这类没有固定位置的模式列举不出来，只有 `~/.ssh/**` 这种锚定的位置才进得了「搜索的目录里包含凭据位置」这条检查。这条没有堵：Codex 根本没有 credentialPaths 这个概念（工作区文件本来就可读），而要堵住它就得审核所有全库搜索，那是 agent 最常用的操作。把工作区的 `.env` 隐藏掉也不行——那会让所有用 dotenv 的项目在沙箱里跑不起来。真正的边界仍然是「工作区内的文件 agent 都读得到」。
-- **Windows 上从设置文件推断沙箱状态已被停用**：Windows 读不到 agy 进程的参数，`--dangerously-skip-permissions` 无法识别，而 `autoagy setup` 写进设置文件的那两个值正是检查所依据的。所以那里不再声称「沙箱有效」，而是按无沙箱处理——后果是不带沙箱的普通命令（`npm test`、`ls`、`curl`）从免审变成送审。同样因为读不到启动参数，Windows 上**弹窗一律改为拒绝**：那个标志无法排除，弹窗可能被静默自动同意，宁可不问。
-- **沙箱外的已知只读命令要看它解析到哪里。** autoagy 自己的沙箱不跑的时候（macOS、Windows、没装 bwrap），命令用的是继承来的 `PATH`，很多开发环境会包含 `.venv/bin`、`node_modules/.bin` 这类目录——都在可写根内，改动免审。已知只读的白名单只比较 basename，所以 `ls` 会被当作安全的，哪怕实际执行的是 agent 刚写进 `node_modules/.bin` 的那个 `ls`。现在这条链会被送审：无沙箱时，如果命令解析到的文件落在可写根内，就不放行（`command-from-writable-root`）。代价是这类环境里从 `.venv/bin` 调工具会多一次审核——这是刻意的，因为那正是「先写后执行」成立的地方。autoagy 自己的沙箱内不问这个问题：沙箱已经限定了任何二进制能碰到什么。 同一个问题的另一半是**白名单里的命令本身会不会执行工作区里的东西**——工作区文件是免审可改的。所以那张表只收「不读项目文件」的探测：`node --version` 在，`node help`、`python3 version` 不在（实测：它们执行的是工作区里叫 `help`、`version` 的文件），`make help`（Makefile 目标）、`gradle help`、`cargo check`（`build.rs`、过程宏）、`go vet -vettool=…`、`go env -w` 也不在；`mvn`、`yarn`、`cargo`/`rustc`/`rustup`、`dotnet`、`gradle` 连 `--version` 都不在，因为它们启动时会读项目里能指定可执行文件或 JVM 参数的配置（`.mvn/jvm.config`、`yarnPath`、`rust-toolchain.toml` 的 `path`、`global.json`、`gradle.properties`）。代价是这几条在没有沙箱的平台上多一次审核。
 - Antigravity 的 hook 返回 `allow` 不能覆盖它自己的权限弹窗，hook 返回的 `permissionOverrides` 也不会授予权限（实测），所以需要上面的全局授权；对未授权域名的网页抓取仍会由 Antigravity 弹窗询问——**这是 autoagy 唯一答不上的弹窗**，也是默认配置下日常最可能剩下的那一个。要消掉它有两档（见配置表 `networkGrants`）：`"trusted-domains"` 只放开 `trustedDomains` 里那几个域名；`"all"` 授予 `read_url(*)`，任何域名都不再弹窗，每次抓取仍先经过审核（Codex 对联网请求也是交给审核）。`read_url(*)` 同时会让 agy 的终端沙箱能访问所有网站，所以一旦授予，autoagy 就**不再把 agy 的沙箱当沙箱**：在 Linux＋bwrap 上这没有代价，因为命令跑在 autoagy 自己的断网沙箱里（真机实测：抓取不弹窗、审核 3.7 秒批准；沙箱里的 `curl` 仍是 `Could not resolve host`）；在没有自带沙箱的机器上，已知只读以外的命令都会改为送审——多审核，而不是放一条能联网的命令过去。`autoagy status` 会报这台机器上它值多少代价。
-- hook 负载里没有可信的用户消息（`lastUserInput` 等字段存在但未填），autoagy 只能从 transcript 里识别用户说的话，而 transcript 的完整性依赖上面的沙箱。
-- 审核模型没有工具（Codex 的 guardian 可以做只读检查）；autoagy 用确定性的目标检查部分弥补。
-- **文件编辑本身不在任何沙箱里执行**：写文件的是 agy 自己（Codex 的 `apply_patch` 在文件系统沙箱里跑），autoagy 只能在写入前检查一次目标路径。如果一条后台的沙箱命令在这中间把路径换成了符号链接，写入就会落到别处（检查时刻和使用时刻不一致）。**批准前 autoagy 会把路径解析好再交给 agy**（实测 `overwrite` 对编辑和读取工具都生效），所以路径里**原本就有的符号链接**事后被改指向不再能移动那次写入——这同时也是日常最常见的误报来源（pnpm、构建缓存会在后台不停重建符号链接）。**没覆盖的是另一种**：路径里一个真实目录在检查之后被换成符号链接，因为写入无论如何都要经过那个目录项，这一种只有 agy 自己在打开文件时才拦得住。PostToolUse 会在写入后重新解析目标并比对：对不上就记一条 `edit-target-changed`、熔断本轮，并把整个会话标记为不可信（见「会话信任」）。事后发现，不能阻止那一次写入。**读取走的是同一条路，也有同样的事后核对**：agy 同样是自己去读、不经过任何沙箱，所以返回文件内容的工具（`view_file`、`read_file`、`grep_search` 等，`grep_search` 按它的 `SearchPath` 判）在执行后会重新解析一次目标，对不上就记 `read-target-changed`、同样熔断并标记会话不可信。**但性质比编辑更不可逆**：写错地方还能清理，读错地方的内容已经进了模型上下文，收不回来——所以那条提示直接告诉你哪个文件可能被读走了、该去轮换什么。根治仍然要等 Antigravity 把编辑和读取都放进沙箱。
-- 子 agent 的授权以根会话里用户的话为准（通过父会话的 `invoke_subagent` 记录回溯），找不到父会话时按不可信处理。回溯到的「根」本身也要像是人发起的会话（CLI 下：harness 写的设置快照），否则同样按不可信——嵌套子 agent 的顶层祖先找不到时，回溯会停在中间那个子 agent 上，而它的「用户消息」是 agent 写的。父会话里记录这次调用的那一行，有时是 `INVOKE_SUBAGENT`、有时是 `GENERIC`（实测同一台机器上两种都有）；后一种要额外核对子会话的第一条请求**正是**父会话传给 `invoke_subagent` 的那个 `Prompt`，因为 `GENERIC` 行可以是任何工具的结果，会话 id 也是 agent 读得到、能自己打印出来的。查找只看最近的 40 个会话，autoagy 自己的审核会话不占这个名额；名额不够看完时的「没找到」不会被缓存，下一次审核会重新找。
-- Windows 上命令解析是尽力而为（PowerShell 语法与 POSIX shell 不同，但会偏向保守）。
 - 用 `--dangerously-skip-permissions` 启动 agy 时 Antigravity 的沙箱实际不生效：启用了 autoagy 自己的沙箱时命令仍在其中运行（实测 `overwrite` 在该模式下照样生效）；否则 autoagy 按无沙箱处理，审核会变多；`force_ask` 在该模式下会被自动同意，所以 autoagy 在此模式下只使用 allow/deny——这条现在也覆盖 `mode: off` 的弹窗路径。
 - **工作区里「写了之后会在沙箱外执行」的文件是免审的**：`.envrc`（direnv 自动加载）、`.husky/`（`git commit` 时执行）、`.vscode/tasks.json`、`package.json` 的 `postinstall`、`Makefile`，以及任何被别的工具读取后执行的脚本。暴露面和 `.git` 属于同一类（先写后执行），区别是 `git` 几乎必然会在沙箱外运行，而这一类要等某个工具去执行它。**Codex 在这里的取舍是同样的**——它的 workspace-write 只保护 `.git`、`.agents`、`.codex` 三个名字（`PROTECTED_METADATA_PATH_NAMES`），所以 autoagy 默认也保持这个集合（多出的 `.agent`/`_agents`/`.gemini` 是 Antigravity 自己会读的 agent 配置）。**一处例外**：`.git` 在 autoagy 自己的沙箱里是递归保护的（嵌套仓库的 `.git` 也只读），Codex 只保护每个可写根下的那一层——因为 autoagy 的编辑工具本来就挡住任何带 `.git` 段的路径，两条路不一致时弱的那条正是沙箱存在的理由。需要更严就用 `protectedPaths` 把它们加进去：在 Linux 上（autoagy 自己的沙箱生效时）它们会被**挂成只读**，沙箱里的命令根本改不动——前提是那个文件已经存在，且条目能指出具体位置（见配置表那一行）；其余情况（macOS/Windows、没有 bwrap，或 `src/**/gen*` 这类指不出位置的 glob）仍然只是「送审」。代价是 agent 每次改这些文件都要过一次审核，而挂只读的那些它改不了、只能来问你。
-- **嵌套仓库的 hook 植入是事后检测，不是预防**：一条沙箱命令可以自己造出一个 `.git`（不必用 `git`——`mkdir` 加上 `HEAD`、`objects`、`refs` 就是一个 git 认的仓库），写入会落到宿主上，而 autoagy 只能在命令跑完之后发现它并让后续命令送审。所以那个文件在被人删掉之前一直在那里，而期间在**沙箱外**执行的 git 命令（写操作必须 `BypassSandbox`，也就是沙箱外）会执行它。检查本身也受同一套预算限制：埋得比 5 层更深、或在 `node_modules` 等被跳过目录里的仓库既不保护也不检查；命令里运行时拼出来的路径（`cd $d && git commit`）匹配不到；`git worktree add` 产生的 `.git` **文件**（gitfile）不检查；往停在那个目录里的持久终端敲命令（`send_command_input`）也覆盖不到——策略看不到那个终端的 cwd。没有可信 `flock` 的主机上，后台命令做的植入与挂载点一样要等 `autoagy trust`。
 - **`search_web` 默认免审，而它是一条出网通道**：query 是 agent 写的文本，请求由 agy 发出，不在任何沙箱里（`--unshare-net` 只约束沙箱内的命令），策略里那套 Data Exfiltration 规则看不到它。默认放行是照 Codex 的做法：它的 web search 是托管工具，不走审批流程，由配置限制（`web_search` 模式、受管 `requirements.toml` 的 `allowed_web_search_modes`）；autoagy 对应的开关是 `webSearch: "review"`——代价是每次搜索多一次审核延迟（agy 后端实测 4～12 秒）。
-- **`rules` 里的一条 `allow` 会连沙箱逃逸一起放行。** 前缀规则先于升级判定（Codex 的 execpolicy 也是这样），所以 `{"pattern": ["npm","test"], "decision": "allow"}` 同时允许同一条命令带 `BypassSandbox: true` 在宿主上免审运行。这是刻意保留的语义，不是漏掉；要区分两者就用 `prompt`。详见配置表 `rules` 一行。
-- **`policy.file` 指到 agent 能写的地方就没用了。** 它是审核模型据以判断的规则本身，被改写等于换成另一套法条——而这次改写不会被任何一次审核发现，因为做判断的正是被换掉的那个。所以落在任一可写根（工作区、artifact/scratch、临时目录、`writableRoots`）里的策略文件**不会被加载**，autoagy 会退回内置策略并在 stderr 上说明一次。放在 `~/.gemini/autoagy/` 或其它 agent 写不到的位置即可。
-- **危险命令识别是有解析器支撑的模式表，不是纯字面黑名单，但也不要高估。** `shell.mjs` 是真正的 POSIX shell 解析器，会去引号、还原转义、解开 `sudo`/`env`/`nohup`/`timeout`/`xargs`/`flock`/`nice` 等包装，并从 `bash -c`、`eval`、`trap`、`watch`、`su -c`、`find -exec`、heredoc 里取出内层脚本，递归到 8 层，解析失败一律送审。所以「引号拼接」「全路径」「组合短选项」「长选项缩写」「多层包装」都拦得住——后两条是 getopt_long 和 git 的参数解析本身的规则：`git rm -rf`、`git push -fu`、`truncate -cs` 是组合短选项，`rm --forc`、`git reset --har`、`su --comm=…` 是长选项的无歧义前缀，`su -lc`、`script -qc` 是带值选项的组合写法。（这几条以前只认精确拼写，最常见的 `git rm -rf src` 在沙箱里免审。）**拦不住的**是动态构造的命令名：`$CMD -rf`、`rm${IFS}-rf`、`$(printf rm)`、`base64|sh`、把脚本塞给解释器的 `-c`。另外，沙箱内这条模式表才是决定性判据（能解析、没命中就放行），无沙箱路径上起决定作用的是已知只读白名单（不在白名单里的一律送审）。
 
 ## 隐私与数据流向
 
-默认的 `reviewer.backend: "agy"` 用你自己的 Antigravity 登录态在本地跑一个无工具的 agent，**不把任何内容发给第三方**。
+默认的审核后端在你自己的机器上用你的 Antigravity 登录态跑，**不往第三方发任何东西**；换成 OpenAI 兼容接口时，送出去的是精简后的对话记录加这次的动作，**只截断、不脱敏**。决策日志留在 `~/.gemini/autoagy/logs`，完整的审核 prompt 默认不存。
 
-改成 `"openai"`（或任何兼容 baseUrl，如 DeepSeek、Gemini、本地 Ollama）之后，每次审核都会把下面这些 POST 到那个地址：
-
-- 组织策略文本（`policy.md`）；
-- **经过预算裁剪的**对话记录，不是原始 `transcript_full.jsonl`：按规则选取，每条条目有长度上限，超出部分从中间截断，总量有上限，被丢弃时会附一句 “Some conversation entries were omitted.”；**没有任何脱敏**，只是截断——如果 transcript 或工具输出里出现了凭据，它会原样发出去；
-- 子会话场景下根会话的用户消息（同样有上限）；
-- 待审操作的 JSON（含工具调用参数）；
-- 该后端的 API key（作为 `Authorization` 头）。
-
-还会发送：
-
-- 本地环境信息：平台、工作区根目录、沙箱状态，以及**本会话日志在此配置下是否受保护**；
-- **本会话最近编辑过的文件路径**（最多 20 条，含解析后的真实路径）——因为经过裁剪的 transcript 可能已经把较早的编辑丢掉，而审核模型需要知道某个即将被重新执行的脚本前不久刚被改过；
-- 沙箱内命令的 `--setenv` 值，即白名单和 `ownSandboxEnvPassThrough` 里那些变量的值（`PATH`、`HOME` 等）——它们逐字写进改写后的命令行，因而也出现在工具调用参数里。
-
-文件内容只以「工具调用参数」的形式出现，即 agent 当时写下/读取的内容。**没有任何脱敏**，只有长度截断。
+[完整的数据流向清单在参考手册](docs/reference.md#隐私与数据流向)：每次审核到底发出去哪些字段、哪些东西会出现在 agent 能看到的命令行里、日志里存什么。
 
 ## 开发
 

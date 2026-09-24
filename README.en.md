@@ -24,47 +24,113 @@ Every design decision in the full documentation carries the experiment behind it
 
 ---
 
+## How it maps to Codex
+
+| Codex "Approve for me" | autoagy |
+| --- | --- |
+| Commands inside the workspace-write sandbox just run | On Linux they run inside autoagy's own bubblewrap sandbox; elsewhere in Antigravity's terminal sandbox |
+| `sandbox_permissions: require_escalated` goes to review | `BypassSandbox: true` goes to review |
+| Forced review for `rm` (including `sudo`/`env`/`bash -c` nesting) | The same, plus destructive git commands (Antigravity has no `apply_patch`, so git is how history gets rewritten) |
+| `apply_patch` runs when it only writes writable roots; `.git`/`.agents`/`.codex` stay read-only | The same for the edit tools; those directories are read-only in the sandbox too |
+| MCP calls without a read-only annotation go to review | All of them go to review by default (stricter than Codex); `mcp.allow` or the annotation cache opens that up |
+| execpolicy `prefix_rule` allow/prompt/forbidden | The `rules` setting, same semantics |
+| guardian: policy prompt + trimmed transcript + planned action JSON | The same (the policy text is adapted from Codex, with the Antigravity-specific parts rewritten) |
+| Output `{risk_level, user_authorization, outcome, rationale}` | The same |
+| 90-second deadline, up to 3 attempts, errors deny (fail closed) | 90 seconds is the budget for **one attempt**, inside a 140-second deadline for the whole review (a stalled attempt is killed and asked again); errors deny the same way |
+| The instructions handed to the agent on a refusal or timeout | Copied verbatim |
+| 3 refusals in a row, or 10 in the last 50, end the turn | The same (a PostInvocation hook ends it) |
+| The "Auto-review Denials" panel lets one through by hand | `autoagy denials` + `autoagy approve <id>` |
+
 ## Read this before installing
 
 **It asks Antigravity for standing permissions, and they outlive the plugin.**
-`autoagy setup` adds a command grant (on Linux one that names a single
-token-redeeming program, elsewhere `command(*)`), `mcp(*)` and `execute_url(*)`
-to `~/.gemini/antigravity-cli/settings.json`, plus `read_file(/)` and — where
-its own sandbox runs — `read_url(*)` so reads and fetches do not prompt. A
-hook's `allow` cannot override Antigravity's own permission prompts; without
-these, everything the reviewer approves would still pop up at you. The grants
-do not disappear when the plugin stops loading.
+`setup` adds a command grant (on Linux one that names a single token-redeeming
+program, elsewhere `command(*)`), `mcp(*)`, `execute_url(*)`, `read_file(/)` and —
+where its own sandbox runs — `read_url(*)`. A hook's `allow` cannot override
+Antigravity's own permission prompts, so without these, everything the reviewer
+approves would still pop up at you. They do not disappear when the plugin stops
+loading.
 
-**So a sentinel watches them.** `setup` also registers a small program in
+**So a sentinel watches them.** `setup` registers a small program in
 `~/.gemini/config/hooks.json` under the key `autoagy-tripwire` — a file
 `agy plugin` does not manage, so it keeps running when the plugin is disabled,
-replaced, or never installed properly. When it finds the plugin gone, it
-**refuses every tool call**. agy will then be unable to do anything until you
-deal with it. That is deliberate: the alternative is those grants applying
-with nobody reviewing, which is strictly worse than not having installed autoagy.
+replaced or never installed properly. When it finds the plugin gone it **refuses
+every tool call**, which is deliberate: agy doing nothing beats those grants
+applying with nobody reviewing.
 
-**The way out, when agy refuses everything:**
+**The way out, when agy refuses everything:** run `autoagy status`, then reinstall
+(`node scripts/install.mjs`) or uninstall (`node scripts/install.mjs --uninstall`).
+If you cannot run commands at all, delete the `autoagy-tripwire` key from
+`~/.gemini/config/hooks.json` — **the other keys there are someone else's** — and
+then uninstall or reinstall, since the grants are unguarded until you do.
 
-- Run `autoagy status`, then reinstall (`node scripts/install.mjs`) or remove it
-  (`node scripts/install.mjs --uninstall`).
-- If you cannot run commands at all: delete the `autoagy-tripwire` key from
-  `~/.gemini/config/hooks.json`. **Leave the other keys alone — they are someone
-  else's hooks.** Removing the sentinel puts the grants back to unguarded, so
-  reinstall or uninstall right after.
+**Two cases are still fail-open:** someone deletes the sentinel by hand while the
+grants remain, and Antigravity IDE / 2.0, where you add the grants in the settings
+UI, `setup` writes nothing and no sentinel is registered (whether the IDE loads
+`~/.gemini/config/hooks.json` at all has not been measured). If the pinned node
+interpreter disappears, hooks fail to start and tool calls fail — fail-closed, not
+silent.
 
-**Do not pause autoagy with `agy plugin disable autoagy`** — the grants stay and
-the sentinel will refuse everything. Use `autoagy mode off`, or uninstall.
+The command class can be narrowed to fail-closed (`commandGrant: "executor"`, the
+Linux default); `mcp(*)` and `execute_url(*)` have no narrower form and rest on the
+sentinel alone. **This is a different shape from Codex**, which needs no host
+permissions widened at all: turning auto mode off there returns to something
+stricter, while autoagy has to widen first, which is why something has to watch
+whether the plugin is still there.
 
-**Two cases are still fail-open**, and you should know which:
+## Install, uninstall, upgrade
 
-- someone deletes the sentinel by hand while the grants remain;
-- **Antigravity IDE / Antigravity 2.0**, where the grants are added by hand in
-  the settings UI, `setup` does not write them, and no sentinel is registered for
-  them (whether the IDE even loads `~/.gemini/config/hooks.json` has not been
-  measured).
+Requirements: Node.js ≥ 20, Antigravity CLI (`agy`) ≥ 1.2. On Linux, install
+`bubblewrap` for the own sandbox (`sudo apt install bubblewrap`).
 
-If the pinned node interpreter disappears, hook processes fail to start and tool
-calls fail — fail-closed, not silent.
+```bash
+git clone https://github.com/JXMss/autoagy autoagy && cd autoagy
+node scripts/install.mjs --dry-run     # prints exactly what it would change
+node scripts/install.mjs
+alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
+```
+
+Then use `agy` as usual. Uninstalling is the same script:
+
+```bash
+node scripts/install.mjs --uninstall             # revert the settings, remove the plugin and the sentinel
+node scripts/install.mjs --uninstall --purge     # and delete ~/.gemini/autoagy (config, state, logs)
+node scripts/install.mjs --uninstall --dry-run   # print what it would revert, change nothing
+```
+
+It takes the grants out first and removes nothing else unless they came out: when
+they cannot (usually `settings.json` is no longer valid JSON) it stops with exit 1
+and leaves the plugin, the sentinel and the setup record in place, since each of
+them is what stands behind those grants. Repair the file and run it again. If you
+cannot run anything at all, delete the `autoagy-tripwire` key from
+`~/.gemini/config/hooks.json` and then uninstall or reinstall.
+
+**Upgrading** is `git pull` followed by `node scripts/install.mjs` again. agy has
+no plugin update command (`agy plugin` does install, uninstall, enable, disable,
+validate), so no agy plugin updates itself and autoagy is no exception. Do not
+upgrade with `agy plugin install ./plugin` directly: that overwrites the installed
+`hooks.json` with the plugin's own, whose node interpreter is not pinned —
+`autoagy status` warns when it finds that.
+
+**What it writes** (all of it reverted by `--uninstall`):
+
+1. `~/.gemini/config/plugins/autoagy` — the plugin, via `agy plugin install`.
+2. `~/.gemini/antigravity-cli/settings.json` (backed up first to
+   `<that file>.autoagy-backup-<timestamp>`) — the grants above,
+   `write_file(<dir>)` per `writableRoots` entry, `enableTerminalSandbox: true`,
+   `toolPermission: "proceed-in-sandbox"`, and `allowNonWorkspaceAccess: false`,
+   the one check that happens at the moment agy writes.
+3. `~/.gemini/config/hooks.json` — the sentinel registration, merged in. Your own
+   hooks are left alone; if that file is not valid JSON, `setup` writes **nothing
+   at all**, grants included, and says so.
+4. `~/.gemini/autoagy/` — `config.json`, `state/`, `logs/`, `bin/tripwire.mjs`, and
+   `bin/exec-confined.mjs` with `commandGrant: "executor"`.
+5. The plugin's own `hooks.json` — the node interpreter is pinned to an absolute
+   path, so a broken `PATH` cannot silently stop every hook.
+
+Each item, with what was measured behind it, is in the reference manual:
+[安装到底改了你机器上的什么](docs/reference.md#安装到底改了你机器上的什么) (Chinese, like
+the design notes).
 
 ## Platform support
 
@@ -77,68 +143,6 @@ calls fail — fail-closed, not silent.
 
 macOS is the largest gap: Codex solves the same problem with its seatbelt
 sandbox, and autoagy has no equivalent there.
-
-## What it changes on your machine
-
-Everything below is written by `autoagy setup` (run by `scripts/install.mjs`)
-and reverted by `teardown` / `--uninstall`.
-
-1. **`~/.gemini/config/plugins/autoagy`** — the plugin itself, via `agy plugin install`.
-2. **`~/.gemini/antigravity-cli/settings.json`** — backed up first to
-   `<that file>.autoagy-backup-<timestamp>`, then:
-   - `permissions.allow` gains a command grant (`commandGrant` defaults to
-     `"auto"`: the one-program executor on Linux, `command(*)` elsewhere),
-     `mcp(*)`, `execute_url(*)`, and `read_url(*)` where autoagy's own sandbox
-     can run (`networkGrants` defaults to `"auto"`);
-   - and `read_file(/)`: the `allowNonWorkspaceAccess: false` below caps reads
-     as well as writes (measured: reading `/etc/hostname` prompted "outside
-     workspace"), so without it every read outside the workspace — library
-     sources, system headers — prompts. Codex reads anywhere; credential reads
-     (`~/.ssh`, `.env`, …) are still reviewed by autoagy first. `readGrant:
-     "none"` leaves it out;
-   - plus `write_file(<dir>)` for each directory in `writableRoots`, and
-     `read_url(<domain>)` for each trusted domain when `networkGrants:
-     "trusted-domains"` (off by default);
-   - `enableTerminalSandbox: true`, `toolPermission: "proceed-in-sandbox"`;
-   - `allowNonWorkspaceAccess: false` — the one check that happens at the moment
-     agy writes, which is what caps an edit whose path was swapped after autoagy
-     checked it. agy removes this key whenever it saves its settings (trusting a
-     new folder is enough), and a missing key means `false` (measured on agy
-     1.2.7), so not seeing it in the file is normal; `autoagy status` shows
-     `false (not in the file…)`. Setup only changes it when it was `true`, and
-     teardown puts that back.
-3. **`~/.gemini/config/hooks.json`** — the sentinel registration, merged in. Your
-   own hooks in that file are left alone; if the file is not valid JSON, `setup`
-   writes **nothing at all** (no grants either) and tells you to fix it.
-4. **`~/.gemini/autoagy/`** — `config.json`, `state/` (trust flags, tokens, locks),
-   `logs/` (decisions; full review prompts only if you turn that on), and
-   `bin/tripwire.mjs`. With `commandGrant: "executor"` also `bin/exec-confined.mjs`.
-5. **The plugin's own `hooks.json`** — the node interpreter is pinned to an
-   absolute path, so a broken `PATH` cannot silently stop every hook.
-
-Undo: `node scripts/install.mjs --uninstall` (add `--purge` to delete
-`~/.gemini/autoagy` too). If reverting the grants fails — usually because
-`settings.json` is no longer valid JSON — teardown **stops** with exit 1 and
-keeps the plugin, the sentinel and the setup record, including under `--purge`,
-so the grants never become unrevertable. Repair the file and run it again.
-
-## Install
-
-Requirements: Node.js ≥ 20, Antigravity CLI (`agy`) ≥ 1.2. On Linux, install
-`bubblewrap` for the own sandbox (`sudo apt install bubblewrap`).
-
-```bash
-git clone https://github.com/JXMss/autoagy autoagy && cd autoagy
-node scripts/install.mjs --dry-run     # prints exactly what it would change
-node scripts/install.mjs
-alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
-```
-
-Then use `agy` as usual.
-
-```bash
-node scripts/install.mjs --uninstall   # revert the settings and remove the plugin
-```
 
 ## Day-to-day commands
 
@@ -161,7 +165,7 @@ approval.
 ## Configuration worth knowing
 
 `~/.gemini/autoagy/config.json` — the full table is in the
-[configuration table in the Chinese README](README.md#配置geminiautoagyconfigjson). The ones that change
+[full configuration table](docs/reference.md#配置全表). The ones that change
 what you experience:
 
 | Field | Default | Why you would touch it |
@@ -207,8 +211,8 @@ To change the model or the effort:
 an example); a wrong name makes every review fail, which counts as a refusal.
 `effort` is `low`, `medium` or `high`.
 
-Or use any **OpenAI-compatible** Chat Completions endpoint (faster, but billed
-per use), for example Gemini:
+Or use any **OpenAI-compatible** Chat Completions endpoint (faster, paid per use),
+for example Gemini:
 
 ```json
 {
@@ -223,28 +227,13 @@ per use), for example Gemini:
 }
 ```
 
-OpenAI, DeepSeek and others work the same way: change `baseUrl`, `apiKeyEnv` and
-`model`. Things to know:
-
-- **The key is read from an environment variable; the config only names it.** It
-  is read from the hook's environment, which is the one agy was started with, so
-  `export GEMINI_API_KEY=...` in the terminal you start agy from (or in your shell
-  startup file), then restart agy. The `api key … is set` line in `autoagy status`,
-  and `autoagy review`, look at the terminal you run them in, not at agy's. Inside
-  autoagy's own sandbox commands cannot see the variable (the environment is
-  cleared); without that sandbox, the known ways of reading it are reviewed, but
-  not every way — see the environment limit in the
-  [Chinese README](README.md#已知限制).
-- A missing key, an unreachable endpoint or a wrong model name makes every review
-  fail, which counts as a refusal; three in a row stop the turn, and the agent
-  points you at `autoagy status`.
-- Local Ollama: `baseUrl` is `http://localhost:11434/v1`. Ollama does not check
-  the key, but autoagy always sends an `Authorization` header, so set the variable
-  `apiKeyEnv` names to any non-empty value.
-- If the endpoint rejects `response_format: {"type": "json_object"}`, set
-  `jsonMode` to `false`. Extra request headers a gateway needs go in `headers`.
-- What each review sends is listed under [Privacy](#privacy): trimmed for length,
-  never redacted.
+**The key is read from an environment variable** (the config file only names it),
+from the environment agy itself was started in — so export it in the terminal you
+start `agy` from and restart agy. A missing key, an unreachable endpoint or a wrong
+model name makes every review fail, which counts as a refusal; three in a row end
+the turn. Local Ollama, gateways needing extra headers, endpoints without
+`response_format` support: see
+[审核后端 OpenAI 兼容接口](docs/reference.md#审核后端-openai-兼容接口).
 
 A config change applies from the next tool call. To try it without starting an
 agent, review a single command:
@@ -253,12 +242,19 @@ agent, review a single command:
 autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandbox":true}'
 ```
 
+## Rules and session trust
+
+Layer one is deterministic and model-free: what runs untouched, what must be
+reviewed, what is refused outright — plus a fence that stops waving through a
+path whose target drifted earlier in the session. Both in full:
+[决策规则](docs/reference.md#决策规则), [会话信任](docs/reference.md#会话信任).
+
 ## What it does not protect against
 
 These are the boundaries the design has. Things that are not finished yet, and
-meant to be fixed, are listed in [docs/open-issues.md](docs/open-issues.md)
-(Chinese, like the design notes).
-
+These are documented, accepted limits. The full list of 20 is in the reference
+manual ([已知限制完整清单](docs/reference.md#已知限制完整清单)); what is not finished
+yet, and meant to be fixed, is in [docs/open-issues.md](docs/open-issues.md).
 These are documented, accepted limits — the full reasoning is in the
 [design record](docs/design.md):
 
@@ -293,7 +289,7 @@ budget-trimmed transcript (length caps only — **no redaction**, so anything
 sensitive in your transcript goes as-is), the pending action's JSON, the paths of
 files edited recently in the session, local environment facts (platform,
 workspace roots, sandbox state), and the API key. Details in the
-[Chinese README](README.md#隐私与数据流向).
+[隐私与数据流向](docs/reference.md#隐私与数据流向).
 
 ## Development
 
