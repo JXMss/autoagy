@@ -301,6 +301,10 @@ a skipped sandbox test means the sandbox was never started while the run still
 looks green. On a machine that does have one, `status.test.mjs` skips a single
 test rather than writing over it.
 
+## Acknowledgements
+
+Thanks to the [LinuxDo](https://linux.do) community for their support.
+
 ## License
 
 Apache-2.0. It contains material adapted from OpenAI Codex, also Apache-2.0 —

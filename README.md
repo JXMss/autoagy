@@ -179,6 +179,10 @@ test/                    node:test 测试
 docs/design.md           调研记录、实测的 Antigravity 行为、与 Codex 的差异
 ```
 
+## 致谢
+
+感谢 [LinuxDo](https://linux.do) 社区的支持。
+
 ## 许可
 
 Apache-2.0。审核策略文本和若干规则改编自 [OpenAI Codex](https://github.com/openai/codex)（Apache-2.0），详见 [NOTICE](NOTICE)。
