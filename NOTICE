@@ -32,7 +32,9 @@ Apache License, Version 2.0:
   codex-rs/shell-command/src/command_safety/.
 - The 90-second review deadline and the 3-attempt cap follow the guardian
   constants in codex-rs/core/src/guardian/mod.rs and review.rs. They were
-  carried over in code rather than listed above, so they are noted here.
+  carried over in code rather than listed above, so they are noted here. The 90
+  seconds is now the budget for one attempt inside a longer deadline for the
+  whole review.
 
 Changes: the prompts were rewritten for Google Antigravity's tools, terminal
 sandbox and permission model, for a reviewer without tools, and extended with

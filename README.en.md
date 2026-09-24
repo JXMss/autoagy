@@ -17,11 +17,6 @@ It is a per-item port of Codex v0.154.0 (`codex-rs/core/src/guardian`), adapted
 against measurements of Antigravity's hook, permission and sandbox behaviour.
 Every design decision in the full documentation carries the experiment behind it.
 
-> **Status: experimental, and this is an unofficial plugin.** It is not made by,
-> endorsed by, or supported by Google (Antigravity) or OpenAI (Codex). The
-> behaviours it depends on were measured on agy 1.2.5–1.2.7 and agy updates
-> itself, so treat it as something you are trying out rather than infrastructure.
-
 ---
 
 ## How it maps to Codex
@@ -80,7 +75,8 @@ whether the plugin is still there.
 
 ## Install, uninstall, upgrade
 
-Requirements: Node.js ≥ 20, Antigravity CLI (`agy`) ≥ 1.2. On Linux, install
+Requirements: Node.js ≥ 20, Antigravity CLI (`agy`) ≥ 1.2 (measured on 1.2.5–1.2.7,
+and agy updates itself). On Linux, install
 `bubblewrap` for the own sandbox (`sudo apt install bubblewrap`).
 
 ```bash
