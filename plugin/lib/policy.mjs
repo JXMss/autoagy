@@ -435,6 +435,51 @@ function classifyRead(ctx, state = {}) {
       if (ctx.toolName === 'grep_search' && isProcessTreePath(p) && walkReachesProcessInfo(p)) {
         return review('credential-read', `Searches ${p}, inside /proc, where a walk reaches every process's environment and command line.`);
       }
+      // autoagy's own files: the state that records what is trusted, the rules
+      // the reviewer applies, the log and evidence of every past review, the
+      // one-time tokens. The edit tools refuse these outright and the command
+      // path reviews naming them, so a read tool that skipped both was the one
+      // way in — and the read grant is what closed the door behind it: agy used
+      // to prompt for reads outside the workspace itself, and
+      // `readGrant: "anywhere"` (the default) takes that prompt away, so on this
+      // path nothing else stood in front of them.
+      //
+      // After the credential checks on purpose, and only because it costs
+      // nothing: every answer here is a review, so the order decides which
+      // reason is shown, and a path is never both — autoagy's own files are not
+      // a credential store. `classifyWriteTarget` answers 'self' first because
+      // there the order decides between a refusal and a review.
+      if (ctx.selfPaths.some((self) => isWithin(p, self))) {
+        return review('self-read', `Reads autoagy's own files (${p}), which are the review's state, rules and evidence.`);
+      }
+      // A search reads every file below its directory, so naming the parent
+      // reaches them just as well. The same reach, and the same shape, that
+      // /proc and the credential stores needed.
+      if (ctx.toolName === 'grep_search' && ctx.selfPaths.some((self) => isWithin(self, p))) {
+        return review('self-read', `Searches ${p}, which contains autoagy's own files.`);
+      }
+      // The other half of the same hole: Antigravity's conversation logs are the
+      // evidence the reviewer is given, and `isConversationLog` is the rule the
+      // write side already refuses on (`classifyWriteTarget` → 'evidence'). The
+      // command path reviews naming one too (`.system_generated` is a
+      // `mentionsSelf` needle), so the read tools were the one channel left —
+      // and what they reach is exactly what the reviewer will be shown for the
+      // next action, in a file the agent may not edit but could read and answer
+      // around. Any conversation's log, not just this one's, for the same reason
+      // the needle is a substring: the id in the path is not the point.
+      if (isConversationLog(ctx, p)) {
+        return review('self-read', `Reads a conversation log (${p}), which is the evidence the reviewer is given.`);
+      }
+      // And the walk that reaches a log without naming one. The directory a log
+      // sits in is named after a conversation id, so the check cannot be the
+      // path test above: it is "somewhere under Antigravity's data directory",
+      // in either direction, the way the credential and `/proc` searches are
+      // judged. A search there that happens to reach no log is reviewed anyway —
+      // one automatic review, and the alternative is enumerating what agy keeps
+      // where, which is the thing that changes when agy updates.
+      if (ctx.toolName === 'grep_search' && ctx.appDataDir && (isWithin(p, ctx.appDataDir) || isWithin(ctx.appDataDir, p))) {
+        return review('self-read', `Searches ${p}, inside Antigravity's data directory, where a walk reaches the conversation logs the reviewer is given as evidence.`);
+      }
     }
   }
   return allow('read');

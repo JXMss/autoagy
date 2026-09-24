@@ -62,6 +62,61 @@ test('reads are allowed, credential reads are reviewed', () => {
   assert.equal(verdict('grep_search', { SearchPath: '/proc', Query: 'x' }, { config: own, bwrapProbe: okProbe }).category, 'credential-read');
 });
 
+test("a read tool cannot reach autoagy's own files unreviewed", () => {
+  // The edit tools refuse these outright and the command path reviews naming
+  // them, so a read tool that skipped both was the one way in. It matters more
+  // than it looks: `readGrant: "anywhere"` is the default, and that grant is
+  // what removed agy's own prompt for reads outside the workspace — so nothing
+  // else stands in front of the state that records what is trusted, the rules
+  // the reviewer applies, the log of every past review, and the one-time tokens.
+  const autoagyHome = dirs.env.AUTOAGY_HOME;
+  for (const rel of ['config.json', 'logs/decisions.jsonl', 'state/pending']) {
+    const read = verdict('view_file', { AbsolutePath: path.join(autoagyHome, rel) });
+    assert.equal(read.verdict, 'review', `${rel} must be reviewed`);
+    assert.equal(read.category, 'self-read', rel);
+    assert.equal(verdict('read_file', { AbsolutePath: path.join(autoagyHome, rel) }).verdict, 'review', rel);
+  }
+  // The registration files are the same surface: a hook written there runs on
+  // every tool call, outside every sandbox, and reading one is reading where the
+  // gates are.
+  assert.equal(verdict('read_file', { AbsolutePath: path.join(dirs.home, '.gemini', 'config', 'hooks.json') }).verdict, 'review');
+  // A search reads every file below the directory it names, so naming the parent
+  // reaches them without naming one — the same reach, and the same shape, that
+  // /proc and the credential stores needed.
+  assert.equal(verdict('grep_search', { SearchPath: autoagyHome, Query: 'token' }).verdict, 'review');
+  assert.equal(verdict('grep_search', { SearchPath: path.join(dirs.home, '.gemini'), Query: 'token' }).verdict, 'review');
+  // Nothing else about reads moves: an ordinary read and an ordinary search are
+  // still free, and `list_dir` stays out on purpose — it returns names, and the
+  // credential list already allows it for the same reason.
+  assert.equal(verdict('read_file', { AbsolutePath: path.join(dirs.workspace, 'src', 'main.js') }).verdict, 'allow');
+  assert.equal(verdict('grep_search', { SearchPath: dirs.workspace, Query: 'foo' }).verdict, 'allow');
+  assert.equal(verdict('list_dir', { DirectoryPath: path.join(autoagyHome, 'state') }).verdict, 'allow');
+});
+
+test("a read tool cannot reach the conversation log unreviewed", () => {
+  // The other half of the hole above, and the half that matters more: this file
+  // is what the reviewer is shown as evidence for the next action. Writing it is
+  // refused and naming it in a command is reviewed, so the read tools were the
+  // one channel that covered neither.
+  const log = path.join(dirs.brain, '.system_generated', 'logs', 'transcript_full.jsonl');
+  for (const tool of ['read_file', 'view_file']) {
+    const out = verdict(tool, { AbsolutePath: log });
+    assert.equal(out.verdict, 'review', tool);
+    assert.equal(out.category, 'self-read', tool);
+  }
+  // Another conversation's log is the same evidence class: the id in the path is
+  // not what makes it evidence.
+  const other = path.join(dirs.appData, 'brain', '99999999-2222-4333-8444-555555555555', '.system_generated', 'logs', 'transcript_full.jsonl');
+  assert.equal(verdict('read_file', { AbsolutePath: other }).category, 'self-read');
+  // A walk that reaches a log without naming one.
+  assert.equal(verdict('grep_search', { SearchPath: dirs.brain, Query: 'USER_INPUT' }).verdict, 'review');
+  assert.equal(verdict('grep_search', { SearchPath: dirs.appData, Query: 'USER_INPUT' }).verdict, 'review');
+  // An artifact next to the log is not evidence, and stays free — the same line
+  // the edit side draws (`walkthrough.md` is writable, the log is not).
+  assert.equal(verdict('read_file', { AbsolutePath: path.join(dirs.brain, 'walkthrough.md') }).verdict, 'allow');
+  assert.equal(verdict('grep_search', { SearchPath: dirs.workspace, Query: 'foo' }).verdict, 'allow');
+});
+
 test('agent coordination tools are allowed', () => {
   for (const name of ['invoke_subagent', 'schedule', 'send_message', 'manage_task', 'ask_question', 'search_web']) {
     assert.equal(verdict(name, {}).verdict, 'allow', name);

@@ -150,6 +150,7 @@ OpenAI、DeepSeek 等同理，改 `baseUrl` / `apiKeyEnv` / `model` 即可。需
 | 工具调用 | 结果 |
 | --- | --- |
 | 读文件、列目录、搜索、查看终端/任务状态、`search_web` | 放行（读取凭据类文件、搜索包含凭据位置的目录需审核；`webSearch: "review"` 时 `search_web` 送审） |
+| 读 autoagy 自己的文件（配置、`state/`、`logs/`、插件目录、hook 注册位置）或 Antigravity 的会话日志（`.system_generated`），以及搜索能走到它们的目录 | 审核（`self-read`）。这三条通道原先只有两条管得住：编辑工具直接拒绝，命令送审，而读工具放行——`state/pending` 里是一次性令牌，`logs/` 是审核证据，会话日志是审核模型下一次要看的材料。`readGrant: "anywhere"`（默认）撤掉了 agy 原本为项目外读取兜底的弹窗，所以这条必须由 autoagy 自己判。`list_dir` 不在内（它只返回名字），同目录的 artifact 也不在内 |
 | 编辑工作区、会话 artifact 目录、临时目录内的文件 | 放行 |
 | 编辑工作区外的文件，或 `.git`、`.agents`、`~/.gemini` 等 | 审核 |
 | 编辑 autoagy 自己的配置/插件目录，或**任何能注册 hook 的位置**（`~/.gemini/config/hooks.json`、`~/.gemini/config/plugins/` 下的任何目录） | 直接拒绝。写进这些位置的文件会成为 agy 在**每次工具调用前执行的命令，且在所有沙箱之外**——等于 agent 给自己装监管者。这个问题只该问人，不该由模型判一次然后一直生效 |

@@ -247,12 +247,11 @@ path whose target drifted earlier in the session. Both in full:
 
 ## What it does not protect against
 
-These are the boundaries the design has. Things that are not finished yet, and
-These are documented, accepted limits. The full list of 20 is in the reference
-manual ([已知限制完整清单](docs/reference.md#已知限制完整清单)); what is not finished
-yet, and meant to be fixed, is in [docs/open-issues.md](docs/open-issues.md).
-These are documented, accepted limits — the full reasoning is in the
-[design record](docs/design.md):
+These are the boundaries the design has, not a to-do list. The full list of 19 is
+in the reference manual
+([已知限制完整清单](docs/reference.md#已知限制完整清单)); what is not finished, and
+meant to be fixed, is in [docs/open-issues.md](docs/open-issues.md). The
+reasoning behind each limit is in the [design record](docs/design.md):
 
 - **Edits and reads are executed by agy, outside every sandbox.** autoagy resolves
   the path before handing it over and re-checks afterwards, so a path whose
@@ -290,14 +289,17 @@ workspace roots, sandbox state), and the API key. Details in the
 ## Development
 
 ```bash
-npm test                 # unit and integration tests; the mock reviewer is
-                         # selected from the config file, never from the environment
+npm test                 # unit and integration tests; the mock reviewer needs
+                         # `reviewer.backend: "mock"` in the config file AND
+                         # AUTOAGY_UNSAFE_MOCK_REVIEWER=1 in the environment
 npm run validate         # agy plugin validate plugin (needs the agy CLI)
 ```
 
-The suite is expected to run with **zero skips** on Linux with bubblewrap
-installed; CI enforces that, because a skipped sandbox test means the sandbox was
-never started while the run still looks green.
+The suite runs with **zero skips** on Linux with bubblewrap installed, when no
+real autoagy install exists — that is CI's case, and CI enforces the zero, because
+a skipped sandbox test means the sandbox was never started while the run still
+looks green. On a machine that does have one, `status.test.mjs` skips a single
+test rather than writing over it.
 
 ## License
 

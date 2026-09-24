@@ -20,8 +20,13 @@ jobs:
       # and the ones that skip are the layer commands run *unreviewed* inside, so
       # the suite would report success while that layer was never started. The
       # last step turns exactly that silence into a failure.
+      #
+      # Best-effort on purpose: if a runner image ever drops the knob, this step
+      # fails for a reason that is not about the code. The probe and the no-skip
+      # check below still catch the condition it exists to prevent, and they name
+      # it accurately.
       - name: allow unprivileged user namespaces
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: install bubblewrap and util-linux flock
         run: |

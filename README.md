@@ -143,7 +143,7 @@ autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandb
 
 ## 已知限制
 
-下面挑的是**会影响你怎么用它**的几条，设计上就存在。[完整清单在参考手册](docs/reference.md#已知限制完整清单)（20 条），还没做完、准备要修的事在 [docs/open-issues.md](docs/open-issues.md)。
+下面挑的是**会影响你怎么用它**的几条，设计上就存在。[完整清单在参考手册](docs/reference.md#已知限制完整清单)（19 条），还没做完、准备要修的事在 [docs/open-issues.md](docs/open-issues.md)。
 
 - **没有启用 autoagy 自己的沙箱时**（macOS、Windows、没装 bubblewrap、IDE 没设 `ownSandbox: "on"`），沙箱内的命令仍然能写 `.git`（植入 git hook）和对话日志（伪造审核模型看到的用户消息）。autoagy 能做的只有把命令里字面出现 `.system_generated`、autoagy 自身路径或凭据位置的命令送审——这是原始命令行上的子串匹配，变量拼接或 base64 之类可以绕过，而且事后没有任何完整性校验能发现日志被改过。**这不是「和 Linux 上差不多」，而是明显更弱**，也不能靠配置补上。审核模型现在会收到一行明确的提示，知道在此配置下不能把 transcript 里的用户发言当作已确立的授权。
 - **临时的工作区外编辑批准了也执行不了。** setup 设的 `allowNonWorkspaceAccess: false` 是在写入那一刻按真实落点判的，所以「帮我改一下 `~/.gitconfig`」这种事先没声明的区外编辑，即使审核模型批准，agy 仍会要一次 `write_file` 权限——交互下多一次确认，**headless 下直接失败**。autoagy 补不上这个：授权是 agy 启动时读一次就缓存的（实测），没法在批准的那一刻即时补一条。固定要写的目录请放进 `writableRoots`（会拿到自己的窄授权）；真要恢复旧行为就把 `allowNonWorkspaceAccess` 设回 `true`，代价是丢掉问题里唯一一道写入时的封顶。
