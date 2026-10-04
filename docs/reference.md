@@ -45,7 +45,7 @@ Antigravity 的终端沙箱允许命令写工作区里的 `.git`，也允许写�
 - 所有挂载都按路径**真正的落点**挂：`~/.gemini` 放在 dotfiles 仓库里（stow、chezmoi 的常见布局）、工作区的 `.codex` 用绝对路径指到别处，这类符号链接在沙箱里照样通向同一个只读挂载，不论命令怎么拼写路径。（之前路径里任何一段是绝对符号链接，bwrap 都会在启动前失败，于是**每一条**沙箱命令都失败。）但符号链接这个目录项本身还在可写的工作区里：命令可以删掉它、换一个真目录上去，这一点与相对符号链接一样没有覆盖。`writableRoots` 里还不存在的目录，要等它建出来之后的下一条命令才开始保护其中的 `.git` 等名字；
 - 隐藏：`credentialPaths` 里以 `~/` 开头的凭据位置（`~/.ssh`、`~/.aws`、`~/.netrc`……）在沙箱里显示为空目录或空文件；
 - 无网络；`socket`/`socketpair` 只允许 `AF_UNIX`，建立和使用的调用（`connect`、`bind`、`listen`、`sendto`、`sendmsg`……）一律以 `EPERM` 失败，另外禁掉 `ptrace`、`process_vm_*`、`io_uring_*`（`--unshare-net` 只挡 IP 网络，挡不住文件系统上的 Unix socket）。x86-64 上带 bit 30 的系统调用号（x32 ABI）一并拒绝——`seccomp_data.arch` 区分不了这两个 ABI，只比系统调用号的表会被它整个绕过，实测 `socket(AF_INET)` 是 `EPERM` 而 `0x40000000|41` 返回了描述符；
-- 环境变量从白名单重建（`--clearenv` + `--setenv`）：`PATH`、`HOME`、`USER`、`LOGNAME`、`SHELL`、`TERM`、`TMPDIR`、`TZ`、`PWD`、`LANG` 和 `LC_*`，值原样传递。hook 继承的是 agy 的环境，里面通常有你 export 的 API key；不清理的话，沙箱里一条 `printenv` 就能读到它，而且这条命令是免审的。需要额外变量时用 `ownSandboxEnvPassThrough`（见下表）。
+- 环境变量从白名单重建（`--clearenv` + `--setenv`）：`PATH`、`HOME`、`USER`、`LOGNAME`、`SHELL`、`TMPDIR`、`TZ`、`PWD`、`LANG` 和 `LC_*`，值原样传递；另外固定设 `TERM=dumb`、`PAGER=cat`、`GIT_PAGER=cat`，和 agy 自己跑命令时一样（hook 继承的是你终端的 `TERM`，照搬的话 `git log` 会停在 `less` 里等按键）。hook 继承的是 agy 的环境，里面通常有你 export 的 API key；不清理的话，沙箱里一条 `printenv` 就能读到它，而且这条命令是免审的。需要额外变量时用 `ownSandboxEnvPassThrough`（见下表）。
 
   注意两点。一是这些变量（包括 `PATH` 和 `HOME`）的值会逐字写进改写后的命令行（`--setenv NAME VALUE`），而改写后的参数是 agent 能看到的内容，所以**白名单和 `ownSandboxEnvPassThrough` 里都不要放密钥**。二是 autoagy **不会**过滤 `PATH`：沙箱内工作区是可写且可执行的，命令本来就能按路径运行工作区里的任何文件，过滤 `PATH` 买不到任何隔离，只会让 `.venv/bin`、`node_modules/.bin` 里的工具找不到或用错解释器。真正危险的是**沙箱外**的命令通过工作区里的 `PATH` 目录解析到被改过的可执行文件——那条路会送审（见「已知限制」里的 `command-from-writable-root`）。
 

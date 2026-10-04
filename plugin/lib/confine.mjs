@@ -50,14 +50,30 @@ export const SECCOMP_FD = 3;
 // tokens of whatever the user has exported, and a sandboxed command could read
 // them without review and carry them into the transcript. An allowlist rather
 // than a denylist, because a denylist's failure mode is a secret leaking.
-const ENV_ALLOWLIST = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TERM', 'TMPDIR', 'TZ', 'PWD', 'LANG'];
+const ENV_ALLOWLIST = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TZ', 'PWD', 'LANG'];
 const ENV_ALLOWLIST_PREFIXES = ['LC_'];
+// Set, not passed through: what agy itself runs a command with. Its binary
+// holds `TERM=dumb` and `PAGER=cat`, and its instructions tell the model
+// "Commands will be run with PAGER=cat", so the model adds no `--no-pager`. The
+// hook inherits the user's terminal instead — TERM=xterm-256color and no PAGER —
+// and with those `git log` waited in `less` for a key nobody pressed: 157 of 381
+// pageable git commands over twelve days of real use, each one a backgrounded
+// task the agent then polled and sent "q". GIT_PAGER too, because git asks
+// `core.pager` before PAGER and the user's gitconfig is readable in the sandbox.
+// No pass-through overrides these: the terminal they would come from is not the
+// one the command's output goes to.
+const ENV_FIXED = [
+  ['TERM', 'dumb'],
+  ['PAGER', 'cat'],
+  ['GIT_PAGER', 'cat'],
+];
 /** Long values only inflate the tool-call payload the agent sees. */
 const ENV_VALUE_MAX = 4096;
 
-/** True for the names `sandboxEnv` passes through by default. */
+/** True for the names `sandboxEnv` passes through by default, or sets itself. */
 export function envNameAllowed(name, passThrough = []) {
   if (ENV_ALLOWLIST.includes(name) || ENV_ALLOWLIST_PREFIXES.some((p) => name.startsWith(p))) return true;
+  if (ENV_FIXED.some(([fixed]) => fixed === name)) return true;
   return passThrough.some((pattern) => (pattern.endsWith('*') ? name.startsWith(pattern.slice(0, -1)) : name === pattern));
 }
 
@@ -74,15 +90,16 @@ export function envNameAllowed(name, passThrough = []) {
  *
  * @param {NodeJS.ProcessEnv} env the hook's environment (not process.env, so tests can inject)
  * @param {{ passThrough?: string[] }} options
- * @returns {[string, string][]} name/value pairs, in a stable order
+ * @returns {[string, string][]} name/value pairs, in a stable order: the allowlisted
+ *   ones sorted by name, then the fixed ones
  */
 export function sandboxEnv(env = {}, { passThrough = [] } = {}) {
   const out = [];
   for (const name of Object.keys(env).sort()) {
-    if (!envNameAllowed(name, passThrough)) continue;
+    if (ENV_FIXED.some(([fixed]) => fixed === name) || !envNameAllowed(name, passThrough)) continue;
     out.push([name, String(env[name] ?? '').slice(0, ENV_VALUE_MAX)]);
   }
-  return out;
+  return [...out, ...ENV_FIXED.map(([name, value]) => [name, value])];
 }
 
 function trustedBinary(candidates) {

@@ -371,8 +371,9 @@ test('the sandbox environment is an allowlist, and clears before it sets', () =>
     LC_ALL: 'C.UTF-8',
     MY_APP_TOKEN: 'x',
   };
-  assert.deepEqual(sandboxEnv(env).map(([name]) => name), ['HOME', 'LC_ALL', 'PATH']);
-  assert.deepEqual(sandboxEnv(env, { passThrough: ['MY_APP_*'] }).map(([name]) => name), ['HOME', 'LC_ALL', 'MY_APP_TOKEN', 'PATH']);
+  const fixed = ['TERM', 'PAGER', 'GIT_PAGER'];
+  assert.deepEqual(sandboxEnv(env).map(([name]) => name), ['HOME', 'LC_ALL', 'PATH', ...fixed]);
+  assert.deepEqual(sandboxEnv(env, { passThrough: ['MY_APP_*'] }).map(([name]) => name), ['HOME', 'LC_ALL', 'MY_APP_TOKEN', 'PATH', ...fixed]);
 
   const argv = parseShell(confinedCommandLine(ctxFor({ CommandLine: 'true' }), 'true')).commands[0].argv;
   const clear = argv.indexOf('--clearenv');
@@ -380,6 +381,31 @@ test('the sandbox environment is an allowlist, and clears before it sets', () =>
   // bwrap applies these in order, so a later --clearenv would wipe the values.
   assert.ok(argv.every((a, i) => a !== '--setenv' || i > clear), '--clearenv comes before every --setenv');
   assert.ok(!argv.some((a) => a.includes('sk-not-a-real-secret') || a.includes('ssh-agent.sock')), 'no secret value reaches the command line');
+});
+
+test('a rebuilt environment keeps agy\'s pager settings, not the terminal the hook inherited', () => {
+  // agy runs commands with TERM=dumb PAGER=cat and tells the model so, so the
+  // model adds no --no-pager. The hook's environment is the user's terminal
+  // instead, and a `git log` that got TERM=xterm-256color and no PAGER sat in
+  // `less` until the agent sent it "q" (41% of the pageable git commands in a
+  // twelve-day log).
+  const hookEnv = { PATH: '/usr/bin:/bin', HOME: '/home/someone', TERM: 'xterm-256color', GIT_PAGER: 'less -R' };
+  const want = { TERM: 'dumb', PAGER: 'cat', GIT_PAGER: 'cat' };
+  const fromList = Object.fromEntries(sandboxEnv(hookEnv));
+  for (const [name, value] of Object.entries(want)) assert.equal(fromList[name], value, `${name} in the allowlisted environment`);
+  // Not even an explicit pass-through brings the terminal's pager back.
+  assert.equal(Object.fromEntries(sandboxEnv(hookEnv, { passThrough: ['GIT_PAGER', 'TERM'] })).GIT_PAGER, 'cat');
+
+  const ctx = ctxFor({ CommandLine: 'git log' }, { env: { ...hookEnv } });
+  const argv = parseShell(confinedCommandLine(ctx, 'git log')).commands[0].argv;
+  for (const [name, value] of Object.entries(want)) {
+    const at = argv.findIndex((a, i) => a === '--setenv' && argv[i + 1] === name);
+    assert.ok(at > 0, `the sandbox sets ${name}`);
+    assert.equal(argv[at + 2], value, `the sandbox's ${name}`);
+  }
+  const line = scrubbedCommandLine(ctx, 'git log');
+  for (const [name, value] of Object.entries(want)) assert.ok(line.includes(`'${name}=${value}'`), `the env scrub sets ${name}: ${line}`);
+  assert.ok(!line.includes('xterm-256color'), 'the hook\'s terminal type is not passed on');
 });
 
 test('PATH reaches the sandbox unchanged, including entries inside a writable root', () => {
