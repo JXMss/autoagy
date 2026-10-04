@@ -389,9 +389,7 @@ function recordPlantedHooks(state, findings, step) {
  * depend on which writer made it.
  */
 function reportPlantedHooks(home, ctx, findings) {
-  const first = findings[0];
-  const names = first.hooks.map((h) => h.name).slice(0, 3).join(', ') || first.config.join(', ');
-  const more = findings.length > 1 ? ` (and ${findings.length - 1} more)` : '';
+  const { first, what, more } = describePlantedHooks(findings);
   appendDecision(home, {
     conversation: ctx.conversationId,
     step: ctx.stepIdx,
@@ -400,12 +398,34 @@ function reportPlantedHooks(home, ctx, findings) {
     path: first.path,
     hooks: first.hooks.map((h) => h.name),
     config: first.config,
-    error: `${first.path} appeared while a sandboxed command ran and holds content git will execute (${names}); commands touching ${first.dir} are reviewed until \`autoagy trust\``,
+    ...(first.unchecked ? { unchecked: true } : {}),
+    error: `${what}; commands touching ${first.dir} are reviewed until \`autoagy trust\``,
   });
   process.stderr.write(
-    `autoagy: ${first.path} appeared while a sandboxed command ran and holds content git will execute (${names})${more}. ` +
+    `autoagy: ${what}${more}. ` +
       `A command touching ${first.dir} runs it outside every sandbox, so those are now reviewed; check it and run \`autoagy trust\`.\n`,
   );
+}
+
+/**
+ * What `reportPlantedHooks` says about one set of findings.
+ *
+ * A repository that was read and holds something is named first: it is the
+ * stronger fact. One the reading budget did not reach says that it was not
+ * read. It used to get the same sentence as a real finding, "holds content git
+ * will execute ()" with nothing in the brackets, which read like a hook had been
+ * found.
+ *
+ * @param {ReturnType<typeof newNestedGitPlantings>} findings at least one
+ */
+export function describePlantedHooks(findings) {
+  const first = findings.find((f) => !f.unchecked) ?? findings[0];
+  const more = findings.length > 1 ? ` (and ${findings.length - 1} more)` : '';
+  if (first.unchecked) {
+    return { first, more, what: `${first.path} appeared while a sandboxed command ran and was not read in time to check what git would execute from it` };
+  }
+  const names = first.hooks.map((h) => h.name).slice(0, 3).join(', ') || first.config.join(', ');
+  return { first, more, what: `${first.path} appeared while a sandboxed command ran and holds content git will execute (${names})` };
 }
 
 const MAX_PENDING_CONFINED = 50;

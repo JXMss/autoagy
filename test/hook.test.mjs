@@ -11,7 +11,7 @@ import { makeSandboxDirs, payloadFor, contextFor, configWith } from './helpers.m
 import { readDecisions } from '../plugin/lib/log.mjs';
 import { readState, updateState } from '../plugin/lib/state.mjs';
 import { readSandboxCheck } from '../plugin/lib/confine.mjs';
-import { handlePreToolUse, failClosedOutput, driftIsContained, offModeOutput } from '../plugin/lib/hook.mjs';
+import { handlePreToolUse, failClosedOutput, driftIsContained, offModeOutput, describePlantedHooks } from '../plugin/lib/hook.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from '../plugin/lib/context.mjs';
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin', 'bin', 'autoagy.mjs');
@@ -685,4 +685,22 @@ test('mode off hands back what read_url(*) would otherwise let through unasked',
   } finally {
     fs.writeFileSync(settingsFile, original);
   }
+});
+
+test('a repository that was not read in time is not reported as holding a hook', () => {
+  // It used to share the sentence of a real finding: "holds content git will
+  // execute ()", with nothing in the brackets, which read like a hook was found.
+  const unchecked = { path: '/w/a/.git', dir: '/w/a', hooks: [], config: [], unchecked: true };
+  const lone = describePlantedHooks([unchecked]);
+  assert.doesNotMatch(lone.what, /holds content git will execute/);
+  assert.match(lone.what, /not read in time/);
+  assert.equal(lone.more, '');
+
+  // A repository that was read and holds something is the stronger fact, so it
+  // is the one named, wherever it is in the list.
+  const planted = { path: '/w/b/.git', dir: '/w/b', hooks: [{ name: 'pre-commit', bytes: 10, head: '#!/bin/sh' }], config: [] };
+  const mixed = describePlantedHooks([unchecked, planted]);
+  assert.equal(mixed.first, planted);
+  assert.match(mixed.what, /holds content git will execute \(pre-commit\)/);
+  assert.equal(mixed.more, ' (and 1 more)');
 });

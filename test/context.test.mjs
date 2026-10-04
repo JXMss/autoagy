@@ -175,6 +175,28 @@ test('a new repository the reading budget did not reach is recorded as unchecked
   }
 });
 
+test('a slow walk to the new repositories does not use up the budget for reading them', () => {
+  // The walk is bounded on its own (depth, directory count, clock). On 9p it
+  // took over 500ms, and the reading budget used to start before it: every new
+  // `.git` came back unchecked, so 73 clean worktrees across six conversations
+  // were recorded as plantings and cost 37 reviews.
+  const plain = path.join(dirs.workspace, 'worktree', '.git');
+  fs.mkdirSync(plain, { recursive: true });
+  try {
+    const ctx = contextFor(dirs, 'run_command', { CommandLine: 'git worktree add worktree' });
+    const found = ctx.nestedGitPaths;
+    Object.defineProperty(ctx, 'nestedGitPaths', {
+      get() {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
+        return found;
+      },
+    });
+    assert.deepEqual(newNestedGitPlantings(ctx, []), [], 'read after the walk: an empty repository is not a finding');
+  } finally {
+    fs.rmSync(path.join(dirs.workspace, 'worktree'), { recursive: true, force: true });
+  }
+});
+
 test('only a .git that was not there when the command was built counts as a planting', () => {
   const existing = path.join(dirs.workspace, 'existing', '.git');
   const created = path.join(dirs.workspace, 'created', '.git');

@@ -309,9 +309,13 @@ const PLANTING_READ_MS = 300;
  */
 export function newNestedGitPlantings(ctx, before, { budgetMs = PLANTING_READ_MS } = {}) {
   const known = new Set(before ?? []);
+  // The walk first, then the clock. The walk has bounds of its own, and on a
+  // slow filesystem (9p took over 500ms) it used to spend this whole budget
+  // before a single `.git` was read, so every new one came back unchecked.
+  const found = ctx.nestedGitPaths;
   const deadline = Date.now() + budgetMs;
   const out = [];
-  for (const gitDir of ctx.nestedGitPaths) {
+  for (const gitDir of found) {
     if (known.has(gitDir)) continue;
     // `dir` is the repository a later git command would run in, which is what
     // the review consequence is keyed on.
