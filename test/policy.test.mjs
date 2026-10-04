@@ -117,6 +117,35 @@ test("a read tool cannot reach the conversation log unreviewed", () => {
   assert.equal(verdict('grep_search', { SearchPath: dirs.workspace, Query: 'foo' }).verdict, 'allow');
 });
 
+test('a conversation reads its own background task output without a review', () => {
+  // agy writes what a backgrounded command printed to
+  // brain/<id>/.system_generated/tasks/task-<n>.log, and the agent reads it back
+  // with view_file. That is the agent's own command output, which manage_task
+  // shows it anyway, not the evidence the reviewer is given: in twelve days of
+  // real use, 101 of these were reviewed, all approved, about five seconds each.
+  const tasks = path.join(dirs.brain, '.system_generated', 'tasks');
+  fs.mkdirSync(tasks, { recursive: true });
+  const own = path.join(tasks, 'task-14.log');
+  fs.writeFileSync(own, 'output\n');
+  try {
+    for (const tool of ['view_file', 'read_file']) assert.equal(verdict(tool, { AbsolutePath: own }).verdict, 'allow', tool);
+    // Everything around it stays reviewed: another conversation's task log,
+    // another file in the same directory, the transcript, and a walk.
+    const other = path.join(dirs.appData, 'brain', '99999999-2222-4333-8444-555555555555', '.system_generated', 'tasks', 'task-14.log');
+    assert.equal(verdict('view_file', { AbsolutePath: other }).category, 'self-read');
+    assert.equal(verdict('view_file', { AbsolutePath: path.join(tasks, 'task-14.log.meta') }).category, 'self-read');
+    assert.equal(verdict('view_file', { AbsolutePath: path.join(tasks, '..', 'logs', 'transcript_full.jsonl') }).category, 'self-read');
+    assert.equal(verdict('grep_search', { SearchPath: tasks, Query: 'x' }).category, 'self-read');
+    // Judged by where it lands: a task-log name that leads to the transcript is
+    // the transcript.
+    const link = path.join(tasks, 'task-15.log');
+    fs.symlinkSync(path.join(dirs.brain, '.system_generated', 'logs', 'transcript_full.jsonl'), link);
+    assert.equal(verdict('view_file', { AbsolutePath: link }).category, 'self-read');
+  } finally {
+    fs.rmSync(tasks, { recursive: true, force: true });
+  }
+});
+
 test('agent coordination tools are allowed', () => {
   for (const name of ['invoke_subagent', 'schedule', 'send_message', 'ask_question', 'search_web']) {
     assert.equal(verdict(name, {}).verdict, 'allow', name);

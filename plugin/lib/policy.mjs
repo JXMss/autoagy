@@ -442,6 +442,9 @@ function classifyRead(ctx, state = {}) {
   for (const raw of candidates) {
     const abs = toAbsolute(raw, ctx.baseDir, ctx.home);
     if (!abs) continue;
+    // Named as this conversation's own task output and landing there too; a
+    // walk does not qualify, it reaches the transcript next door.
+    const ownTaskLog = ctx.toolName !== 'grep_search' && isOwnTaskLog(ctx, abs) && isOwnTaskLog(ctx, resolveReal(abs));
     // Judge a symlink by what it points to.
     for (const p of new Set([abs, resolveReal(abs)])) {
       if (isCredentialPath(ctx, p)) {
@@ -490,7 +493,9 @@ function classifyRead(ctx, state = {}) {
       // next action, in a file the agent may not edit but could read and answer
       // around. Any conversation's log, not just this one's, for the same reason
       // the needle is a substring: the id in the path is not the point.
-      if (isConversationLog(ctx, p)) {
+      //
+      // Except this conversation's own background task output: see isOwnTaskLog.
+      if (isConversationLog(ctx, p) && !ownTaskLog) {
         return review('self-read', `Reads a conversation log (${p}), which is the evidence the reviewer is given.`);
       }
       // And the walk that reaches a log without naming one. The directory a log
@@ -746,6 +751,31 @@ export function environmentExposure(ctx, analysis) {
  */
 function isConversationLog(ctx, p) {
   return Boolean(ctx.appDataDir) && isWithin(p, ctx.appDataDir) && p.split(/[\\/]/).includes('.system_generated');
+}
+
+/**
+ * This conversation's own background task output:
+ * `brain/<this id>/.system_generated/tasks/task-<n>.log`, where agy puts what a
+ * command it moved to the background printed. Reading it back is reading the
+ * agent's own command output, which `manage_task` shows it anyway, not the
+ * transcript the reviewer is given. In twelve days of real use, 101 reads of
+ * these were reviewed, all approved, about five seconds each. Exact on purpose:
+ * this conversation only, that directory only, that file name only, so the
+ * transcript next door and every other conversation's files stay reviewed.
+ */
+function isOwnTaskLog(ctx, p) {
+  // The id agy sent, not the environment fallback `conversationId` can take.
+  const id = ctx.payload?.conversationId;
+  if (!ctx.appDataDir || typeof id !== 'string' || id === '') return false;
+  const dir = path.join(ctx.appDataDir, 'brain', id, '.system_generated', 'tasks');
+  if (path.dirname(p) !== dir || !/^task-\d+\.log$/.test(path.basename(p))) return false;
+  // agy's own file, not a link by that name: a link can lead anywhere, now or
+  // once its target appears, and a missing file has nothing to read anyway.
+  try {
+    return fs.lstatSync(p).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /** Where a write lands, from the most to the least restrictive answer. */
