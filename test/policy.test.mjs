@@ -532,6 +532,18 @@ test('deletion targets follow symlinks the way rm does', () => {
   assert.deepEqual([nested.inside_workspace, nested.resolves_to, nested.type], [false, path.join(outside, 'data.db'), 'file']);
 });
 
+test('shell and REPL histories are credential stores by default', () => {
+  // A secret typed on a command line (`export KEY=…`, `mysql -p…`) stays in the
+  // history file. Twelve days of real use had one escalated read of
+  // ~/.bash_history, approved at medium risk, and nothing in the list named it.
+  const noSandbox = configWith({ ownSandbox: 'off' });
+  for (const rel of ['.bash_history', '.zsh_history', '.local/share/fish/fish_history', '.python_history', '.psql_history']) {
+    const file = path.join(dirs.home, rel);
+    assert.equal(verdict('view_file', { AbsolutePath: file }).category, 'credential-read', rel);
+    assert.equal(verdict('run_command', { CommandLine: `cat ~/${rel}` }, { config: noSandbox }).category, 'credential-read', `cat ~/${rel}`);
+  }
+});
+
 test('a command reading a credential through a symlink is reviewed, as the read tools are', () => {
   const env = path.join(dirs.workspace, '.env');
   fs.writeFileSync(env, 'API_KEY=placeholder');

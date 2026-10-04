@@ -179,8 +179,8 @@ Also: `writableRoots` (outside directories editable without review — re-run
 files that run themselves outside every sandbox — shell rc files,
 `~/.config/systemd/user/**`, `~/.config/autostart/**`, `~/.local/bin/**`,
 `~/.gitconfig` — which only matters when the workspace *is* the home directory),
-`credentialPaths`,
-`mcp.allow`, `rules` (Codex-style prefix rules), `webSearch`, `browser`, and the
+`credentialPaths` (an array in the file replaces the default list — to add
+entries, use `extraCredentialPaths`), `mcp.allow`, `rules` (Codex-style prefix rules), `webSearch`, `browser`, and the
 reviewer backend (next section).
 
 ## Reviewer backend

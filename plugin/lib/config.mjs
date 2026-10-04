@@ -168,7 +168,27 @@ export const DEFAULT_CONFIG = Object.freeze({
     '**/id_rsa*',
     '**/id_ed25519*',
     '**/id_ecdsa*',
+    // A secret typed on a command line (`export KEY=…`, `mysql -p…`) stays in
+    // the history file: shells first, then the REPLs and database clients.
+    '~/.bash_history',
+    '~/.zsh_history',
+    '~/.zhistory',
+    '~/.histfile',
+    '~/.sh_history',
+    '~/.local/share/fish/fish_history',
+    '~/.python_history',
+    '~/.node_repl_history',
+    '~/.psql_history',
+    '~/.mysql_history',
+    '~/.sqlite_history',
+    '~/.rediscli_history',
   ],
+  // Added to `credentialPaths` rather than replacing it. An array in the file
+  // replaces its default, so a `credentialPaths` holding only the user's own
+  // account store would switch off `~/.ssh/**`, `**/.env` and the rest, and
+  // nothing would say so. Put new entries here; use `credentialPaths` only to
+  // replace the whole list.
+  extraCredentialPaths: [],
   credentialPathExceptions: ['**/.env.example', '**/.env.sample', '**/.env.template', '**/.env.dist'],
   // Codex execpolicy-style prefix rules:
   // { "pattern": ["git", "push"], "decision": "allow" | "prompt" | "forbidden", "justification": "..." }
@@ -473,7 +493,7 @@ function validate(config, warnings, home = os.homedir()) {
   });
   // Globs are not resolved (a location-independent pattern is the point of
   // them) but they are checked, because one that cannot match fails silently.
-  for (const key of ['protectedPaths', 'credentialPaths', 'credentialPathExceptions']) {
+  for (const key of ['protectedPaths', 'credentialPaths', 'extraCredentialPaths', 'credentialPathExceptions']) {
     config[key] = (config[key] ?? []).filter((p, i) => {
       if (typeof p !== 'string' || p === '') {
         warnings.push(`${key}[${i}] is not a non-empty string; ignored`);
@@ -484,6 +504,9 @@ function validate(config, warnings, home = os.homedir()) {
       return false;
     });
   }
+  // Folded in here, so every reader of `credentialPaths` (the read checks, the
+  // sandbox mounts, the command checks) sees one list.
+  config.credentialPaths = [...new Set([...config.credentialPaths, ...config.extraCredentialPaths])];
   // Glob lists over names rather than paths. Unvalidated, a non-string entry
   // reached `globToRegExp(String(glob))` and became a pattern nobody wrote.
   for (const keyPath of ['mcp.allow', 'tools.allow']) {

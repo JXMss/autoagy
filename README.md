@@ -105,7 +105,7 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 
 ## 配置（`~/.gemini/autoagy/config.json`）
 
-改完下一次工具调用就生效。下面是最常改的几项，[全表在参考手册](docs/reference.md#配置全表)（含 `rules`、`protectedPaths`、`credentialPaths`、`writableRoots`、MCP、浏览器、环境清理等三十多项）。
+改完下一次工具调用就生效。下面是最常改的几项，[全表在参考手册](docs/reference.md#配置全表)（含 `rules`、`protectedPaths`、`credentialPaths`、`writableRoots`、MCP、浏览器、环境清理等三十多项）。注意数组是**整体替换**默认值：要加凭据位置，写 `extraCredentialPaths`，别直接改 `credentialPaths`。
 
 | 键 | 默认 | 作用 |
 | --- | --- | --- |

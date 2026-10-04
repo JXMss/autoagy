@@ -310,6 +310,28 @@ test('a path-shaped setting is resolved once, so the policy and the grants agree
   assert.equal(warnings.filter((w) => w.startsWith('protectedPaths[0]')).length, 1);
 });
 
+test('extraCredentialPaths adds to the default credential list; credentialPaths replaces it', () => {
+  // Arrays in the file replace the default. A user who wrote only their own
+  // account store into `credentialPaths` turned off `~/.ssh/**`, `**/.env` and
+  // the rest without a word, so there is a key that adds instead.
+  const home = path.join(root, 'extra-credentials');
+  fs.mkdirSync(path.join(home, '.gemini', 'autoagy'), { recursive: true });
+  const load = (values) => {
+    fs.writeFileSync(configPath({}, home), JSON.stringify(values));
+    return loadConfig({ env: {}, home });
+  };
+  const defaults = loadConfig({ env: { AUTOAGY_HOME: path.join(root, 'no-config') }, home }).config.credentialPaths;
+
+  const added = load({ extraCredentialPaths: ['~/.my-accounts/**', 'relative/x'] });
+  assert.deepEqual(added.config.credentialPaths, [...defaults, '~/.my-accounts/**'], 'the defaults stay, the extra one is added');
+  assert.ok(!added.warnings.some((w) => w.includes('unknown config key')), added.warnings.join('; '));
+  assert.equal(added.warnings.filter((w) => w.startsWith('extraCredentialPaths[1]')).length, 1, 'checked like the list it extends');
+
+  // Replacing is still possible, and still what `credentialPaths` does.
+  const replaced = load({ credentialPaths: ['~/.only-this/**'], extraCredentialPaths: ['~/.my-accounts/**'] });
+  assert.deepEqual(replaced.config.credentialPaths, ['~/.only-this/**', '~/.my-accounts/**']);
+});
+
 const SOURCE_PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin');
 
 /**
