@@ -2,7 +2,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { classify, plannedAction, canonicalPathArgs } from '../plugin/lib/policy.mjs';
+import { classify, plannedAction, canonicalPathArgs, failOpenOutput } from '../plugin/lib/policy.mjs';
 import { makeSandboxDirs, contextFor, configWith, okProbe, ownSandboxPlatform, linuxOnly } from './helpers.mjs';
 import { PROTECTED_WORKSPACE_DIRS, parseHostFlags } from '../plugin/lib/context.mjs';
 
@@ -118,9 +118,11 @@ test("a read tool cannot reach the conversation log unreviewed", () => {
 });
 
 test('agent coordination tools are allowed', () => {
-  for (const name of ['invoke_subagent', 'schedule', 'send_message', 'manage_task', 'ask_question', 'search_web']) {
+  for (const name of ['invoke_subagent', 'schedule', 'send_message', 'ask_question', 'search_web']) {
     assert.equal(verdict(name, {}).verdict, 'allow', name);
   }
+  // manage_task only while it looks at or stops a task; see the terminal input test.
+  assert.equal(verdict('manage_task', { Action: 'status', TaskId: 'x/task-1' }).verdict, 'allow');
 });
 
 test('file edits: workspace allowed, outside reviewed, self denied', () => {
@@ -345,6 +347,35 @@ test('terminal input needs autoagy\'s own sandbox, not just a declared one', { s
   // Antigravity's own sandbox is not evidence: it leaves .git and the
   // conversation log writable, so keystrokes into it stay reviewed.
   assert.equal(classify(contextFor(dirs, 'send_command_input', { Input: 'y\n' })).verdict, 'review');
+});
+
+test('input to a background task through manage_task is judged like terminal input', { skip: linuxOnly }, () => {
+  // `manage_task send_input` writes into a running process, which is what
+  // send_command_input does, but it sat in the coordination list: allowed
+  // outright, even toward a process an approved escalation had started outside
+  // every sandbox, and allowed when autoagy itself failed.
+  const own = { config: configWith({ ownSandbox: 'on' }), bwrapProbe: okProbe };
+  const task = (args, options = own, state) => classify(contextFor(dirs, 'manage_task', { TaskId: `${dirs.conversationId}/task-7`, ...args }, options), state);
+  const input = { Action: 'send_input', Input: 'q' };
+  assert.equal(task(input).verdict, 'allow', 'into a task inside autoagy\'s own sandbox, as before');
+  const escalated = task(input, own, { escalatedCommandApproved: true });
+  assert.equal(escalated.verdict, 'review', 'once a command has run outside it');
+  assert.equal(escalated.category, 'terminal-input');
+  assert.equal(task(input, {}).verdict, 'review', 'Antigravity\'s sandbox is not evidence, as for send_command_input');
+  assert.equal(task(input, own, { untrusted: true }).verdict, 'review');
+  // Looking at or stopping a task writes nothing into it.
+  for (const Action of ['status', 'list', 'kill']) {
+    assert.equal(task({ Action }, own, { escalatedCommandApproved: true }).category, 'agent-coordination', Action);
+  }
+  // An action this list does not know, or one carrying input, is input.
+  assert.equal(task({ Action: 'attach' }, own, { escalatedCommandApproved: true }).verdict, 'review');
+  assert.equal(task({ Action: 'status', Input: 'q' }, own, { escalatedCommandApproved: true }).verdict, 'review');
+
+  // When autoagy cannot answer at all, coordination stays usable and input does not.
+  const failed = (args) => failOpenOutput({ toolCall: { name: 'manage_task', args } }, { reason: 'x' }).decision;
+  assert.equal(failed({ Action: 'status', TaskId: 't' }), 'allow');
+  assert.equal(failed({ Action: 'kill', TaskId: 't' }), 'allow');
+  assert.equal(failed({ Action: 'send_input', Input: 'q', TaskId: 't' }), 'deny');
 });
 
 test('an untrusted conversation reviews every edit and content read', () => {

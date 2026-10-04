@@ -165,7 +165,7 @@ OpenAI、DeepSeek 等同理，改 `baseUrl` / `apiKeyEnv` / `model` 即可。需
 | `browser_subagent`、`generate_image`、`delete_knowledge` | 审核：前者的导航和点击是它自己做的，不逐条经过本策略；后者写出的路径策略看不到；删除的知识无法从工作区恢复 |
 | 以 `agy` 为可执行名的命令（启动另一个 Antigravity 实例） | 审核：那个实例是否加载这些 hook，由它自己的配置和环境决定，而这条命令两样都能设 |
 | 命令里给 `HOME` 或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*` 赋值 | 审核：`HOME` 决定 `~` 指向哪里，也就决定了策略里的凭据清单和「不可编辑路径」。autoagy 自己的沙箱里不审：挂载不随 `HOME` 变 |
-| `send_command_input` | 只在 autoagy 自己的沙箱生效时放行（`config.sandbox: "on"` 是声明，Antigravity 的沙箱也让 `.git` 和日志可写）；macOS/Windows/无 bwrap 时一律审核 |
+| 往正在跑的进程里送输入：`send_command_input`，以及 `manage_task` 的 `send_input`（除了 `status`、`list`、`kill` 之外的任何动作都按这一类算） | 只在 autoagy 自己的沙箱生效、本会话还没有批准过出沙箱的命令、会话也没被标记为不可信时放行（`config.sandbox: "on"` 是声明，Antigravity 的沙箱也让 `.git` 和日志可写）；其余情况审核，macOS/Windows/无 bwrap 时一律审核。autoagy 自己出错时这一类拒绝，查看和结束任务照常放行 |
 | 向用户申请权限（`ask_permission`、`ask_custom_permission`） | 放行——正常情况下弹窗会到你手里，由你决定，autoagy 没什么可加的。但 `--dangerously-skip-permissions` 下 agy 会自己同意所有工具权限（它自己的字符串就是这么写的：`auto-approving all tool permissions`），平台读不到 agy 参数时也无法排除这个标志——那时没有人能回答，申请就送审（策略里「削弱 agent 自身的监管」属于持续性安全削弱） |
 | MCP（含 `read_resource` / `list_resources` 这类 MCP 资源读取）、网页抓取/浏览器导航（非可信域名）、浏览器交互、`define_subagent`、未知工具 | 审核（未知工具名可用 `tools.allow` 免审——**只有**未知的那些，见配置表） |
 | **会话被标记为不可信之后**（见下）的文件编辑和读取文件内容 | 审核；触及监管文件的命令改为直接拒绝 |

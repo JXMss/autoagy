@@ -77,6 +77,27 @@ export const AGENT_TOOLS = new Set([
 // anything: see classifyPermissionAsk.
 export const PERMISSION_ASK_TOOLS = new Set(['ask_permission', 'ask_custom_permission']);
 
+// The `manage_task` actions that only look at or stop the agent's own
+// background tasks. Every other one, `send_input` first, writes into a running
+// process, which is what send_command_input does, so it is judged the same way
+// (see writesToRunningProcess) instead of as coordination. A list of what is
+// known to be harmless, so an action added by a later agy lands on the reviewed
+// side.
+const MANAGE_TASK_COORDINATION = new Set(['status', 'list', 'kill']);
+
+/**
+ * Whether this call writes into a process that is already running: the
+ * terminal tool, or `manage_task` feeding a background task. The process may be
+ * one an approved escalation started outside every sandbox, so what is typed
+ * into it is that command's business too.
+ */
+export function writesToRunningProcess(name, args) {
+  if (name === 'send_command_input') return true;
+  if (name !== 'manage_task') return false;
+  if (args?.Input !== undefined) return true;
+  return !MANAGE_TASK_COORDINATION.has(String(args?.Action ?? '').toLowerCase());
+}
+
 // Tools that stay allowed when autoagy itself fails or its hook times out.
 // Deliberately a separate literal set rather than a reference to AGENT_TOOLS:
 // adding a tool to the coordination list must not silently widen the path that
@@ -194,19 +215,20 @@ export function classify(ctx, state = {}) {
   if (READ_ONLY_TOOLS.has(name)) return classifyRead(ctx, state);
   if (name === 'invoke_subagent') return classifySubagents(ctx);
   if (PERMISSION_ASK_TOOLS.has(name)) return classifyPermissionAsk(ctx);
+  // Before the coordination list, which holds `manage_task`.
+  if (writesToRunningProcess(name, ctx.args)) {
+    // Only autoagy's own sandbox is evidence that the process the input reaches
+    // is confined: config.sandbox "on" is a declaration, and Antigravity's
+    // sandbox leaves .git and the conversation log writable.
+    if (ctx.ownSandbox.active && !state.escalatedCommandApproved && !state.untrusted) {
+      return allow('terminal-input', 'input to a process inside autoagy\'s own sandbox');
+    }
+    return review('terminal-input', `Input to a running ${name === 'manage_task' ? 'background task' : 'terminal'} that is not confined by autoagy's own sandbox, or that a command approved to run outside it may have started.`);
+  }
   if (AGENT_TOOLS.has(name)) return allow('agent-coordination');
   if (OUTSIDE_RUNTIME_TOOLS.has(name)) return classifyOutsideRuntime(ctx);
   if (FILE_EDIT_TOOLS.has(name)) return classifyFileEdit(ctx, state);
   if (name === 'run_command') return classifyCommand(ctx, state);
-  if (name === 'send_command_input') {
-    // Only autoagy's own sandbox is evidence that the terminal the keystrokes
-    // reach is confined: config.sandbox "on" is a declaration, and Antigravity's
-    // sandbox leaves .git and the conversation log writable.
-    if (ctx.ownSandbox.active && !state.escalatedCommandApproved && !state.untrusted) {
-      return allow('terminal-input', 'input to a terminal inside autoagy\'s own sandbox');
-    }
-    return review('terminal-input', 'Input to a running terminal that is not confined by autoagy\'s own sandbox.');
-  }
   if (URL_TOOLS.has(name)) return classifyUrl(ctx);
   if (BROWSER_ACTION_TOOLS.has(name)) {
     if (ctx.config.browser === 'allow') return allow('browser-action');
@@ -258,7 +280,8 @@ export function classify(ctx, state = {}) {
  */
 export function failOpenOutput(payload, { untrusted = false, reason, config = null } = {}) {
   const name = payload?.toolCall?.name;
-  if (FAIL_OPEN_TOOLS.has(name)) return { decision: 'allow' };
+  // `manage_task` is coordination only while it does not write into a process.
+  if (FAIL_OPEN_TOOLS.has(name) && !writesToRunningProcess(name, payload?.toolCall?.args)) return { decision: 'allow' };
   // A search the operator asked to have reviewed stays reviewed on this path
   // too. This is the branch taken when autoagy cannot answer at all, and the
   // switch exists to keep agent-written queries from leaving the machine — an
