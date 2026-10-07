@@ -94,7 +94,7 @@ PreToolUse 输出的实际效果（实测）：
 - 给这种 agent 保留工具而不给明确的停止条件，它会一直探索文件系统（实测一次跑了 2 分钟、77 万输入 token 才被超时杀掉），所以 guardian 必须无工具。
 - 用 `--json-schema` 时 harness 会反复追问（同一 JSON 出现 4 次、4 个回合），不用它只靠提示词约束反而一次就答完。
 - `--input-format stream-json` 从 stdin 读 `{"event":"user","message":{"content":[{"type":"text","text":"…"}]}}`，配合 `--output-format stream-json`，结果在 `{"event":"result","result":{…,"response":…}}` 里。这样 prompt 不受单个命令行参数 128KB 的限制。
-- headless 会话同样会写入历史并更新 `cache/last_conversations.json`（`agy -c` 用它找“上一次会话”），所以 guardian 在专用目录 `~/.gemini/autoagy/guardian` 里运行，不会劫持用户项目里的 `agy -c`。`JETSKI_APP_DATA_DIR` 实测不能改变数据目录。
+- （第二十四轮起，审核结束约 15 分钟后这些会话会被删掉，见该轮记录；下面这条说的是它们还在的那段时间。）headless 会话同样会写入历史并更新 `cache/last_conversations.json`（`agy -c` 用它找“上一次会话”），所以 guardian 在专用目录 `~/.gemini/autoagy/guardian` 里运行，不会劫持用户项目里的 `agy -c`。`JETSKI_APP_DATA_DIR` 实测不能改变数据目录。
 
 ## 3. 映射与取舍
 
@@ -111,7 +111,7 @@ PreToolUse 输出的实际效果（实测）：
 | `mode off` 时 setup 加的授权仍然有效 | off 模式下，这三类授权覆盖的操作（绕过沙箱的命令、MCP、浏览器操作）返回 `force_ask`；不可信会话的编辑与读取也返回 `force_ask`（否则 off 模式下它们会是「无意见」，比审核还差）。这个分支现在同样经过 `withoutUnanswerablePrompt` |
 | 环境变量可以把 hook 指向别的配置目录，或搬走 `~` | `autoagy setup` 把配置目录和 `os.userInfo().homedir` 的绝对路径写进 `hooks.json` 的每条 hook 命令（`pinHookCommands`），运行时以钉子为准覆盖 `AUTOAGY_HOME`；`hooks.json` 在插件目录里，属于 `selfPaths`，agent 改不动。管理命令（`status`/`log`/`denials`/`approve`/`trust`/`mode`）读同一份钉子，否则它们会报告和修复另一套配置（例如用 `sudo` 或改了 `HOME` 的 shell 跑 `trust`，它清的不是 hook 正在用的那份 state）。没有钉子时（开发检出、测试）回落到环境变量。钉子只由 `autoagy setup` 写入，而 `agy plugin install` 会用它自己那份未钉住的 `hooks.json` 覆盖已装插件——`autoagy status` 会就此告警。此外给 `HOME`（或 `AGY_*`/`ANTIGRAVITY_*`/`JETSKI_*`）赋值的命令在自带沙箱之外送审（沙箱内不审，见第二十一轮），以 `agy` 为可执行名的命令也送审——那个实例是否加载这些 hook 由它自己的配置决定 |
 | 平台读不到 agy 进程参数时，设置文件会谎报沙箱有效 | Windows 上 `readProcessInfo` 返回 null，`--dangerously-skip-permissions` 无法识别，而 `setup` 写进设置文件的值正是该分支检查的内容。所以设置文件分支只在能读进程参数的平台（linux/darwin）上生效，其余平台返回 `source: 'platform'` 的保守结论。`config.sandbox: "on"` 仍是文档化的逃生口 |
-| 沙箱内的命令能看到 hook 的全部环境变量 | `--clearenv` + 白名单 `--setenv`（`PATH` `HOME` `USER` `LOGNAME` `SHELL` `TERM` `TMPDIR` `TZ` `PWD` `LANG` 与 `LC_*`），值原样传递，额外变量走 `ownSandboxEnvPassThrough`。**`--clearenv` 必须排在任何 `--setenv` 之前**（bwrap 按顺序应用，反过来会把回填的值清掉），有 argv 顺序守护测试。审核进程本身不在沙箱内，也不需要：它要用网络和 agy 登录态，且已被 `classifyGuardianTool` 限为只读——不要试图把 reviewer 也包进 bwrap |
+| 沙箱内的命令能看到 hook 的全部环境变量 | `--clearenv` + 白名单 `--setenv`（`PATH` `HOME` `USER` `LOGNAME` `SHELL` `TMPDIR` `TZ` `PWD` `LANG` 与 `LC_*`），值原样传递，额外变量走 `ownSandboxEnvPassThrough`；`TERM`、`PAGER`、`GIT_PAGER` 不传而是固定为 `dumb`、`cat`、`cat`，与 agy 自己跑命令时一致（第二十四轮，原先 `TERM` 在白名单里，git 因此卡在 `less`）。**`--clearenv` 必须排在任何 `--setenv` 之前**（bwrap 按顺序应用，反过来会把回填的值清掉），有 argv 顺序守护测试。审核进程本身不在沙箱内，也不需要：它要用网络和 agy 登录态，且已被 `classifyGuardianTool` 限为只读——不要试图把 reviewer 也包进 bwrap |
 | 沙箱内的 `PATH` 不做过滤 | 沙箱内工作区是 `--bind-try` 可写、exec 未限制，命令本来就能按路径运行工作区里的任何文件，所以丢掉落在可写根内的 `PATH` 条目买不到隔离（实测：植入脚本按绝对路径照样执行），却会让 `.venv/bin`、`node_modules/.bin` 里的工具找不到或用错解释器（实测：退出码 127）。**真正危险的是沙箱外的命令**通过工作区的 `PATH` 目录解析到被改过的可执行文件——那条路目前没处理，因为已知只读的判断只看 basename（`isSafeArgv`），根本进不了送审。见 README「已知限制」。实际修法是：无沙箱路径上，已知只读命令若解析到可写根内的文件则改为送审（`command-from-writable-root`）——白名单只比较 basename，而这条链本来根本进不了送审 |
 | 浏览器导航沿用了抓取的白名单 | 分成两张表：`trustedDomains`（抓取）与 `browserTrustedDomains`（导航，默认空白）。抓取拿回的是文本，导航会把页面脚本放进一个能联网、不在沙箱里的浏览器里执行 |
 | mock 审核后端可以从配置文件里打开 | 需要显式测试开关 `AUTOAGY_UNSAFE_MOCK_REVIEWER=1`，否则回退默认后端。mock 只能由配置文件选中，而配置目录写入被硬拒，所以单靠环境变量打不开 |
@@ -247,7 +247,7 @@ PreToolUse 输出的实际效果（实测）：
 与 Codex 不同的地方（有意为之）：
 
 - 策略文本：面向 Antigravity 的工具与沙箱改写了 “Execution Environment”；guardian 无工具，“Investigation Guidelines” 改为依据 transcript 和 `deletion_targets` 判断；租户策略里加了两条——篡改 agent 自身的监管（插件、hooks、权限设置）属于持续性安全削弱，安装项目依赖、运行项目自己的构建/测试、抓取公开文档属于常规操作。
-- 读取凭据类文件（`~/.ssh`、`.env` 等）需要审核。Codex 的沙箱允许任意读取；Antigravity 的文件工具不在沙箱里，内容会直接进入模型上下文，所以多加了这一道。文件工具按符号链接指向的位置判断；`grep_search` 搜索的目录包含凭据位置时送审；autoagy 自己的沙箱把 home 下的凭据位置隐藏（`--tmpfs` 或绑定 `/dev/null`），不在该沙箱里时，按命令行里的字面路径尽力识别——单靠沙箱 mask 挡不住的模式（`**/.env`、`**/*.pem`）对命令同样生效，`/proc/<pid>/environ`、`/proc/<pid>/cmdline` 另按凭据处理（文件工具不在沙箱里，那是绕开 `--clearenv` 的直路）。
+- 读取凭据类文件（`~/.ssh`、`.env`、shell 与 REPL 的历史文件等）需要审核。Codex 的沙箱允许任意读取；Antigravity 的文件工具不在沙箱里，内容会直接进入模型上下文，所以多加了这一道。文件工具按符号链接指向的位置判断；`grep_search` 搜索的目录包含凭据位置时送审；autoagy 自己的沙箱把 home 下的凭据位置隐藏（`--tmpfs` 或绑定 `/dev/null`），不在该沙箱里时，按命令行里的字面路径尽力识别——单靠沙箱 mask 挡不住的模式（`**/.env`、`**/*.pem`）对命令同样生效，`/proc/<pid>/environ`、`/proc/<pid>/cmdline` 另按凭据处理（文件工具不在沙箱里，那是绕开 `--clearenv` 的直路）。
 - 环境变量不能改变策略：`AUTOAGY_MODE`、`AUTOAGY_SANDBOX`、`AUTOAGY_REVIEWER`、`AUTOAGY_CONFIG` 和 mock 审核后端的环境变量都已去掉，测试改为在配置文件里选 mock 后端（并显式设 `AUTOAGY_UNSAFE_MOCK_REVIEWER=1`）；配置目录的路径由安装时钉进 `hooks.json` 的绝对值决定，运行时不再看 `AUTOAGY_HOME` 或 `HOME`。`AUTOAGY_HOOK_TIMEOUT_SEC` 只影响 `pre-tool-use` 的看门狗，且被夹在 `[10, 600]` 秒：它不能缩短 post 两个事件的预算，因为看门狗触发时 `emit` 会直接 `process.exit`，自检就被整条跳过了。`AUTOAGY_ROLE=guardian` 仍然生效，但它只会把权限收窄到只读。
 - seccomp 过滤器比 Codex 少三条：Codex 还拒绝 `getsockopt`、`getsockname`、`getpeername`，autoagy 不拒绝。实测拒绝这三条（无论返回哪个 errno）会让 node 在**非阻塞管道**上的异步写静默丢数据——libuv 给子进程的 stdio 就是这种管道，测试运行器的结果正是这样汇报的，失败时没有任何错误信息。代价可以忽略：`socket`/`socketpair` 已限制为 `AF_UNIX`，建立和使用的调用全部拒绝，查询类调用没有可报告的对象。`recvfrom` 和 `sendmsg` 同 Codex 一样放行（用 socketpair 管理子进程的工具需要）。
 
@@ -289,4 +289,4 @@ autoagy 从不启动 bwrap，拿不到 pid，所以它没法问内核哪些命�
 
 `flock` 和 `bwrap`、`shell` 一样只从 root 所有、非组/其他可写的候选路径里取；取不到就不加包装，退回 `backgroundSuspected` 这个弱信号。Node 自身没有共享锁（`state.mjs` 的 `withLock` 是基于 `mkdir` 的排他锁），所以这里必须调用外部二进制。
 
-副作用：沙箱内的命令可以自己抢这把锁，后果是自动回收被无限期推迟——安全方向，且 `autoagy status` 会把仍有挂载点的会话列出来，`autoagy trust` 可以手动释放。
+副作用：沙箱内的命令可以自己抢这把锁，后果是自动回收被无限期推迟——安全方向，且 `autoagy status` 会把仍有挂载点的会话列出来，`autoagy trust` 可以手动释放。第二十四轮加的「别的会话回合结束时替死掉的会话收尾」用的是同一把锁，所以同样会被推迟，不会抢在命令前面。
