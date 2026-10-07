@@ -18,7 +18,7 @@ import { KNOWN_TOOL_NAMES, classify, failOpenOutput } from '../lib/policy.mjs';
 import { hookBudgetSec } from '../lib/timeout.mjs';
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation, failClosedOutput } from '../lib/hook.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INSTRUCTIONS } from '../lib/guardian.mjs';
-import { createReviewer } from '../lib/reviewers.mjs';
+import { createReviewer, pruneReviewConversations, agyCliDataDir } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, readAllDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
 import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins, effectiveSetting, networkGrantsFor, pluginCopyDifferences } from '../lib/setup.mjs';
@@ -834,6 +834,35 @@ function setMode(mode) {
   console.log(`autoagy mode set to "${mode}" (${file}). It applies to the next tool call; no restart needed.`);
 }
 
+/**
+ * Deletes the review conversations reviews left in agy's data before they
+ * started deleting their own (see pruneReviewConversations). A command the user
+ * runs, not something setup does: it deletes, and that is theirs to decide.
+ */
+async function pruneReviews(flags) {
+  const { env, home, autoagyHome } = managementContext();
+  const { config } = loadConfig({ env, home });
+  const appDataDir = agyCliDataDir(home);
+  const agent = config.reviewer.agy.agent;
+  const dryRun = Boolean(flags['dry-run']);
+  let ids;
+  try {
+    // The directory agyReviewer runs every review in.
+    ({ ids } = await pruneReviewConversations({ appDataDir, agent, guardianDir: path.join(autoagyHome, 'guardian'), dryRun }));
+  } catch (err) {
+    console.error(`autoagy: ${err.message}`);
+    process.exitCode = 1;
+    return;
+  }
+  if (ids.length === 0) return console.log(`No finished review conversation (agent "${agent}") left in ${appDataDir}.`);
+  if (dryRun) {
+    console.log(`Would delete ${ids.length} review conversation(s) (agent "${agent}") from ${appDataDir}.`);
+    console.log('Run `autoagy prune-reviews` without --dry-run to delete them. What each review saw and answered stays in autoagy\'s own review log.');
+    return;
+  }
+  console.log(`Deleted ${ids.length} review conversation(s) (agent "${agent}") from ${appDataDir}.`);
+}
+
 async function dryRunReview(flags) {
   if (!flags.tool) throw new Error('usage: autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only]');
   const args = flags.args ? JSON.parse(flags.args) : {};
@@ -857,7 +886,7 @@ async function dryRunReview(flags) {
   console.log(`  sandbox: ${ctx.sandbox.active ? 'active' : 'not active'} — ${ctx.sandbox.detail}`);
   if (flags.tool === 'run_command' && args.BypassSandbox !== true && ctx.ownSandbox.active) console.log("  if allowed, the command runs inside autoagy's own sandbox");
   if (classification.verdict !== 'review' || flags['classify-only']) return;
-  const reviewer = createReviewer(config, { autoagyHome: ctx.autoagyHome, executable: ctx.reviewerExecutable });
+  const reviewer = createReviewer(config, { autoagyHome: ctx.autoagyHome, executable: ctx.reviewerExecutable, home: ctx.home });
   if (!reviewer) return console.log('No reviewer model configured (mode ask / backend none): the user would be asked.');
   const evidence = gatherEvidence(ctx, { rootConversationId: null });
   const prompt = buildReviewPrompt(ctx, classification, evidence);
@@ -1064,6 +1093,7 @@ Usage:
   autoagy mode <auto|ask|off>        switch mode
   autoagy mcp-scan [--timeout 10]    record the MCP servers' own tool annotations
   autoagy review --tool NAME --args JSON [--transcript FILE] [--workspace DIR] [--classify-only] [--show-prompt]
+  autoagy prune-reviews [--dry-run]  delete the agy conversations earlier reviews left behind
   autoagy setup [--dry-run] [--no-settings]
   autoagy teardown [--dry-run]
   autoagy hook <pre-tool-use|post-tool-use|post-invocation>   (used by hooks.json)`;
@@ -1092,6 +1122,8 @@ async function main() {
       return mcpScan(flags);
     case 'review':
       return dryRunReview(flags);
+    case 'prune-reviews':
+      return pruneReviews(flags);
     case 'setup':
       return setup(flags);
     case 'teardown':

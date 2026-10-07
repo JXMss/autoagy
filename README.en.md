@@ -152,6 +152,7 @@ sandbox, and autoagy has no equivalent there.
 | `autoagy denials` / `autoagy approve <id>` | What was refused, and letting one retry through once (the reviewer sees your approval; critical risks still refuse). |
 | `autoagy trust [<session>] [--all]` | Clears the sticky per-session marks and releases retained mount points. It refuses while a command may still be running; `--force` overrides. |
 | `autoagy mode auto\|ask\|off` | `auto` = the reviewer decides; `ask` = risky actions prompt you (Codex's "Ask for approval"); `off` = no review, and the actions those grants cover prompt you instead. |
+| `autoagy prune-reviews [--dry-run]` | Deletes the agy conversations earlier reviews left behind. agy keeps only the newest 500 conversations and every review is one, so they pushed your own out; reviews now delete their own, and this clears the backlog. Only conversations whose agent is `autoagy-guardian` **and** whose workspace is `~/.gemini/autoagy/guardian` (needs Node.js 22.13+). What each review saw and answered stays in autoagy's own review log. |
 | `autoagy review --tool run_command --args '{...}'` | Asks what a single call would be judged as, without starting an agent. |
 | `autoagy setup` / `teardown` | Apply or revert the machine changes on their own. |
 
@@ -198,6 +199,12 @@ budget for one attempt: a stalled attempt is killed and asked again, and only th
 whole deadline running out counts as a timeout. Review sessions show up in `agy`'s
 history under the `~/.gemini/autoagy/guardian` workspace, so they do not hijack
 `agy -c` in your projects.
+
+Each review is an agy conversation, and agy keeps only the newest 500, so a
+review's conversation is deleted once it is finished (when the next review starts
+and at least 15 minutes have passed; only that conversation's own files). Set
+`reviewer.agy.keepConversations: true` to keep them for debugging; `autoagy
+prune-reviews` clears the ones from before this.
 
 To change the model or the effort:
 

@@ -118,6 +118,7 @@ OpenAI、DeepSeek 等同理，改 `baseUrl` / `apiKeyEnv` / `model` 即可。需
 | `reviewer.backend` | `"agy"` | `agy` / `openai` / `none`（`none` 等同 `ask`） |
 | `reviewer.timeoutSec` / `attemptTimeoutSec` / `maxAttempts` | `140` / `90` / `3` | 整次审核的期限、单次尝试的期限、尝试次数。Codex 的 90 秒在这里是**单次**预算：卡住的那次被杀掉后会重问（实测卡住后重问通常几秒就答），整个期限用完才算超时（按 `onTimeout` 处理，默认拒绝）。整次期限受 hook 自己的超时（`hooks.json` 里的 150 秒）封顶 |
 | `reviewer.agy.model` / `effort` | 默认模型 / `"low"` | 审核用的 agy 模型（`agy models` 的第一列）与推理强度（`low` / `medium` / `high`） |
+| `reviewer.agy.keepConversations` | `false` | 每次审核在 agy 里都是一个对话，agy 只保留最新的 500 个，留着会把你自己的对话挤掉，所以默认在审核结束后删掉：审核进程一报出对话 id（并且报的 agent 确实是审核 agent）就记下来，下一次审核开始时把满 15 分钟的删掉——比允许的最长审核 600 秒还长，所以不会删到还在跑的。只删 `brain/<id>/`、`conversations/<id>.db*`、`annotations/<id>.pbtxt`、`presence/<id>.lock`，agy 自己按上限删对话时也是这么删的，索引由它自己对账。设成 `true` 就保留。积压的用 `autoagy prune-reviews` 清 |
 | `reviewer.openai.baseUrl` / `apiKeyEnv` / `model` | `https://api.openai.com/v1` / `OPENAI_API_KEY` / `gpt-5-mini` | `backend: "openai"` 时用的接口地址、存密钥的环境变量名、模型名，见「审核后端」 |
 | `reviewer.openai.headers` / `jsonMode` | `{}` / `true` | 额外请求头；是否要求接口按 JSON 格式回答（接口不支持时设为 `false`） |
 | `onDenied` / `onTimeout` / `onError` | `"deny"` | 改为 `"ask"` 时，审核拒绝/超时/出错会转为弹窗让你决定 |

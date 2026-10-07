@@ -41,6 +41,10 @@ export const DEFAULT_CONFIG = Object.freeze({
       agent: 'autoagy-guardian',
       model: null,
       effort: 'low',
+      // Each review is an agy conversation, and agy keeps only the newest 500;
+      // left in place they push the user's own out. Deleted once finished
+      // unless this is true (see reviewers.mjs).
+      keepConversations: false,
     },
     openai: {
       baseUrl: 'https://api.openai.com/v1',

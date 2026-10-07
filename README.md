@@ -97,6 +97,7 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 | `autoagy approve <id>` | 对某次拒绝放行**一次重试**（审核模型会看到你的批准；critical 风险仍会拒绝） |
 | `autoagy trust [<会话>] [--all] [--force]` | 解除会话的标记（[会话信任](docs/reference.md#会话信任)）、清除嵌套仓库的 hook 植入记录，并释放为它保留的只读挂载点。不带参数时只列出被标记的会话。执行前它自己会先查一次工作区锁：还有命令在跑就拒绝，`--force` 才强行释放 |
 | `autoagy mode auto\|ask\|off` | `auto`=审核模型裁决；`ask`=有风险的操作弹窗问你（相当于 Codex “Ask for approval”）；`off`=不审核；上述授权覆盖的操作（绕过沙箱的命令、MCP、浏览器操作）改为弹窗问你，其余交给 Antigravity 自己的权限流程。`off` 下弹窗在 `--dangerously-skip-permissions` 里会被自动同意，所以那个模式下改为直接拒绝；不可信会话的编辑和读取也照常弹窗 |
+| `autoagy prune-reviews [--dry-run]` | 删掉以前的审核留在 agy 里的对话。agy 只保留最新的 500 个对话，每次审核都是一个，留着会把你自己的对话挤掉；现在每次审核结束后会自己删，这条命令清的是之前积压的。只认 agent 名是 `autoagy-guardian`、**并且**工作区是 `~/.gemini/autoagy/guardian` 的对话（需要 Node.js 22.13+）。每次审核看了什么、答了什么，autoagy 自己的审核日志里都留着 |
 | `autoagy review --tool run_command --args '{"CommandLine":"...","BypassSandbox":true}'` | 不启动 agent，直接测试某个操作会被怎么判 |
 | `autoagy mcp-scan [--timeout 10]` | 逐个启动配置里的 MCP 服务器，问它 `tools/list`，把每个工具的只读/破坏性注解记成快照（配合 `mcp.annotations: "trust"`）。会逐条打印哪个工具声明了什么、以及连不上的服务器 |
 | `autoagy setup` / `autoagy teardown` | 单独执行/撤销设置改动 |
@@ -122,6 +123,8 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 ## 审核后端
 
 默认用 **agy**：插件自带一个无工具的 `autoagy-guardian` agent，用你的 Antigravity 登录态以 headless 方式运行，无需额外 API key。模型是你 agy 当前的默认模型，推理强度 `low`。实测每次审核约 4～12 秒，每次都花你的 Antigravity 额度——它和主 agent 用的是同一个账号，所以主 agent 正忙的时候审核也会慢：连续用两天的实测里，一天的中位数 4.3 秒，另一天 9.1 秒、有 13 次落在 60～80 秒（同一台机器空载时重测仍是 2～5 秒，把 6 个核心全部跑满也只有 5 秒，所以慢的是后端而不是本机）。审核会话会出现在 `agy` 的历史里，归在 `~/.gemini/autoagy/guardian` 这个工作区下，不影响你项目里的 `agy -c`。
+
+每次审核在 agy 里都是一个对话，而 agy 只保留最新的 500 个，所以审核结束后，它的对话会被删掉（再下一次审核开始时、满 15 分钟之后，只删那一个对话自己的文件）。想留着它们排查问题，就设 `reviewer.agy.keepConversations: true`；以前积压的用 `autoagy prune-reviews` 清。
 
 换审核用的模型或推理强度：
 
