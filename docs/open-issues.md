@@ -51,7 +51,14 @@
 
 **证据**：agy 只保留最新的 500 个对话（二进制里的 `maxConversations`），多出来的从最旧的删起。guardian 每审一次就是一个新对话：2026-10-04 本机 `~/.gemini/antigravity-cli/brain` 下的 500 个对话里，482 个是审核。按每天约 70 次审核算，用户自己的对话大约一周就会被删掉；9/24、9/25 的已经没了，用 `--conversation` 也恢复不了。
 
-**打算的做法**：每次审核完，删掉这次审核产生的对话（「用完即删」）。动手前要先调研清楚：一个对话分散在 `brain/<id>/`、`conversations/<id>.db`、`annotations/<id>.pbtxt`、`presence/<id>.lock` 里，此外还有两个汇总索引文件（`conversation_summaries.db` 和一个 protobuf），格式都不公开。agy 自己超出上限时会删对话，说明它能接受对话消失；要确认的是只删文件、不动索引时 agy 会不会出问题，比如对话列表里留下一条打不开的记录，或者启动时报错。审核对话的 id 必须从 stream-json 的事件里拿，不能按目录时间去猜——猜错一次，删掉的就是用户自己的对话。
+**打算的做法**：每次审核完，删掉这次审核产生的对话（「用完即删」）。2026-10-07 在 agy 1.3.1 上调研过，可行：
+
+- **id 拿得到**：审核进程 stream-json 输出的 `init` 事件带 `conversation_id`，还有 `init.agent`（`autoagy-guardian`），`result` 事件里也有 id。所以不用按目录时间去猜。
+- **一个对话在磁盘上是什么**：`brain/<id>/`、`conversations/<id>.db`、`annotations/<id>.pbtxt`、`presence/<id>.lock`，另外 id 还出现在两个汇总索引（`conversation_summaries.db`、一个 protobuf）里。审核对话和用户对话的目录结构一模一样。
+- **agy 自己删的时候也只删文件**：索引里 994 条记录有 493 条对应的对话已经不在了，就是它按上限删出来的；agy 每次启动都会对账索引。实测删掉一个探针对话的那 4 处文件之后，用 `--conversation <id>` 恢复只给出「not found」警告并照常开新对话，对账和日志都没有新的报错。
+- **积压的那批也认得出来**：索引里有 `agent_name` 列，按它数，当时 501 个对话里 479 个是审核。清理积压要读这个 SQLite 文件（Node 22.13 起自带 `node:sqlite`）。
+
+**卡在哪**：这是在用户的 agy 数据目录里做不可逆的删除，要用户明确同意再做。实现思路已经有了：拿到 `init` 事件时记一个标记文件；下一次审核开始前删掉 15 分钟以前的审核对话（比允许的最长审核 600 秒还长）；只删 UUID 形状的 id、只删那几处文件；`reviewer.agy.keepConversations` 可以关掉；积压的用单独的 `autoagy prune-reviews` 按 `agent_name` 清。测试用一个假的 agy 可执行文件，照真实格式输出 `init`／`result` 事件并建出对话文件。
 
 **不选的**：给 guardian 一个独立的 `--app_data_dir`——隔离最彻底，但那个目录要单独登录一次，多出一个人工步骤，而且切换账号时它不会跟着切；调大上限——只是把问题往后推，而且没找到 agy 对外开放这个设置。
 
