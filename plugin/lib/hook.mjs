@@ -8,6 +8,7 @@
 //   {"decision":"force_ask"}  -> always prompts the user
 //   {} / invalid JSON / non-zero exit / timeout -> the tool call fails
 
+import fs from 'node:fs';
 import { loadConfig, autoagyHome as resolveAutoagyHome } from './config.mjs';
 import { HookContext, HOST_INSPECTABLE_PLATFORMS, newNestedGitPlantings, grantsReadUrlEverywhere } from './context.mjs';
 import { classify, failOpenOutput, BROWSER_ACTION_TOOLS, CONTENT_READ_TOOLS, FILE_EDIT_TOOLS, editTargets, readTargets, canonicalPathArgs, classifyWriteTarget, isCredentialPath } from './policy.mjs';
@@ -15,7 +16,7 @@ import { isKnownSafeCommandLine } from './command-safety.mjs';
 import { confinedCommandLine, scrubbedCommandLine, commandHash, recordSandboxCheck, takeSandboxNotice, removeControlPlaceholders, lockQuiescent, workspaceLockFile } from './confine.mjs';
 import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, PLANTED_DETAIL } from './guardian.mjs';
 import { createReviewer } from './reviewers.mjs';
-import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat, takeConfigWarnings } from './state.mjs';
+import { readState, updateState, recordReviewOutcome, recordDenial, takeApprovals, actionKey, newId, isUntrusted, markUntrusted, touchHeartbeat, takeConfigWarnings, listStates } from './state.mjs';
 import { appendDecision, writeReviewRecord } from './log.mjs';
 import { readTranscriptRows } from './transcript.mjs';
 import { mintToken, sweepTokens, executorInstalled } from './tokens.mjs';
@@ -998,6 +999,54 @@ function sweepPlaceholders(home, conversationId, state, ctx) {
   removePlaceholders(home, conversationId, paths);
 }
 
+// How long a conversation must have been idle before another conversation's
+// turn end may release it: an hour when its workspace lock can be asked, a day
+// when there is no lock to ask.
+const DEAD_IDLE_MS = 60 * 60_000;
+const DEAD_IDLE_NO_LOCK_MS = 24 * 60 * 60_000;
+
+/**
+ * Releases the conversations whose agy died before their own turn end.
+ *
+ * An agy killed mid-command (OOM, a SIGTERM) never runs the sweep above, so its
+ * "a backgrounded command may still be running" mark and its empty mount points
+ * stayed forever: 5 conversations on a real install, 9 three days later, each
+ * listed by `status` until someone ran `autoagy trust`. The rule is that
+ * command's own: nothing holds the workspace lock, which every sandboxed command
+ * holds for as long as it runs. Added on top: the conversation has been idle,
+ * so a live one is left to its own turn end; and nothing a person has to look at
+ * (untrusted, a planted hook) is touched.
+ *
+ * Unlike `trust`, the nested-git before-sets stay: there is no person here
+ * vouching for what changed on disk, and keeping them loses nothing — a dead
+ * conversation never inspects them, and a resumed one does at its next turn end.
+ */
+function releaseDeadConversations(home, current) {
+  const now = Date.now();
+  for (const { file, state } of listStates(home)) {
+    if (state.conversationId === current || state.backgroundSuspected !== true) continue;
+    if (isUntrusted(state) || (state.plantedHooks ?? []).length > 0) continue;
+    let idle;
+    try {
+      idle = now - fs.statSync(file).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (state.pendingLock) {
+      if (idle < DEAD_IDLE_MS || lockQuiescent(null, { lockFile: state.pendingLock }) !== true) continue;
+    } else if (idle < DEAD_IDLE_NO_LOCK_MS) {
+      continue;
+    }
+    const paths = Object.values(state.pendingPlaceholders ?? {}).flatMap((list) => list ?? []);
+    updateState(home, state.conversationId, (s) => {
+      s.backgroundSuspected = false;
+      s.pendingLock = null;
+      s.pendingPlaceholders = {};
+    });
+    removePlaceholders(home, state.conversationId, paths);
+  }
+}
+
 /** Ends the agent loop once after the circuit breaker tripped. */
 export function handlePostInvocation(payload, options = {}) {
   const env = options.env ?? process.env;
@@ -1024,6 +1073,13 @@ export function handlePostInvocation(payload, options = {}) {
   // a mode switch), but only once the workspace lock says nothing is running.
   // Read-only first, so an idle conversation does not get a state file written.
   sweepPlaceholders(home, conversationId, state, new HookContext(payload, { config, env, home: options.home, host: options.host }));
+  // And other conversations' that nothing will ever sweep. Never allowed to
+  // fail a turn end: what is left behind is a mark `trust` still clears.
+  try {
+    releaseDeadConversations(home, conversationId);
+  } catch {
+    // the next turn end tries again
+  }
   if (config.mode === 'off') return {};
   if (!state.interrupt?.pending) return {};
   updateState(home, conversationId, (s) => {

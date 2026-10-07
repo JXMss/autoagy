@@ -9,7 +9,7 @@ import { HookContext, PROTECTED_WORKSPACE_DIRS, findNestedGitPaths } from '../pl
 import { handlePreToolUse, handlePostToolUse, handlePostInvocation } from '../plugin/lib/hook.mjs';
 import { parseShell } from '../plugin/lib/shell.mjs';
 import { classify } from '../plugin/lib/policy.mjs';
-import { readState, updateState } from '../plugin/lib/state.mjs';
+import { readState, updateState, stateFile, markUntrusted } from '../plugin/lib/state.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
 import { installExecutor, executorPath, tokenDir } from '../plugin/lib/tokens.mjs';
 import { makeSandboxDirs, configWith, payloadFor, contextFor, linuxOnly } from './helpers.mjs';
@@ -514,6 +514,84 @@ test('mount points are reclaimed only once no sandboxed command is running', { s
   handlePostInvocation({ conversationId: bg.conversationId }, opts);
   assert.equal(fs.existsSync(target), false, 'reclaimed once nothing is running');
   fs.rmSync(path.join(home, 'config.json'));
+});
+
+test('a conversation whose agy died is released at another conversation\'s turn end, once nothing runs', { skip: linuxOnly || (flockPath() ? false : 'no trusted flock on this host') }, async () => {
+  // An agy killed mid-command never reaches its own turn end, so its "a
+  // backgrounded command may still be running" mark and its empty mount points
+  // stayed forever: 5 such conversations on a real install, 9 three days later.
+  // The rule is `autoagy trust`'s — nothing holds the workspace lock — plus the
+  // conversation having been idle, so a live one is left to its own turn end.
+  const home = dirs.env.AUTOAGY_HOME;
+  const opts = { env: dirs.env, home: dirs.home, host: cliHost(), tempRoots: [dirs.tmp], bwrapProbe: okProbe };
+  const lock = workspaceLockFile(ctxFor({ CommandLine: 'ls' }));
+  const probe = () => lockQuiescent(ctxFor({ CommandLine: 'ls' }));
+  const dead = '99999999-0000-4000-8000-dead0000a001';
+  const held = '99999999-0000-4000-8000-dead0000a002';
+  const nolock = '99999999-0000-4000-8000-dead0000a003';
+  const mount = path.join(dirs.workspace, '_agents');
+  const before = [path.join(dirs.workspace, 'sub', '.git')];
+  const age = (id, hours) => {
+    const t = new Date(Date.now() - hours * 3_600_000);
+    fs.utimesSync(stateFile(home, id), t, t);
+  };
+  fs.rmSync(mount, { recursive: true, force: true });
+  fs.mkdirSync(mount);
+  updateState(home, dead, (s) => {
+    s.backgroundSuspected = true;
+    s.pendingLock = lock;
+    s.pendingPlaceholders = { 5: [mount] };
+    s.pendingNestedGit = { 5: before };
+  });
+  // Something a person has to look at is never cleared by this.
+  updateState(home, held, (s) => {
+    s.backgroundSuspected = true;
+    s.pendingLock = lock;
+    markUntrusted(s, { reason: 'edit-target-changed', detail: 'x' });
+  });
+  updateState(home, nolock, (s) => {
+    s.backgroundSuspected = true;
+  });
+  const turnEnd = () => handlePostInvocation({ conversationId: dirs.conversationId }, opts);
+  try {
+    age(dead, 2);
+    const holder = holdLock(lock);
+    try {
+      assert.equal(await untilQuiescent(probe, false), true);
+      turnEnd();
+      assert.equal(readState(home, dead).backgroundSuspected, true, 'kept while a sandboxed command holds the lock');
+      assert.ok(fs.existsSync(mount));
+    } finally {
+      try {
+        process.kill(-holder.pid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+    assert.equal(await untilQuiescent(probe, true), true);
+    age(dead, 0);
+    turnEnd();
+    assert.equal(readState(home, dead).backgroundSuspected, true, 'a conversation active within the hour is left to its own turn end');
+
+    age(dead, 2);
+    age(held, 2);
+    age(nolock, 2);
+    turnEnd();
+    const released = readState(home, dead);
+    assert.equal(released.backgroundSuspected, false, 'released once the lock is free and it has been idle');
+    assert.equal(released.pendingLock, null);
+    assert.deepEqual(released.pendingPlaceholders, {});
+    assert.equal(fs.existsSync(mount), false, 'its empty mount point is gone');
+    assert.deepEqual(released.pendingNestedGit, { 5: before }, 'the before-set stays, for its own turn end if it is ever resumed');
+    assert.equal(readState(home, held).backgroundSuspected, true, 'an untrusted conversation is the user\'s to release');
+    assert.equal(readState(home, nolock).backgroundSuspected, true, 'with no lock to ask, an hour is not enough');
+    age(nolock, 25);
+    turnEnd();
+    assert.equal(readState(home, nolock).backgroundSuspected, false, 'a day is');
+  } finally {
+    fs.rmSync(mount, { recursive: true, force: true });
+    for (const id of [dead, held, nolock]) fs.rmSync(stateFile(home, id), { force: true });
+  }
 });
 
 test('a daemon command is noted as possibly still running even without WaitMsBeforeAsync', async () => {
