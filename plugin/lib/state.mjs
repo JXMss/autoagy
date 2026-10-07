@@ -532,10 +532,10 @@ export function takeConfigWarnings(autoagyHome, warnings) {
   return warnings;
 }
 
-export function touchHeartbeat(autoagyHome, event = 'unknown') {
+export function touchHeartbeat(autoagyHome, event = 'unknown', extra = {}) {
   const file = reservedStateFile(autoagyHome, 'last-hook-run.json');
   try {
-    writeJsonFile(file, { at: new Date().toISOString(), event });
+    writeJsonFile(file, { at: new Date().toISOString(), event, ...extra });
   } catch {
     // A heartbeat that cannot be written must never fail a hook.
   }

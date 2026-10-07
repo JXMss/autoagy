@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord, staleGrants, effectiveSetting, networkGrantsFor } from '../plugin/lib/setup.mjs';
+import { applySetup, applyTeardown, pinHookCommands, planSetup, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, RECOMMENDED_SETTINGS, halfInstalledRecord, staleGrants, effectiveSetting, networkGrantsFor, pluginCopyDifferences } from '../plugin/lib/setup.mjs';
 import { executorPath } from '../plugin/lib/tokens.mjs';
 import { ownSandboxPossible, envBinaryPath } from '../plugin/lib/confine.mjs';
 import { configPath, loadConfig } from '../plugin/lib/config.mjs';
@@ -545,4 +545,28 @@ test('a settings file that cannot be parsed stops the revert instead of being re
   assert.equal(done.unreadable, undefined);
   assert.ok(done.removedGrants.includes('command(*)'));
   assert.ok(!JSON.parse(fs.readFileSync(file, 'utf8')).permissions.allow.includes('command(*)'));
+});
+
+test('the installed plugin is compared with the copy status runs from', () => {
+  // The hooks run the installed copy. A checkout that moved on without a
+  // reinstall looks healthy from the checkout; comparing the files is what the
+  // manual `diff -rq plugin ~/.gemini/config/plugins/autoagy` did.
+  const base = path.join(root, 'copies');
+  const source = path.join(base, 'source');
+  const installed = path.join(base, 'installed');
+  for (const dir of [source, installed]) {
+    fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'lib', 'a.mjs'), 'same');
+    fs.writeFileSync(path.join(dir, 'lib', 'b.mjs'), 'same');
+  }
+  // hooks.json is rewritten by setup with the pinned command, so it always differs.
+  fs.writeFileSync(path.join(source, 'hooks.json'), '{}');
+  fs.writeFileSync(path.join(installed, 'hooks.json'), '{"pinned":true}');
+  assert.deepEqual(pluginCopyDifferences(source, installed), []);
+
+  fs.writeFileSync(path.join(installed, 'lib', 'a.mjs'), 'older');
+  fs.rmSync(path.join(installed, 'lib', 'b.mjs'));
+  fs.writeFileSync(path.join(installed, 'lib', 'gone.mjs'), 'removed upstream');
+  assert.deepEqual(pluginCopyDifferences(source, installed), ['lib/a.mjs', 'lib/b.mjs', 'lib/gone.mjs']);
+  assert.equal(pluginCopyDifferences(source, path.join(base, 'nowhere')), null, 'nothing installed is not a difference');
 });

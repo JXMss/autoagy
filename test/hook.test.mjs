@@ -9,9 +9,9 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSandboxDirs, payloadFor, contextFor, configWith } from './helpers.mjs';
 import { readDecisions } from '../plugin/lib/log.mjs';
-import { readState, updateState } from '../plugin/lib/state.mjs';
+import { readState, updateState, readHeartbeat } from '../plugin/lib/state.mjs';
 import { readSandboxCheck } from '../plugin/lib/confine.mjs';
-import { handlePreToolUse, failClosedOutput, driftIsContained, offModeOutput, describePlantedHooks } from '../plugin/lib/hook.mjs';
+import { handlePreToolUse, failClosedOutput, driftIsContained, offModeOutput, describePlantedHooks, handlePostInvocation } from '../plugin/lib/hook.mjs';
 import { HOST_INSPECTABLE_PLATFORMS } from '../plugin/lib/context.mjs';
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin', 'bin', 'autoagy.mjs');
@@ -703,4 +703,18 @@ test('a repository that was not read in time is not reported as holding a hook',
   assert.equal(mixed.first, planted);
   assert.match(mixed.what, /holds content git will execute \(pre-commit\)/);
   assert.equal(mixed.more, ' (and 1 more)');
+});
+
+test('the heartbeat carries the configuration warnings the hook itself saw', () => {
+  // So `status` can say what the installed hooks make of the file, which is not
+  // necessarily what the copy running `status` makes of it.
+  const home = dirs.env.AUTOAGY_HOME;
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ reviewer: { noSuchKey: 1 } }));
+  try {
+    handlePostInvocation({ conversationId: dirs.conversationId }, { env: dirs.env, home: dirs.home });
+    assert.deepEqual(readHeartbeat(home).configWarnings, ['unknown config key "reviewer.noSuchKey" ignored']);
+  } finally {
+    fs.rmSync(path.join(home, 'config.json'), { force: true });
+  }
 });

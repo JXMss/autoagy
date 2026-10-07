@@ -21,7 +21,7 @@ import { gatherEvidence, buildReviewPrompt, runReview, decisionFor, TIMEOUT_INST
 import { createReviewer } from '../lib/reviewers.mjs';
 import { appendDecision, readDecisions, readAllDecisions, decisionLogPath } from '../lib/log.mjs';
 import { reservedStateFile, listStates, updateState, readState, isUntrusted, readHeartbeat, unreadableStateFiles } from '../lib/state.mjs';
-import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins, effectiveSetting, networkGrantsFor } from '../lib/setup.mjs';
+import { applySetup, applyTeardown, ensureConfigFile, pinHookCommands, cliSettingsPath, grantsFor, writableRootGrants, trustedDomainGrants, readSetupRecord, halfInstalledRecord, staleGrants, restrictHomePermissions, hookPins, effectiveSetting, networkGrantsFor, pluginCopyDifferences } from '../lib/setup.mjs';
 import { installExecutor, executorPath, executorInstalled, executorPathIsBare } from '../lib/tokens.mjs';
 import { installTripwire, tripwireInstallable, removeTripwire, tripwireInstalled, tripwirePath, userHooksPath, installedPluginDir } from '../lib/tripwire.mjs';
 import { scanMcpServers, readMcpCache, readMcpServers, mcpConfigFiles, MCP_CACHE_FILE } from '../lib/mcp.mjs';
@@ -345,6 +345,20 @@ function status() {
     lines.push(`    and this is ${PLUGIN_DIR}. Nothing below is in force.`);
     lines.push('    Finish with `agy plugin install ./plugin` then `autoagy setup`, or undo with `autoagy teardown`.');
   }
+  // Run from a checkout, this report describes the checkout, while the hooks run
+  // the installed copy. Run from the installed copy there is nothing to compare.
+  if (!installed) {
+    let differ = null;
+    try {
+      differ = pluginCopyDifferences(PLUGIN_DIR, installedPluginDir(userHome));
+    } catch {
+      // unreadable: the hook-side lines below still say what they can
+    }
+    if (differ?.length) {
+      lines.push(`  ! installed     the plugin agy runs differs from this copy in ${differ.length} file(s): ${differ.slice(0, 4).join(', ')}${differ.length > 4 ? ', …' : ''}`);
+      lines.push('    so this report describes code that is not running. Reinstall with `node scripts/install.mjs`.');
+    }
+  }
   if (pins.pinned) {
     lines.push(`  home            ${pins.home}   (pinned by autoagy setup)`);
     const ambientHome = resolveAutoagyHome();
@@ -630,7 +644,16 @@ function status() {
   const heartbeat = readHeartbeat(autoagyHome);
   if (heartbeat) {
     const ageMs = Date.now() - Date.parse(heartbeat.at);
-    lines.push(`  hooks last ran  ${fmtTime(heartbeat.at)} (${ageText(ageMs)} ago)`);
+    const age = ageText(ageMs);
+    lines.push(`  hooks last ran  ${fmtTime(heartbeat.at)} (${age === 'just now' ? age : `${age} ago`})`);
+    // What the hooks themselves made of the configuration, when it is not what
+    // this copy makes of it — an installed copy older than this one, typically.
+    const hookWarnings = Array.isArray(heartbeat.configWarnings) ? heartbeat.configWarnings : null;
+    if (hookWarnings && (hookWarnings.length !== warnings.length || hookWarnings.some((w) => !warnings.includes(w)))) {
+      lines.push('  ! the hooks read the configuration differently from this copy, when they last ran:');
+      for (const w of hookWarnings) lines.push(`    ${w}`);
+      if (hookWarnings.length === 0) lines.push('    (no warnings there)');
+    }
     if (installed && ageMs > 24 * 3600 * 1000) {
       lines.push('  ! if you have used agy since then, its hooks are not loading: check that the plugin is');
       lines.push('    enabled, that the hook command above is intact, and that the interpreter it names runs');

@@ -199,6 +199,35 @@ export function cliSettingsPath(home = os.homedir()) {
   return path.join(home, '.gemini', 'antigravity-cli', 'settings.json');
 }
 
+/**
+ * The files in which the installed plugin differs from `source`, as paths
+ * relative to the plugin directory, sorted; null when nothing is installed.
+ *
+ * The hooks run the installed copy, so a checkout that moved on without a
+ * reinstall describes code that is not running. From 2026-09-24 to 09-26 that
+ * was the case and only the decision log said so. `hooks.json` is left out:
+ * setup rewrites it with the pinned command, so it always differs.
+ */
+export function pluginCopyDifferences(source, installed) {
+  if (!fs.existsSync(installed)) return null;
+  const files = (dir) => {
+    const out = new Map();
+    const walk = (rel) => {
+      for (const entry of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+        const child = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) walk(child);
+        else if (entry.isFile() && child !== 'hooks.json') out.set(child, fs.readFileSync(path.join(dir, child)));
+      }
+    };
+    walk('');
+    return out;
+  };
+  const a = files(source);
+  const b = files(installed);
+  const names = new Set([...a.keys(), ...b.keys()]);
+  return [...names].filter((name) => !(a.has(name) && b.has(name) && a.get(name).equals(b.get(name)))).sort();
+}
+
 function setupRecordPath(autoagyHome) {
   return path.join(autoagyHome, 'setup.json');
 }

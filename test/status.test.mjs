@@ -11,7 +11,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeSandboxDirs } from './helpers.mjs';
-import { updateState, markUntrusted, readState } from '../plugin/lib/state.mjs';
+import { updateState, markUntrusted, readState, touchHeartbeat } from '../plugin/lib/state.mjs';
 import { probeBwrap } from '../plugin/lib/confine.mjs';
 
 const BIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin', 'bin', 'autoagy.mjs');
@@ -361,4 +361,23 @@ test('status says when the config file pins a default this version moved on from
   fs.writeFileSync(path.join(dirs.env.AUTOAGY_HOME, 'config.json'), JSON.stringify({ commandGrant: 'executor', reviewer: { timeoutSec: 140 } }));
   const chosen = status();
   assert.ok(!/was the old default/.test(chosen), chosen);
+});
+
+test('status shows what the hooks themselves last read in the configuration', () => {
+  // From 2026-09-24 to 09-26 the installed copy was older than the checkout and
+  // did not know reviewer.attemptTimeoutSec: the hook logged "unknown config key"
+  // 3553 times and the retry fix was not in force, while `status` run from the
+  // checkout read the file with newer code and found nothing to say.
+  const warning = 'unknown config key "reviewer.attemptTimeoutSec" ignored';
+  touchHeartbeat(dirs.env.AUTOAGY_HOME, 'post-invocation', { configWarnings: [warning] });
+  const out = status();
+  assert.match(out, /the hooks read the configuration differently/);
+  assert.ok(out.includes(warning), out);
+  // A heartbeat seconds old reads "just now", not "just now ago".
+  assert.match(out, /hooks last ran {2}\S+ \S+ \(just now\)/);
+  assert.doesNotMatch(out, /just now ago/);
+
+  // When the hooks saw what status sees, it is said once, not twice.
+  touchHeartbeat(dirs.env.AUTOAGY_HOME, 'post-invocation', { configWarnings: [] });
+  assert.doesNotMatch(status(), /the hooks read the configuration differently/);
 });

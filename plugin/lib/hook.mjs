@@ -1001,14 +1001,17 @@ function sweepPlaceholders(home, conversationId, state, ctx) {
 /** Ends the agent loop once after the circuit breaker tripped. */
 export function handlePostInvocation(payload, options = {}) {
   const env = options.env ?? process.env;
-  const { config } = loadConfig({ env, home: options.home });
+  const { config, warnings } = loadConfig({ env, home: options.home });
   const home = resolveAutoagyHome(env, options.home);
   const conversationId = payload?.conversationId || env.ANTIGRAVITY_CONVERSATION_ID;
   // A hook that runs at all is news: `status` uses this to tell a plugin that is
   // not loading — disabled, its pin replaced, or its interpreter broken — from
   // one that is merely quiet. Written before the early returns below, so mode
-  // "off" and a payload without a conversation id both leave a mark.
-  touchHeartbeat(home, 'post-invocation');
+  // "off" and a payload without a conversation id both leave a mark. It carries
+  // what this code made of the configuration, because the copy that runs
+  // `status` can be a different one: from 2026-09-24 to 09-26 the installed hook
+  // ignored a key the checkout knew, and only the decision log said so.
+  touchHeartbeat(home, 'post-invocation', { configWarnings: warnings });
   // A token nobody redeemed is a retry nobody granted, and the end of a turn is
   // the point at which none of THIS conversation's calls can still be on their
   // way. Scoped to the conversation on purpose: the token directory is shared,
