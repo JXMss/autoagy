@@ -857,7 +857,7 @@ async function pruneReviews(flags) {
   if (ids.length === 0) return console.log(`No finished review conversation (agent "${agent}") left in ${appDataDir}.`);
   if (dryRun) {
     console.log(`Would delete ${ids.length} review conversation(s) (agent "${agent}") from ${appDataDir}.`);
-    console.log('Run `autoagy prune-reviews` without --dry-run to delete them. What each review saw and answered stays in autoagy\'s own review log.');
+    console.log('Run `autoagy prune-reviews` without --dry-run to delete them. Each review\'s verdict, risk and rationale stay in autoagy\'s decision log; with `log.reviews` on, the full prompt and reply as well.');
     return;
   }
   console.log(`Deleted ${ids.length} review conversation(s) (agent "${agent}") from ${appDataDir}.`);

@@ -45,7 +45,7 @@ autoagy 是一个 [Google Antigravity](https://antigravity.google) 插件，按 
 
 ## 安装、卸载、升级
 
-要求：Node.js ≥ 20，Antigravity CLI（`agy`）≥ 1.2（实测于 1.2.5～1.2.7，而 agy 会自动更新）。
+要求：Node.js ≥ 20，Antigravity CLI（`agy`）≥ 1.2（在 1.2.x 上长期实测过，1.3.1 上做过冒烟测试；agy 会自动更新，所以每条改写的命令都有自检，见 `autoagy status`）。
 
 ```bash
 git clone https://github.com/JXMss/autoagy autoagy && cd autoagy
@@ -95,9 +95,9 @@ alias autoagy="node ~/.gemini/config/plugins/autoagy/bin/autoagy.mjs"
 | `autoagy stats [--days 7]` | 把决策日志汇总成数字：审核次数与结果（通过/拒绝/失败/超时）、审核耗时 p50/p90/最大值与总计、风险分布、按类别与工具的次数。**免审放行的操作默认不记**（`log.allowed` 打开后每个工具调用一行），所以那一栏会显示 `0` 并说明原因——这是刻意分开的两件事：`allow` 里既有"审核后放行"也有"根本不用审核" |
 | `autoagy denials` | 最近被拒绝的操作及理由 |
 | `autoagy approve <id>` | 对某次拒绝放行**一次重试**（审核模型会看到你的批准；critical 风险仍会拒绝） |
-| `autoagy trust [<会话>] [--all] [--force]` | 解除会话的标记（[会话信任](docs/reference.md#会话信任)）、清除嵌套仓库的 hook 植入记录，并释放为它保留的只读挂载点。不带参数时只列出被标记的会话。执行前它自己会先查一次工作区锁：还有命令在跑就拒绝，`--force` 才强行释放 |
+| `autoagy trust [<会话>] [--all] [--force]` | 解除会话的标记（[会话信任](docs/reference.md#会话信任)）、清除嵌套仓库的 hook 植入记录，并释放为它保留的只读挂载点。不带参数时只列出被标记的会话。执行前它自己会先查一次工作区锁：还有命令在跑就拒绝，`--force` 才强行释放。agy 半路被杀、只剩「后台可能还有命令」这一个标记的会话，不用手动来：别的会话回合结束时，锁没人持有、它又闲置满一小时，就会被自动收尾 |
 | `autoagy mode auto\|ask\|off` | `auto`=审核模型裁决；`ask`=有风险的操作弹窗问你（相当于 Codex “Ask for approval”）；`off`=不审核；上述授权覆盖的操作（绕过沙箱的命令、MCP、浏览器操作）改为弹窗问你，其余交给 Antigravity 自己的权限流程。`off` 下弹窗在 `--dangerously-skip-permissions` 里会被自动同意，所以那个模式下改为直接拒绝；不可信会话的编辑和读取也照常弹窗 |
-| `autoagy prune-reviews [--dry-run]` | 删掉以前的审核留在 agy 里的对话。agy 只保留最新的 500 个对话，每次审核都是一个，留着会把你自己的对话挤掉；现在每次审核结束后会自己删，这条命令清的是之前积压的。只认 agent 名是 `autoagy-guardian`、**并且**工作区是 `~/.gemini/autoagy/guardian` 的对话（需要 Node.js 22.13+）。每次审核看了什么、答了什么，autoagy 自己的审核日志里都留着 |
+| `autoagy prune-reviews [--dry-run]` | 删掉以前的审核留在 agy 里的对话。agy 只保留最新的 500 个对话，每次审核都是一个，留着会把你自己的对话挤掉；现在每次审核结束后会自己删，这条命令清的是之前积压的。只认 agent 名是 `autoagy-guardian`、**并且**工作区是 `~/.gemini/autoagy/guardian` 的对话（需要 Node.js 22.13+）。每次审核的结论、风险和理由都留在 autoagy 的决策日志里；开了 `log.reviews` 的话，完整的 prompt 和回复也在 |
 | `autoagy review --tool run_command --args '{"CommandLine":"...","BypassSandbox":true}'` | 不启动 agent，直接测试某个操作会被怎么判 |
 | `autoagy mcp-scan [--timeout 10]` | 逐个启动配置里的 MCP 服务器，问它 `tools/list`，把每个工具的只读/破坏性注解记成快照（配合 `mcp.annotations: "trust"`）。会逐条打印哪个工具声明了什么、以及连不上的服务器 |
 | `autoagy setup` / `autoagy teardown` | 单独执行/撤销设置改动 |
@@ -160,7 +160,7 @@ autoagy review --tool run_command --args '{"CommandLine":"git push","BypassSandb
 
 ## 隐私与数据流向
 
-默认的审核后端在你自己的机器上用你的 Antigravity 登录态跑，**不往第三方发任何东西**；换成 OpenAI 兼容接口时，送出去的是精简后的对话记录加这次的动作，**只截断、不脱敏**。决策日志留在 `~/.gemini/autoagy/logs`，完整的审核 prompt 默认不存。
+默认的审核后端在你自己的机器上用你的 Antigravity 登录态跑，**不往第三方发任何东西**；换成 OpenAI 兼容接口时，送出去的是精简后的对话记录加这次的动作，**只截断、不脱敏**。决策日志留在 `~/.gemini/autoagy/logs`，完整的审核 prompt 默认不存。审核在 agy 里产生的对话会在审核结束约 15 分钟后从 agy 的数据目录里删掉（`reviewer.agy.keepConversations` 可以保留）。
 
 [完整的数据流向清单在参考手册](docs/reference.md#隐私与数据流向)：每次审核到底发出去哪些字段、哪些东西会出现在 agent 能看到的命令行里、日志里存什么。
 

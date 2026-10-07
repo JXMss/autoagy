@@ -143,8 +143,9 @@ function agyReviewer(options, { env, autoagyHome, executable, appDataDir, graceM
 // indexes. agy's own deletion at the cap removes the files and leaves the index
 // rows (493 orphaned rows measured), which agy reconciles at startup, and
 // resuming a deleted id only warns that it was not found. Deleting the files is
-// the same thing done earlier, for conversations nobody returns to: what a
-// review saw and answered is kept in autoagy's own review log.
+// the same thing done earlier, for conversations nobody returns to: a review's
+// verdict and rationale are in autoagy's decision log, and its full prompt and
+// reply in logs/reviews when `log.reviews` is on.
 export const REVIEW_CONVERSATION_GRACE_MS = 15 * 60_000;
 const CONVERSATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 

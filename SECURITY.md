@@ -5,8 +5,8 @@ permissions (a command grant, `mcp(*)`, `execute_url(*)`, `read_file(/)` and,
 where its own sandbox runs, `read_url(*)`) and then sits in front of
 every tool call as the only gate. A bypass therefore does not mean a wrong
 answer — it means something ran on your machine with no review, which is the
-exact thing the plugin exists to prevent. Its own documentation records nineteen
-rounds of bypasses that were found and closed.
+exact thing the plugin exists to prevent. Its own documentation records, round by
+round, the bypasses that were found and closed.
 
 ## Reporting a vulnerability
 
